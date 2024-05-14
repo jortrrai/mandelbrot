@@ -316,7 +316,11 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
         WindowOptions::default(),
     )
     .unwrap_or_else(|e| {
-        panic!("{}", e);
+        match &e {
+            minifb::Error::WindowCreate(s)  | minifb::Error::MenuExists(s) | minifb::Error::UpdateFailed(s) => eprintln!("Failed to create window: {}", s.to_string()),
+            minifb::Error::MenusNotSupported  => todo!(),
+        }
+        panic!("Error creating minifb::Window: {}", e);
     });
     //Print the banner
     print_banner();

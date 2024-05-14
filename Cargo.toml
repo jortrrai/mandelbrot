@@ -14,9 +14,10 @@ categories = ["mathematics", "rendering", "visualization"]
 [dependencies]
 angular-units = "0.2.4"
 chrono = "0.4.26"
-minifb = "0.24.0"
+minifb =  {version = "0.25.0", default-features = false, features = ["wayland"]}
 num = "0.4.0"
 num_cpus = "1.15.0"
 png = "0.17.9"
 prisma = "0.1.1"
 rand = "0.8.5"
+xkbcommon = { version = "0.7", features = ["wayland"] }
