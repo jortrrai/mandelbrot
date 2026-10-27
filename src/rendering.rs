@@ -3,6 +3,9 @@ use std::{time::Instant, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU
 
 use crate::{pixel_buffer::PixelBuffer, complex_plane::ComplexPlane, mandelbrot_set::{MandelbrotSet, LANES}, complex::Complex, coloring::TrueColor};
 
+/// The largest `max_iterations` for which `render_region_progressively` precomputes the color of every iteration count
+const MAX_COLOR_TABLE_ITERATIONS: u32 = 200_000;
+
 /// SplitMix64 finalizer, a well-mixed 64-bit hash: <https://prng.di.unimi.it/splitmix64.c>
 fn splitmix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -238,6 +241,8 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
     let amount_of_threads = render_thread_count();
     let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
     let mut colors: Vec<TrueColor> = base.to_vec();
+    //The color of a pixel only depends on its iteration count, which is at most `max_iterations`, so compute every color once
+    let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| (0..=m.max_iterations).map(|iterations| coloring_function(iterations, m.max_iterations)).collect());
     for sample in 0..supersampling_amount {
         pixels_done.store(0, Ordering::Relaxed);
         let rows = Mutex::new(sums.chunks_mut(width).enumerate());
@@ -255,7 +260,7 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
                         c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y)
                     };
                     let mut add_color = |x: usize, iterations: u32| {
-                        let color = coloring_function(iterations, m.max_iterations);
+                        let color = color_table.as_ref().map_or_else(|| coloring_function(iterations, m.max_iterations), |table| table[iterations as usize]);
                         let sum = &mut row[x];
                         sum[0] += u32::from(color.red);
                         sum[1] += u32::from(color.green);
