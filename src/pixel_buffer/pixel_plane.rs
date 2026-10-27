@@ -1,18 +1,17 @@
-
+/// The size of the pixels of an image: `width` columns and `height` rows
 #[derive(Clone)]
 pub struct PixelPlane {
+    /// The amount of columns
     pub width: usize,
+    /// The amount of rows
     pub height: usize,
-    aspect_ratio_width: usize,
-    aspect_ratio_height: usize
 }
 
 impl PixelPlane {
-    pub fn new(width: usize, height: usize) -> PixelPlane{
-        let gcd = num::integer::gcd(width, height); //Needed to compute the aspect ratio of the pixel plane
-        PixelPlane {width, height, aspect_ratio_width: width/gcd, aspect_ratio_height: height/gcd}
+    /// A pixel plane of `width` x `height` pixels
+    pub fn new(width: usize, height: usize) -> PixelPlane {
+        PixelPlane { width, height }
     }
-
 }
 
 #[cfg(test)]
@@ -20,12 +19,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_aspect_ratio_is_the_size_without_its_common_divisor() {
+    fn a_pixel_plane_has_the_given_size() {
         let plane = PixelPlane::new(1200, 800);
-        assert_eq!((plane.width, plane.height, plane.aspect_ratio_width, plane.aspect_ratio_height), (1200, 800, 3, 2));
-        let plane = PixelPlane::new(64, 48);
-        assert_eq!((plane.aspect_ratio_width, plane.aspect_ratio_height), (4, 3));
-        let plane = PixelPlane::new(7, 7);
-        assert_eq!((plane.aspect_ratio_width, plane.aspect_ratio_height), (1, 1));
+        assert_eq!((plane.width, plane.height), (1200, 800));
     }
 }
