@@ -163,21 +163,83 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
     benchmark("render_box_render_complex_plane_into_buffer()", time);
 }
 
+/// The pixels of a buffer that have to be rendered again after the buffer was shifted with `PixelBuffer::translate_buffer`:
+/// the exposed `columns` and the exposed `rows`. A pixel is exposed if its column or its row is exposed, so a shift in one direction exposes a strip,
+/// and a shift in both directions an L shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExposedRegion {
+    pub columns: std::ops::Range<usize>,
+    pub rows: std::ops::Range<usize>,
+}
+
+impl ExposedRegion {
+    /// Every pixel of a `width` x `height` buffer
+    pub fn full(width: usize, height: usize) -> ExposedRegion {
+        ExposedRegion { columns: 0..width, rows: 0..height }
+    }
+
+    /// The pixels exposed by shifting a `width` x `height` buffer with `PixelBuffer::translate_buffer(rows_up, columns_right)`.
+    /// Returns `None` if the shift is as large as the buffer, since nothing of the old image is then left.
+    pub fn from_shift(width: usize, height: usize, rows_up: i128, columns_right: i128) -> Option<ExposedRegion> {
+        if rows_up.unsigned_abs() >= height as u128 || columns_right.unsigned_abs() >= width as u128 {
+            return None;
+        }
+        let exposed = |shift: i128, size: usize| {
+            let amount = shift.unsigned_abs() as usize;
+            if shift > 0 { 0..amount } else { (size - amount)..size } //Content moves towards the end for positive shifts, so the start is exposed
+        };
+        Some(ExposedRegion { columns: exposed(columns_right, width), rows: exposed(rows_up, height) })
+    }
+
+    pub fn contains(&self, x: usize, y: usize) -> bool {
+        self.columns.contains(&x) || self.rows.contains(&y)
+    }
+
+    /// The amount of pixels in the region of a `width` x `height` buffer
+    pub fn pixel_count(&self, width: usize, height: usize) -> usize {
+        let (columns, rows) = (self.columns.len().min(width), self.rows.len().min(height));
+        columns * height + rows * width - columns * rows
+    }
+}
+
+/// Moves the complex plane `c` so it is centered on `new_center`, without rendering anything.
+/// Returns the `(rows_up, columns_right)` to shift the pixel buffer with `PixelBuffer::translate_buffer`.
+pub fn center_complex_plane_on(c: &mut ComplexPlane, new_center: &Complex) -> (i128, i128) {
+    let mut translation: Complex = new_center.subtract(&c.center());
+    //Mirror the y translation because the screen y is mirrored compared to the complex plane y axis
+    translation.y = -translation.y;
+    c.translate(translation.x, 0.0);
+    let columns = -c.real_to_pixels(translation.x);
+    c.translate(0.0, translation.y);
+    let rows = -c.imaginary_to_pixels(translation.y);
+    (i128::from(rows), i128::from(columns))
+}
+
 /// Renders the whole Complex plane `c` progressively, one supersampling layer (pass) at a time, so intermediate images can be shown early.
-/// Pass `k` computes sample `k` of every pixel, with the same deterministic jitter as `render_box_render_complex_plane_into_buffer`,
+/// See `render_region_progressively`.
+pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, pixels_done: &AtomicUsize, on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
+    let base = vec![TrueColor::new(0, 0, 0); width * height];
+    render_region_progressively(c, m, width, height, &ExposedRegion::full(width, height), &base, supersampling_amount, coloring_function, cancel, pixels_done, on_pass)
+}
+
+/// Renders the pixels of the Complex plane `c` that are inside `region` progressively, one supersampling layer (pass) at a time, so intermediate images can be shown early.
+/// All other pixels keep the colors of `base`, e.g. the shifted image of a previous render, so moving the view only renders the newly exposed pixels.
+/// Pass `k` computes sample `k` of every pixel in the region, with the same deterministic jitter as `render_box_render_complex_plane_into_buffer`,
 /// so after the last pass the colors are identical to the ones that function produces.
-/// `rows_done` is reset to 0 at the start of every pass and incremented for every finished row, so another thread can show how far the current pass is.
-/// After every completed pass, `on_pass` is called with the running average of all samples so far (`width * height` colors, row by row) and the pass number (1-based).
+/// `pixels_done` is reset to 0 at the start of every pass and incremented for every finished pixel, so another thread can show how far the current pass is.
+/// After every completed pass, `on_pass` is called with the colors (`width * height`, row by row): `base`, with the region replaced by the running average of all samples so far, and the pass number (1-based).
 /// Returns `false` if `cancel` was set before all passes completed; the last completed pass has then been reported. A partially computed pass is discarded.
 /// Note: This function is multithreaded; `on_pass` is called on the calling thread
 /// # Panics
-/// If `lock().unwrap()` panics
-pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, rows_done: &AtomicUsize, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
+/// If `lock().unwrap()` panics, or if `base` does not have `width * height` colors
+pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, region: &ExposedRegion, base: &[TrueColor], supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, pixels_done: &AtomicUsize, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
+    assert_eq!(base.len(), width * height, "base should have a color for every pixel");
     let supersampling_amount = supersampling_amount.clamp(1, 64);
     let amount_of_threads = render_thread_count();
     let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
+    let mut colors: Vec<TrueColor> = base.to_vec();
     for sample in 0..supersampling_amount {
-        rows_done.store(0, Ordering::Relaxed);
+        pixels_done.store(0, Ordering::Relaxed);
         let rows = Mutex::new(sums.chunks_mut(width).enumerate());
         thread::scope(|scope| {
             for _ in 0..amount_of_threads {
@@ -187,15 +249,20 @@ pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, h
                     }
                     let next_row = rows.lock().unwrap().next();
                     let Some((y, row)) = next_row else { return };
+                    let mut done = 0;
                     for (x, sum) in row.iter_mut().enumerate() {
+                        if !region.contains(x, y) {
+                            continue;
+                        }
                         let (jitter_x, jitter_y) = sample_jitter(x, y, sample);
                         let complex = c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y);
                         let color = coloring_function(m.iterate(&complex), m.max_iterations);
                         sum[0] += u32::from(color.red);
                         sum[1] += u32::from(color.green);
                         sum[2] += u32::from(color.blue);
+                        done += 1;
                     }
-                    rows_done.fetch_add(1, Ordering::Relaxed);
+                    pixels_done.fetch_add(done, Ordering::Relaxed);
                 });
             }
         });
@@ -203,7 +270,11 @@ pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, h
             return false;
         }
         let divisor = u32::from(sample) + 1;
-        let colors: Vec<TrueColor> = sums.iter().map(|sum| TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8)).collect();
+        for (index, (sum, color)) in sums.iter().zip(colors.iter_mut()).enumerate() {
+            if region.contains(index % width, index / width) {
+                *color = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
+            }
+        }
         on_pass(&colors, sample + 1);
     }
     true
@@ -314,17 +385,52 @@ mod tests {
         let expected = render(width, height, supersampling_amount);
         let c = ComplexPlane::new(width, height);
         let m = MandelbrotSet::new(200, 2.0);
-        let rows_done = AtomicUsize::new(0);
+        let pixels_done = AtomicUsize::new(0);
         let mut passes = Vec::new();
         let mut last = Vec::new();
-        let completed = render_progressively(&c, &m, width, height, supersampling_amount, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &rows_done, |colors, pass| {
+        let completed = render_progressively(&c, &m, width, height, supersampling_amount, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &pixels_done, |colors, pass| {
             passes.push(pass);
             last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
         });
         assert!(completed);
-        assert_eq!(rows_done.load(Ordering::Relaxed), height, "every row of the last pass should be counted");
+        assert_eq!(pixels_done.load(Ordering::Relaxed), width * height, "every pixel of the last pass should be counted");
         assert_eq!(passes, [1, 2, 3, 4]);
         assert_eq!(last, expected, "the last pass should equal the normal render");
+    }
+
+    #[test]
+    fn exposed_region_covers_the_pixels_a_shift_exposes() {
+        assert_eq!(ExposedRegion::from_shift(10, 8, 0, 3), Some(ExposedRegion { columns: 0..3, rows: 8..8 }), "content moves right: the left strip is exposed");
+        assert_eq!(ExposedRegion::from_shift(10, 8, 0, -3), Some(ExposedRegion { columns: 7..10, rows: 8..8 }), "content moves left: the right strip is exposed");
+        assert_eq!(ExposedRegion::from_shift(10, 8, 2, 0), Some(ExposedRegion { columns: 10..10, rows: 0..2 }), "content moves down: the top strip is exposed");
+        assert_eq!(ExposedRegion::from_shift(10, 8, -2, 0), Some(ExposedRegion { columns: 10..10, rows: 6..8 }), "content moves up: the bottom strip is exposed");
+        assert_eq!(ExposedRegion::from_shift(10, 8, 8, 0), None, "a shift as large as the buffer exposes everything");
+        let l_shape = ExposedRegion::from_shift(10, 8, 2, 3).unwrap();
+        assert_eq!(l_shape.pixel_count(10, 8), 3 * 8 + 2 * 10 - 3 * 2);
+        assert_eq!((0..10).flat_map(|x| (0..8).map(move |y| (x, y))).filter(|(x, y)| l_shape.contains(*x, *y)).count(), l_shape.pixel_count(10, 8));
+    }
+
+    #[test]
+    fn region_rendering_only_changes_the_region_and_matches_the_normal_render_there() {
+        let (width, height, supersampling_amount) = (48, 32, 3);
+        let full = render(width, height, supersampling_amount);
+        let c = ComplexPlane::new(width, height);
+        let m = MandelbrotSet::new(200, 2.0);
+        let base = vec![TrueColor::new(1, 2, 3); width * height]; //Stands for an old image
+        let region = ExposedRegion::from_shift(width, height, 4, -5).unwrap();
+        let pixels_done = AtomicUsize::new(0);
+        let mut last = Vec::new();
+        let mut passes = 0;
+        render_region_progressively(&c, &m, width, height, &region, &base, supersampling_amount, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &pixels_done, |colors, pass| {
+            passes = pass;
+            last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
+        });
+        assert_eq!(passes, 3);
+        assert_eq!(pixels_done.load(Ordering::Relaxed), region.pixel_count(width, height), "only the pixels of the region are rendered");
+        for (index, color) in last.iter().enumerate() {
+            let expected = if region.contains(index % width, index / width) { full[index] } else { (1, 2, 3) };
+            assert_eq!(*color, expected, "pixel {index}");
+        }
     }
 
     #[test]
