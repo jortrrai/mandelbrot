@@ -1,7 +1,10 @@
 //Temporary file to group together all rendering functionality
 use std::{time::Instant, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering}}, io::{self, Write}};
 
-use crate::{pixel_buffer::PixelBuffer, complex_plane::ComplexPlane, mandelbrot_set::MandelbrotSet, complex::Complex, coloring::TrueColor};
+use crate::{pixel_buffer::PixelBuffer, complex_plane::ComplexPlane, mandelbrot_set::{MandelbrotSet, LANES}, complex::Complex, coloring::TrueColor};
+
+/// The largest `max_iterations` for which `render_region_progressively` precomputes the color of every iteration count
+const MAX_COLOR_TABLE_ITERATIONS: u32 = 200_000;
 
 /// SplitMix64 finalizer, a well-mixed 64-bit hash: <https://prng.di.unimi.it/splitmix64.c>
 fn splitmix64(mut z: u64) -> u64 {
@@ -135,8 +138,8 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
                         let (jitter_x, jitter_y) = sample_jitter(point.0, point.1, sample);
                         let (x, y) : (f64, f64) = (original_x+jitter_x, original_y+jitter_y);
                         let complex = plane.complex_from_pixel_plane(x, y);
-                        let iterations = ms.iterate(&complex);
-                        let color = coloring_function(iterations, ms.max_iterations);
+                        let position = ms.position(&complex);
+                        let color = ms.interpolated_color(position, |iterations| ms.color(coloring_function, iterations));
                         colors.push(color);    
                     }
                     let supersampled_color = TrueColor::average(&colors);
@@ -232,15 +235,96 @@ pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, h
 /// Note: This function is multithreaded; `on_pass` is called on the calling thread
 /// # Panics
 /// If `lock().unwrap()` panics, or if `base` does not have `width * height` colors
-pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, region: &ExposedRegion, base: &[TrueColor], supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, pixels_done: &AtomicUsize, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
+pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, region: &ExposedRegion, base: &[TrueColor], supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, pixels_done: &AtomicUsize, on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
+    render_region_adaptively(c, m, width, height, region, base, supersampling_amount, None, coloring_function, cancel, pixels_done, on_pass)
+}
+
+/// Settings of adaptive supersampling, see `render_region_adaptively`
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveSampling {
+    /// Two colors differ when the sum of the differences of their red, green and blue channels (0..=765) is above this
+    pub threshold: u32,
+}
+
+impl Default for AdaptiveSampling {
+    fn default() -> Self {
+        AdaptiveSampling { threshold: 48 }
+    }
+}
+
+/// The amount of samples every pixel gets before adaptive supersampling decides where more samples are needed
+pub const ADAPTIVE_UNIFORM_SAMPLES: u8 = 2;
+
+fn color_distance(a: TrueColor, b: TrueColor) -> u32 {
+    u32::from(a.red.abs_diff(b.red)) + u32::from(a.green.abs_diff(b.green)) + u32::from(a.blue.abs_diff(b.blue))
+}
+
+/// The pixels (of `region`) that need more samples: a pixel is marked when its two samples differ (`first` is the color of sample 0, `colors` the average of the uniform samples),
+/// or when it differs from any of its 8 neighbors, and then every marked pixel also marks its 8 neighbors, so a thin feature that only one of the first samples hit is covered on both sides.
+pub fn adaptive_mask(width: usize, height: usize, region: &ExposedRegion, first: &[TrueColor], colors: &[TrueColor], threshold: u32) -> Vec<bool> {
+    let rows_per_chunk = height.div_ceil(render_thread_count()).max(1);
+    let neighbors = |x: usize, y: usize| (y.saturating_sub(1)..=(y + 1).min(height - 1)).flat_map(move |ny| (x.saturating_sub(1)..=(x + 1).min(width - 1)).map(move |nx| ny * width + nx));
+    //Rows are independent in both steps, so they are processed in parallel; the result does not depend on the split
+    let mut marked = vec![false; width * height];
+    thread::scope(|scope| {
+        for (chunk, rows) in marked.chunks_mut(rows_per_chunk * width).enumerate() {
+            scope.spawn(move || {
+                for (row_in_chunk, row) in rows.chunks_mut(width).enumerate() {
+                    let y = chunk * rows_per_chunk + row_in_chunk;
+                    for (x, flag) in row.iter_mut().enumerate() {
+                        if !region.contains(x, y) {
+                            continue;
+                        }
+                        let index = y * width + x;
+                        *flag = color_distance(first[index], colors[index]) > threshold || neighbors(x, y).any(|other| color_distance(colors[index], colors[other]) > threshold);
+                    }
+                }
+            });
+        }
+    });
+    let mut mask = vec![false; width * height];
+    let marked = &marked;
+    thread::scope(|scope| {
+        for (chunk, rows) in mask.chunks_mut(rows_per_chunk * width).enumerate() {
+            scope.spawn(move || {
+                for (row_in_chunk, row) in rows.chunks_mut(width).enumerate() {
+                    let y = chunk * rows_per_chunk + row_in_chunk;
+                    for (x, flag) in row.iter_mut().enumerate() {
+                        *flag = region.contains(x, y) && neighbors(x, y).any(|other| marked[other]);
+                    }
+                }
+            });
+        }
+    });
+    mask
+}
+
+/// Like `render_region_progressively`, but with `adaptive` set the first `ADAPTIVE_UNIFORM_SAMPLES` samples are taken for every pixel, and the later samples
+/// only for the pixels that `adaptive_mask` marks as boundary or detail pixels. The other pixels keep the average of their first samples.
+/// This is a quality/speed heuristic, not equivalent to full supersampling: a feature that neither of the first two samples of a pixel or its neighbors shows can be missed.
+/// With `adaptive` unset, or at most `ADAPTIVE_UNIFORM_SAMPLES` samples, every pixel gets every sample, exactly like `render_region_progressively`.
+/// The pass numbering is unchanged (`on_pass` is called once per sample); the later passes are just cheaper.
+pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, region: &ExposedRegion, base: &[TrueColor], supersampling_amount: u8, adaptive: Option<&AdaptiveSampling>, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, pixels_done: &AtomicUsize, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
     assert_eq!(base.len(), width * height, "base should have a color for every pixel");
     let supersampling_amount = supersampling_amount.clamp(1, 64);
     let amount_of_threads = render_thread_count();
     let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
     let mut colors: Vec<TrueColor> = base.to_vec();
+    //The color of a pixel only depends on its iteration count, which is at most `max_iterations`, so compute every color once
+    let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| (0..=m.max_iterations).map(|iterations| m.color(coloring_function, iterations)).collect());
+    let adaptive = adaptive.filter(|_| supersampling_amount > ADAPTIVE_UNIFORM_SAMPLES);
+    let mut first_colors: Vec<TrueColor> = Vec::new();
+    let mut mask: Option<Vec<bool>> = None;
     for sample in 0..supersampling_amount {
         pixels_done.store(0, Ordering::Relaxed);
-        let rows = Mutex::new(sums.chunks_mut(width).enumerate());
+        let divisor = u32::from(sample) + 1;
+        if let (Some(_), Some(mask)) = (adaptive, &mask) {
+            //The pixels that get no sample in this pass count as done
+            let skipped = (0..height).map(|y| (0..width).filter(|x| region.contains(*x, y) && !mask[y * width + x]).count()).sum();
+            pixels_done.store(skipped, Ordering::Relaxed);
+        }
+        let mask_ref = mask.as_deref();
+        let rows = Mutex::new(sums.chunks_mut(width).zip(colors.chunks_mut(width)).enumerate());
         thread::scope(|scope| {
             for _ in 0..amount_of_threads {
                 scope.spawn(|| loop {
@@ -248,20 +332,37 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
                         return;
                     }
                     let next_row = rows.lock().unwrap().next();
-                    let Some((y, row)) = next_row else { return };
-                    let mut done = 0;
-                    for (x, sum) in row.iter_mut().enumerate() {
-                        if !region.contains(x, y) {
-                            continue;
-                        }
+                    let Some((y, (row, color_row))) = next_row else { return };
+                    let xs: Vec<usize> = (0..width).filter(|x| region.contains(*x, y) && mask_ref.map_or(true, |mask| mask[y * width + x])).collect();
+                    let sample_point = |x: usize| {
                         let (jitter_x, jitter_y) = sample_jitter(x, y, sample);
-                        let complex = c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y);
-                        let color = coloring_function(m.iterate(&complex), m.max_iterations);
+                        c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y)
+                    };
+                    let mut add_color = |x: usize, position: f64| {
+                        let color = m.interpolated_color(position, |iterations| color_table.as_ref().map_or_else(|| m.color(coloring_function, iterations), |table| table[iterations as usize]));
+                        let sum = &mut row[x];
                         sum[0] += u32::from(color.red);
                         sum[1] += u32::from(color.green);
                         sum[2] += u32::from(color.blue);
-                        done += 1;
+                    };
+                    //Iterate LANES pixels at the same time, the remaining pixels one by one
+                    let mut groups = xs.chunks_exact(LANES);
+                    for group in &mut groups {
+                        let points: [Complex; LANES] = std::array::from_fn(|lane| sample_point(group[lane]));
+                        let positions = m.position_lanes(&points);
+                        for (lane, x) in group.iter().enumerate() {
+                            add_color(*x, positions[lane]);
+                        }
                     }
+                    for x in groups.remainder() {
+                        add_color(*x, m.position(&sample_point(*x)));
+                    }
+                    //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
+                    for x in &xs {
+                        let sum = row[*x];
+                        color_row[*x] = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
+                    }
+                    let done = xs.len();
                     pixels_done.fetch_add(done, Ordering::Relaxed);
                 });
             }
@@ -269,10 +370,11 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
         if cancel.load(Ordering::Relaxed) {
             return false;
         }
-        let divisor = u32::from(sample) + 1;
-        for (index, (sum, color)) in sums.iter().zip(colors.iter_mut()).enumerate() {
-            if region.contains(index % width, index / width) {
-                *color = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
+        if let Some(adaptive) = adaptive {
+            if sample == 0 {
+                first_colors = colors.clone();
+            } else if sample + 1 == ADAPTIVE_UNIFORM_SAMPLES {
+                mask = Some(adaptive_mask(width, height, region, &first_colors, &colors, adaptive.threshold));
             }
         }
         on_pass(&colors, sample + 1);
@@ -459,5 +561,131 @@ mod tests {
             distinct.insert(jx.to_bits());
         }
         assert!(distinct.len() > 1500, "jitter should vary per pixel and sample, got {} distinct values", distinct.len());
+    }
+
+    fn adaptive_render(c: &ComplexPlane, m: &MandelbrotSet, w: usize, h: usize, region: &ExposedRegion, base: &[TrueColor], samples: u8, adaptive: Option<&AdaptiveSampling>, cancel: &AtomicBool) -> (Vec<(u8, u8, u8)>, u8, bool) {
+        let mut last = Vec::new();
+        let mut passes = 0;
+        let done = render_region_adaptively(c, m, w, h, region, base, samples, adaptive, TrueColor::new_from_bernstein_polynomials, cancel, &AtomicUsize::new(0), |colors, pass| {
+            last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
+            passes = pass;
+        });
+        (last, passes, done)
+    }
+
+    fn boundary_plane(w: usize, h: usize) -> (ComplexPlane, MandelbrotSet) {
+        let mut c = ComplexPlane::new(w, h);
+        c.set_view(&crate::complex_plane::View::new(-0.7498100000000001, -0.020300000000000054, 0.004));
+        (c, MandelbrotSet::new(300, 2.0))
+    }
+
+    #[test]
+    fn adaptive_sampling_is_uniform_where_marked_and_the_first_samples_elsewhere() {
+        let (w, h) = (96, 64);
+        let (c, m) = boundary_plane(w, h);
+        let (region, base, never) = (ExposedRegion::full(w, h), vec![TrueColor::new(0, 0, 0); w * h], AtomicBool::new(false));
+        let uniform2 = adaptive_render(&c, &m, w, h, &region, &base, 2, None, &never).0;
+        let uniform8 = adaptive_render(&c, &m, w, h, &region, &base, 8, None, &never).0;
+        let adaptive = AdaptiveSampling::default();
+        let (result, passes, done) = adaptive_render(&c, &m, w, h, &region, &base, 8, Some(&adaptive), &never);
+        assert!(done);
+        assert_eq!(passes, 8, "every sample is still reported as a pass");
+        let (mut refined, mut skipped) = (0, 0);
+        for i in 0..w * h {
+            if result[i] == uniform8[i] { refined += 1; } else {
+                assert_eq!(result[i], uniform2[i], "pixel {i} is neither fully supersampled nor the average of the first samples");
+                skipped += 1;
+            }
+        }
+        assert!(refined > 0 && skipped > 0, "a boundary view has both detail and smooth pixels: {refined} refined, {skipped} skipped");
+        assert_eq!(result, adaptive_render(&c, &m, w, h, &region, &base, 8, Some(&adaptive), &never).0, "adaptive rendering is deterministic");
+    }
+
+    #[test]
+    fn adaptive_sampling_with_at_most_two_samples_equals_uniform_and_threshold_zero_refines_everything_that_varies() {
+        let (w, h) = (48, 32);
+        let (c, m) = boundary_plane(w, h);
+        let (region, base, never) = (ExposedRegion::full(w, h), vec![TrueColor::new(0, 0, 0); w * h], AtomicBool::new(false));
+        for samples in [1, 2] {
+            assert_eq!(adaptive_render(&c, &m, w, h, &region, &base, samples, Some(&AdaptiveSampling::default()), &never).0, adaptive_render(&c, &m, w, h, &region, &base, samples, None, &never).0);
+        }
+        let everything = AdaptiveSampling { threshold: 0 };
+        let a = adaptive_render(&c, &m, w, h, &region, &base, 5, Some(&everything), &never).0;
+        let u = adaptive_render(&c, &m, w, h, &region, &base, 5, None, &never).0;
+        let differing = a.iter().zip(&u).filter(|(a, b)| a != b).count();
+        assert!(differing * 20 < w * h, "with threshold 0 almost every pixel is refined and equals the uniform render: {differing} differ");
+    }
+
+    #[test]
+    fn adaptive_sampling_marks_thin_features_and_their_neighbors() {
+        let (w, h) = (9, 9);
+        let region = ExposedRegion::full(w, h);
+        let black = TrueColor::new(0, 0, 0);
+        let mut colors = vec![black; w * h];
+        colors[4 * w + 4] = TrueColor::new(255, 255, 255); //One bright pixel
+        let first = colors.clone();
+        let mask = adaptive_mask(w, h, &region, &first, &colors, 48);
+        for y in 0..h {
+            for x in 0..w {
+                let near = (3..=5).contains(&x) && (3..=5).contains(&y);
+                let near_ring = (2..=6).contains(&x) && (2..=6).contains(&y);
+                assert_eq!(mask[y * w + x], near_ring, "({x}, {y}); the pixel, its neighbors (they differ from it) and their neighbors are marked, near = {near}");
+            }
+        }
+        //A pixel whose two samples differ is marked even if all the averages are the same
+        let mut first = vec![black; w * h];
+        first[0] = TrueColor::new(200, 200, 200);
+        let flat = vec![black; w * h];
+        assert!(adaptive_mask(w, h, &region, &first, &flat, 48)[0]);
+        assert!(!adaptive_mask(w, h, &region, &flat, &flat, 48).iter().any(|m| *m));
+    }
+
+    #[test]
+    fn adaptive_sampling_respects_the_region_and_can_be_cancelled() {
+        let (w, h) = (48, 32);
+        let (c, m) = boundary_plane(w, h);
+        let strip = ExposedRegion::from_shift(w, h, 8, 0).unwrap();
+        let base = vec![TrueColor::new(7, 8, 9); w * h];
+        let (result, _, done) = adaptive_render(&c, &m, w, h, &strip, &base, 6, Some(&AdaptiveSampling::default()), &AtomicBool::new(false));
+        assert!(done);
+        for y in 0..h { for x in 0..w { if !strip.contains(x, y) { assert_eq!(result[y * w + x], (7, 8, 9)); } } }
+        let (_, passes, done) = adaptive_render(&c, &m, w, h, &strip, &base, 6, Some(&AdaptiveSampling::default()), &AtomicBool::new(true));
+        assert!(!done && passes == 0);
+    }
+
+    /// The colors of the progressive render must be those of the scalar functions for the same sample points, for both coloring modes (the width is no multiple of the lanes, so the scalar remainder is used too)
+    #[test]
+    fn rendering_colors_every_pixel_like_the_scalar_functions_with_and_without_smooth_coloring() {
+        let (w, h) = (30, 14);
+        let (c, mut m) = boundary_plane(w, h);
+        for smooth in [false, true] {
+            m.smooth_coloring = smooth;
+            let (region, base, never) = (ExposedRegion::full(w, h), vec![TrueColor::new(0, 0, 0); w * h], AtomicBool::new(false));
+            let (rendered, _, _) = adaptive_render(&c, &m, w, h, &region, &base, 1, None, &never);
+            for y in 0..h {
+                for x in 0..w {
+                    let (jx, jy) = sample_jitter(x, y, 0);
+                    let point = c.complex_from_pixel_plane(x as f64 + jx, y as f64 + jy);
+                    let expected = if smooth {
+                        m.interpolated_color(m.iterate_smooth(&point), |i| m.color(TrueColor::new_from_bernstein_polynomials, i))
+                    } else {
+                        m.color(TrueColor::new_from_bernstein_polynomials, m.iterate(&point))
+                    };
+                    assert_eq!(rendered[y * w + x], (expected.red, expected.green, expected.blue), "smooth = {smooth}, pixel ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smooth_rendering_is_deterministic_and_progressive_passes_are_all_reported() {
+        let (w, h) = (40, 24);
+        let (c, m) = boundary_plane(w, h);
+        let (region, base, never) = (ExposedRegion::full(w, h), vec![TrueColor::new(0, 0, 0); w * h], AtomicBool::new(false));
+        let (a, passes, done) = adaptive_render(&c, &m, w, h, &region, &base, 3, None, &never);
+        assert!(done && passes == 3);
+        assert_eq!(a, adaptive_render(&c, &m, w, h, &region, &base, 3, None, &never).0);
+        let (_, passes, done) = adaptive_render(&c, &m, w, h, &region, &base, 3, None, &AtomicBool::new(true));
+        assert!(!done && passes == 0, "cancelling still works");
     }
 }

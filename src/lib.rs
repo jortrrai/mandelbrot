@@ -32,16 +32,17 @@ use coloring::ColorChannelMapping;
 pub use config::Config;
 
 use crate::coloring::TrueColor;
-use crate::complex_plane::View;
 
 pub mod complex_plane;
 pub mod complex;
 pub mod pixel_buffer;
 pub mod mandelbrot_set;
 pub mod rendering;
+pub mod auto_iterations;
 pub mod coloring;
 pub mod gui;
 pub mod config;
+pub mod points_of_interest;
 
 //Coloring function
 type ColoringFunction = fn(iterations: u32, max_iterations: u32) -> TrueColor;
@@ -49,18 +50,6 @@ static COLORING_FUNCTION : ColoringFunction = TrueColor::new_from_bernstein_poly
 
 //Color channel mapping
 static COLOR_CHANNEL_MAPPING: ColorChannelMapping = ColorChannelMapping::RGB;
-
-//Views
-static VIEW_1: View = View::new(-0.6604166666666667, 0.4437500000000001, 0.1);
-static VIEW_2: View = View::new(-1.0591666666666668, 0.2629166666666668, 0.01);
-static VIEW_3: View = View::new(-0.4624999999999999, 0.55, 0.1);
-static VIEW_4: View = View::new(-0.46395833333333325, 0.5531250000000001, 0.03);
-static VIEW_5: View = View::new(-0.4375218333333333, 0.5632133750000003, 0.00002000000000000002);
-static VIEW_6: View = View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002);
-static VIEW_7: View = View::new(-1.7862712000000047, 0.000052399999999991516, 0.00001677721600000001); 
-static VIEW_8: View = View::new(-1.7862581627050718, 0.00005198056959995248, 0.000006039797760000003); 
-static VIEW_9: View = View::new( -0.4687339999999999, 0.5425518958333333, 0.000010000000000000003);
-static VIEW_0: View = View::new( -0.437520465811966, 0.5632133750000006, 0.000004000000000000004);
 
 //Banner values
 static VERSION: &str = "1.4";
