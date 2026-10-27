@@ -16,6 +16,7 @@ use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
 use crate::rendering::ExposedRegion;
 use crate::{rendering, ColoringFunction, Config, InteractionVariables, COLORING_FUNCTION, COLOR_CHANNEL_MAPPING};
 use crate::points_of_interest::{self, Coloring, PointOfInterest};
+use crate::thumbnails::{self, Lru, ThumbnailRequest};
 
 /// Width in points of the right side panel, used to size the initial window
 pub const SIDE_PANEL_WIDTH: f32 = 380.0;
@@ -38,6 +39,35 @@ enum JobMessage {
     /// The job has finished (or was cancelled), this is its final result
     Done { c: ComplexPlane, p: PixelBuffer, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool },
 }
+
+/// The thumbnail that is being rendered on a background thread
+struct ThumbnailJob {
+    id: u64,
+    key: u64,
+    cancel: Arc<AtomicBool>,
+}
+
+/// A finished thumbnail job: its id, its key, and the image (width, height, RGB bytes) if it was not cancelled
+struct ThumbnailMessage {
+    job: u64,
+    key: u64,
+    image: Option<(usize, usize, Vec<u8>)>,
+}
+
+/// What the list of points of interest showed in a frame
+#[derive(Default)]
+struct PointsFrame {
+    /// The point that was clicked
+    chosen: Option<usize>,
+    /// The thumbnails of the rows that are visible: their keys, and for those that are not cached yet, what to render
+    visible: Vec<u64>,
+    missing: Vec<(u64, ThumbnailRequest)>,
+}
+
+/// The height of a row of the list of points of interest
+const POINT_ROW_HEIGHT: f32 = 104.0;
+/// How many rows the list shows without scrolling
+const POINT_ROWS_SHOWN: f32 = 3.0;
 
 /// What the render progress bar shows: the time of every finished layer and how far the current layer is.
 /// It stays visible after the render has finished, showing the benchmark of that render.
@@ -126,6 +156,15 @@ pub struct MandelbrotApp {
     /// The points of interest of the folder, see `points_of_interest`, and the folder they were loaded from
     points: Vec<PointOfInterest>,
     points_folder: std::path::PathBuf,
+    /// The thumbnails of the points of interest that were shown lately, at most `thumbnails::MAX_CACHED`, and the one that is being rendered, see `thumbnails`
+    thumbs: Lru<TextureHandle>,
+    thumb_job: Option<ThumbnailJob>,
+    thumb_results: Receiver<ThumbnailMessage>,
+    thumb_sender: Sender<ThumbnailMessage>,
+    thumb_job_counter: u64,
+    /// How many thumbnails were started in total, and the keys of the thumbnails that were visible in the last frame
+    thumbnails_started: u64,
+    thumbs_visible: Vec<u64>,
     /// Whether going to a point of interest also restores the appearance saved in its file (the coloring and the color channels); off by default
     restore_appearance: bool,
     /// Edited text of the "go to view" fields
@@ -154,6 +193,7 @@ impl MandelbrotApp {
         p.color_channel_mapping = COLOR_CHANNEL_MAPPING;
         let m = MandelbrotSet::new(config.max_iterations, config.orbit_radius);
         let (notice_sender, notices) = mpsc::channel();
+        let (thumb_sender, thumb_results) = mpsc::channel();
         let mut app = MandelbrotApp {
             c,
             p,
@@ -172,6 +212,13 @@ impl MandelbrotApp {
             supersampling_input: config.supersampling_amount,
             image_supersampling_amount: config.supersampling_amount,
             points: Vec::new(),
+            thumbs: Lru::new(thumbnails::MAX_CACHED),
+            thumb_job: None,
+            thumb_results,
+            thumb_sender,
+            thumb_job_counter: 0,
+            thumbnails_started: 0,
+            thumbs_visible: Vec::new(),
             points_folder: std::path::PathBuf::new(),
             restore_appearance: false,
             view_inputs: [String::new(), String::new(), String::new()],
@@ -291,6 +338,7 @@ impl MandelbrotApp {
     }
 
     fn start_render(&mut self, message: &str, strip: Option<((i128, i128), ExposedRegion)>) {
+        self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();
         self.buffer_is_complete = false;
         let (sender, receiver) = mpsc::channel();
@@ -415,6 +463,108 @@ impl MandelbrotApp {
         self.log("Saving the image...");
     }
 
+    fn cancel_thumbnail_job(&mut self) {
+        if let Some(job) = self.thumb_job.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The thumbnail request of a point: its location with the appearance that going to the point would use (the saved one when appearances are restored, otherwise the current one)
+    fn thumbnail_request_for(point: &PointOfInterest, coloring_index: usize, restore_appearance: bool, mapping: ColorChannelMapping, window: (usize, usize)) -> ThumbnailRequest {
+        let current = if coloring_index == 0 { Coloring::Hsv } else { Coloring::Bernstein }; //See COLORING_FUNCTIONS
+        let saved = point.appearance.as_ref().filter(|_| restore_appearance);
+        ThumbnailRequest {
+            location: point.location.clone(),
+            coloring: saved.and_then(|appearance| appearance.coloring).unwrap_or(current),
+            color_channels: saved.and_then(|appearance| appearance.color_channels).unwrap_or(mapping),
+            width: thumbnails::THUMBNAIL_WIDTH,
+            height: thumbnails::thumbnail_height(window.0, window.1),
+        }
+    }
+
+    /// Takes the thumbnails that were finished by the background thread
+    fn poll_thumbnails(&mut self, ctx: &egui::Context) {
+        while let Ok(message) = self.thumb_results.try_recv() {
+            if self.thumb_job.as_ref().is_some_and(|job| job.id == message.job) {
+                self.thumb_job = None;
+            }
+            if let Some((width, height, rgb)) = message.image {
+                let texture = ctx.load_texture(format!("point-of-interest-{}", message.key), ColorImage::from_rgb([width, height], &rgb), TextureOptions::LINEAR);
+                self.thumbs.insert(message.key, texture); //Drops the least recently shown thumbnail when there are too many
+            }
+        }
+    }
+
+    /// Decides which thumbnail to render next: only a visible one that is not cached, only one at a time, and never while the main view renders.
+    /// A running thumbnail that is no longer visible, or that is in the way of the main view, is cancelled.
+    fn schedule_thumbnails(&mut self, ctx: &egui::Context, frame: &PointsFrame) {
+        if self.thumb_job.as_ref().is_some_and(|job| !frame.visible.contains(&job.key) || self.is_busy()) {
+            self.cancel_thumbnail_job();
+        }
+        if !self.is_busy() && self.thumb_job.is_none() {
+            if let Some((key, request)) = frame.missing.first().cloned() {
+                self.thumb_job_counter += 1;
+                self.thumbnails_started += 1;
+                let (id, cancel) = (self.thumb_job_counter, Arc::new(AtomicBool::new(false)));
+                self.thumb_job = Some(ThumbnailJob { id, key, cancel: Arc::clone(&cancel) });
+                let (sender, orbit_radius) = (self.thumb_sender.clone(), self.config.orbit_radius);
+                std::thread::spawn(move || {
+                    let image = thumbnails::render_thumbnail(&request, orbit_radius, &cancel).map(|colors| {
+                        let pixels = PixelBuffer::colors_to_pixels(&colors, &request.color_channels);
+                        let rgb: Vec<u8> = pixels.iter().flat_map(|pixel| [(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8]).collect();
+                        (request.width, request.height, rgb)
+                    });
+                    let _ = sender.send(ThumbnailMessage { job: id, key, image }); //The receiver is gone if the window was closed
+                });
+            }
+        }
+        if self.thumb_job.is_some() || !frame.missing.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(30)); //Keep polling for the thumbnail, and start the next one when the main view is idle
+        }
+    }
+
+    /// Draws the list of points of interest with their thumbnails. Only the rows that are visible are drawn, and only their thumbnails are looked up or requested,
+    /// so the work does not depend on how many points there are.
+    fn points_ui(&mut self, ui: &mut egui::Ui) -> PointsFrame {
+        let mut frame = PointsFrame::default();
+        let (width, height) = (thumbnails::THUMBNAIL_WIDTH as f32, thumbnails::thumbnail_height(self.config.window_width, self.config.window_height) as f32);
+        egui::ScrollArea::vertical().id_salt("points_of_interest_list").max_height(POINT_ROW_HEIGHT * POINT_ROWS_SHOWN).auto_shrink([false, true]).show_rows(ui, POINT_ROW_HEIGHT, self.points.len(), |ui, rows| {
+            for index in rows {
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), POINT_ROW_HEIGHT - 4.0), egui::Sense::click());
+                let point = &self.points[index];
+                let request = Self::thumbnail_request_for(point, self.coloring_index, self.restore_appearance, self.p.color_channel_mapping, (self.config.window_width, self.config.window_height));
+                //Visible: at least a quarter of the row is inside the list and inside the scrolling controls around it (not clipped away)
+                let shown = rect.intersect(ui.clip_rect());
+                let visible = shown.is_positive() && shown.height() >= rect.height() * 0.25;
+                let thumbnail_rect = egui::Rect::from_min_size(rect.min + egui::vec2(2.0, 2.0), egui::vec2(width, height));
+                let painter = ui.painter_at(rect);
+                if response.hovered() {
+                    painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                }
+                let key = request.key();
+                if visible {
+                    frame.visible.push(key);
+                    match self.thumbs.get(key) {
+                        Some(texture) => {
+                            painter.image(texture.id(), thumbnail_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                        }
+                        None => {
+                            painter.rect_filled(thumbnail_rect, 2.0, Color32::from_gray(30));
+                            painter.text(thumbnail_rect.center(), egui::Align2::CENTER_CENTER, "...", egui::FontId::proportional(14.0), Color32::GRAY);
+                            frame.missing.push((key, request));
+                        }
+                    }
+                }
+                painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 2.0), egui::Align2::LEFT_TOP, &point.name, egui::FontId::proportional(14.0), ui.visuals().strong_text_color());
+                let response = if point.description.is_empty() { response } else { response.on_hover_text(&point.description) };
+                if response.clicked() {
+                    frame.chosen = Some(index);
+                }
+            }
+        });
+        frame
+    }
+
     /// Loads the points of interest of `folder`, and logs how many were found and every problem (a skipped file, an ignored appearance)
     fn load_points_of_interest(&mut self, folder: std::path::PathBuf) {
         let report = points_of_interest::load_folder(&folder);
@@ -537,25 +687,17 @@ impl MandelbrotApp {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Points of interest:");
-            let mut chosen = None;
-            egui::ComboBox::from_id_salt("points_of_interest").selected_text("Pick a place").show_ui(ui, |ui| {
-                for (index, point) in self.points.iter().enumerate() {
-                    let mut response = ui.selectable_label(false, &point.name);
-                    if !point.description.is_empty() {
-                        response = response.on_hover_text(&point.description);
-                    }
-                    if response.clicked() {
-                        chosen = Some(index);
-                    }
-                }
-            });
             if ui.button("Reload").on_hover_text(format!("Loads the .json files of {} again", self.points_folder.display())).clicked() {
                 self.load_points_of_interest(self.points_folder.clone());
             }
-            if let Some(index) = chosen {
-                self.go_to_point_of_interest(index);
-            }
         });
+        let frame = self.points_ui(ui);
+        self.thumbs_visible = frame.visible.clone();
+        let ctx = ui.ctx().clone();
+        self.schedule_thumbnails(&ctx, &frame);
+        if let Some(index) = frame.chosen {
+            self.go_to_point_of_interest(index);
+        }
         ui.checkbox(&mut self.restore_appearance, "Restore the saved appearance (coloring, color channels)").on_hover_text("Off: going to a place keeps your current appearance. The supersampling is never part of a place.");
         ui.horizontal(|ui| {
             for (input, hint) in self.view_inputs.iter_mut().zip(["x", "y", "scale"]) {
@@ -795,6 +937,7 @@ impl eframe::App for MandelbrotApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_job();
+        self.poll_thumbnails(&ctx);
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
         }
@@ -1240,5 +1383,127 @@ mod tests {
         let texts = side_panel_texts(&mut app);
         assert!(texts.iter().any(|t| t == "\u{d7}1.56e4 (2^13.9)") && texts.iter().any(|t| t.starts_with("-0.74981000000000")), "{texts:?}");
         wait_for_job(&mut app);
+    }
+
+    /// One frame of the controls (with the lists of points of interest) in a window of 600 x `height` points; finished thumbnails are taken first, like `eframe::App::ui` does
+    fn controls_frame(app: &mut MandelbrotApp, ctx: &egui::Context, height: f32) {
+        app.poll_thumbnails(ctx);
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, height))), ..Default::default() }, |ui| app.controls_ui(ui));
+        output.drop_without_applying_deltas();
+    }
+
+    /// Frames until every visible thumbnail is cached (and no job runs), with a time limit
+    fn frames_until_thumbnails_are_done(app: &mut MandelbrotApp, ctx: &egui::Context, height: f32) {
+        let start = std::time::Instant::now();
+        loop {
+            controls_frame(app, ctx, height);
+            if app.thumb_job.is_none() && !app.thumbs_visible.is_empty() && app.thumbs_visible.iter().all(|key| app.thumbs.contains(*key)) {
+                return;
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "the thumbnails were not finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// `count` places; with `slow` they are boundary views with an enormous iteration limit (capped by the thumbnails), which take a noticeable time to render
+    fn many_points(count: usize, slow: bool) -> Vec<(String, String)> {
+        (0..count).map(|i| {
+            let text = HSV_BGR_PLACE.replace("Test Place", &format!("Place {i:03}"));
+            let text = if slow { text.replace("\"max_iterations\": 321", "\"max_iterations\": 1000000") } else { text.replace("0.00006400000000000002", &format!("0.{:04}", 2 + i)).replace("\"max_iterations\": 321", "\"max_iterations\": 120") };
+            (format!("place-{i:03}.json"), text)
+        }).collect()
+    }
+
+    fn app_with_many_points(count: usize) -> (MandelbrotApp, std::path::PathBuf) {
+        app_with_places(many_points(count, false))
+    }
+
+    fn app_with_places(files: Vec<(String, String)>) -> (MandelbrotApp, std::path::PathBuf) {
+        let borrowed: Vec<(&str, &str)> = files.iter().map(|(name, text)| (name.as_str(), text.as_str())).collect();
+        app_with_points(&borrowed)
+    }
+
+    #[test]
+    fn only_the_visible_thumbnails_are_rendered_however_many_points_there_are() {
+        let (mut app, folder) = app_with_many_points(25);
+        assert_eq!(app.points.len(), 25);
+        let ctx = egui::Context::default();
+        frames_until_thumbnails_are_done(&mut app, &ctx, 1000.0);
+        let visible = app.thumbs_visible.len();
+        assert!((1..=5).contains(&visible), "a list of three rows shows a few of the 25 points: {visible}");
+        assert_eq!(app.thumbnails_started, visible as u64, "exactly the visible thumbnails were rendered, each once");
+        assert_eq!(app.thumbs.len(), visible);
+        //More frames do not render anything more
+        for _ in 0..5 {
+            controls_frame(&mut app, &ctx, 1000.0);
+        }
+        assert_eq!(app.thumbnails_started, visible as u64);
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn nothing_is_rendered_while_the_list_is_scrolled_or_clipped_out_of_view() {
+        let (mut app, folder) = app_with_many_points(25);
+        let ctx = egui::Context::default();
+        for _ in 0..10 {
+            controls_frame(&mut app, &ctx, 100.0); //The list is below the bottom of this window
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.thumbs_visible.is_empty());
+        assert_eq!((app.thumbnails_started, app.thumbs.len()), (0, 0));
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn a_running_thumbnail_is_cancelled_when_it_leaves_the_view_and_when_the_main_view_renders() {
+        let (mut app, folder) = app_with_places(many_points(25, true));
+        let ctx = egui::Context::default();
+        controls_frame(&mut app, &ctx, 1000.0);
+        let job = app.thumb_job.as_ref().expect("a visible thumbnail is rendered when the window is idle");
+        let first_cancel = Arc::clone(&job.cancel);
+        //The list goes out of view: the thumbnail is cancelled
+        controls_frame(&mut app, &ctx, 100.0);
+        assert!(first_cancel.load(Ordering::Relaxed) && app.thumb_job.is_none());
+
+        //A thumbnail runs, then the main view renders: the thumbnail is cancelled and no other one starts while the main view renders
+        std::thread::sleep(Duration::from_millis(100));
+        controls_frame(&mut app, &ctx, 1000.0);
+        let started = app.thumbnails_started;
+        let second_cancel = Arc::clone(&app.thumb_job.as_ref().map(|job| &job.cancel).expect("a thumbnail job runs again"));
+        app.render("Rendering the main view");
+        assert!(second_cancel.load(Ordering::Relaxed) && app.thumb_job.is_none(), "the main view has priority");
+        for _ in 0..10 {
+            controls_frame(&mut app, &ctx, 1000.0);
+            if !app.is_busy() {
+                break;
+            }
+            assert_eq!(app.thumbnails_started, started, "no thumbnail starts while the main view renders");
+            assert!(app.thumb_job.is_none());
+        }
+        //When the main view is done, the thumbnails continue
+        wait_for_job(&mut app);
+        frames_until_thumbnails_are_done(&mut app, &ctx, 1000.0);
+        assert!(app.thumbnails_started > started);
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn the_resident_thumbnails_are_bounded_and_follow_the_appearance_that_going_to_a_place_would_use() {
+        let (mut app, folder) = app_with_many_points(3);
+        let ctx = egui::Context::default();
+        for key in 0..300u64 {
+            app.thumbs.insert(key, ctx.load_texture(format!("t{key}"), ColorImage::from_rgb([2, 2], &[0u8; 12]), TextureOptions::LINEAR));
+            assert!(app.thumbs.len() <= thumbnails::MAX_CACHED);
+        }
+        //The thumbnail looks like the place does when going to it: with the current appearance, or the saved one when appearances are restored
+        let point = app.points[0].clone();
+        let current = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, false, app.p.color_channel_mapping, (64, 48));
+        let restored = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, true, app.p.color_channel_mapping, (64, 48));
+        assert_eq!(current.coloring, Coloring::Bernstein, "the current appearance of the window");
+        assert_eq!(restored.coloring, Coloring::Hsv, "the saved appearance of the file");
+        assert_ne!(current.key(), restored.key(), "another appearance is another thumbnail");
+        assert_eq!(current.location, restored.location);
+        assert_eq!(current.height, thumbnails::thumbnail_height(64, 48));
+        let _ = std::fs::remove_dir_all(folder);
     }
 }
