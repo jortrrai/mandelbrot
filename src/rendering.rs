@@ -1,9 +1,23 @@
 //Temporary file to group together all rendering functionality
 use std::{time::Instant, thread, sync::{Arc, Mutex, atomic::{AtomicU8, Ordering}}, io::{self, Write}};
 
-use rand::Rng;
-
 use crate::{pixel_buffer::PixelBuffer, complex_plane::ComplexPlane, mandelbrot_set::MandelbrotSet, complex::Complex, coloring::TrueColor};
+
+/// SplitMix64 finalizer, a well-mixed 64-bit hash: <https://prng.di.unimi.it/splitmix64.c>
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Deterministic supersampling jitter in [0, 1) x [0, 1) for sample number `sample` of the pixel at (`x`, `y`).
+/// Depends only on its arguments, not on thread scheduling, so identical inputs always render identical images.
+fn sample_jitter(x: usize, y: usize, sample: u8) -> (f64, f64) {
+    let h = splitmix64(splitmix64(splitmix64(x as u64) ^ y as u64) ^ u64::from(sample));
+    let to_unit = |bits: u64| (bits >> 11) as f64 / (1u64 << 53) as f64; //53 random bits, like rand's f64 sampling
+    (to_unit(h), to_unit(splitmix64(h)))
+}
 
 ///A box representing the area to render by rendering functions
 #[derive(Clone,Copy)]
@@ -112,9 +126,9 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
                     let original_y: f64 = f64::from(point.1 as u32);
                     //Supersampling, see: https://darkeclipz.github.io/fractals/paper/Fractals%20&%20Rendering%20Techniques.html
                     let mut colors: Vec<TrueColor> = Vec::new();
-                    for _ in 0..supersampling_amount {
-                        let (random_x, random_y): (f64, f64) = rand::thread_rng().gen::<(f64,f64)>();
-                        let (x, y) : (f64, f64) = (original_x+random_x, original_y+random_y);
+                    for sample in 0..supersampling_amount {
+                        let (jitter_x, jitter_y) = sample_jitter(point.0, point.1, sample);
+                        let (x, y) : (f64, f64) = (original_x+jitter_x, original_y+jitter_y);
                         let complex = plane.complex_from_pixel_plane(x, y);
                         let iterations = ms.iterate(&complex);
                         let color = coloring_function(iterations, ms.max_iterations);
@@ -207,4 +221,39 @@ fn print_progress_bar(current_progress: u8, max_progress: u8) {
     }
     print!("]");
     io::stdout().flush().unwrap();
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pixel_buffer::pixel_plane::PixelPlane;
+
+    fn render(width: usize, height: usize, supersampling_amount: u8) -> Vec<(u8, u8, u8)> {
+        let mut p = PixelBuffer::new(PixelPlane::new(width, height));
+        let c = ComplexPlane::new(width, height);
+        let m = MandelbrotSet::new(200, 2.0);
+        render_complex_plane_into_buffer(&mut p, &c, &m, supersampling_amount, TrueColor::new_from_bernstein_polynomials);
+        p.colors.iter().map(|c| (c.red, c.green, c.blue)).collect()
+    }
+
+    #[test]
+    fn rendering_is_reproducible() {
+        for ssaa in [1, 4] {
+            let first = render(64, 48, ssaa);
+            for _ in 0..3 {
+                assert_eq!(first, render(64, 48, ssaa), "ssaa = {ssaa}");
+            }
+        }
+    }
+
+    #[test]
+    fn sample_jitter_is_in_unit_square_and_varies() {
+        let mut distinct = std::collections::HashSet::new();
+        for (x, y, sample) in (0..20).flat_map(|x| (0..20).flat_map(move |y| (0..4).map(move |s| (x, y, s)))) {
+            let (jx, jy) = sample_jitter(x, y, sample);
+            assert!((0.0..1.0).contains(&jx) && (0.0..1.0).contains(&jy));
+            assert_eq!((jx, jy), sample_jitter(x, y, sample));
+            distinct.insert(jx.to_bits());
+        }
+        assert!(distinct.len() > 1500, "jitter should vary per pixel and sample, got {} distinct values", distinct.len());
+    }
 }
