@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 
-use crate::auto_iterations::{self, AutoIterationSettings};
+use crate::auto_iterations::{self, AutoIterationSettings, AutoPreset};
 use crate::coloring::{ColorChannelMapping, TrueColor};
 use crate::complex_plane::{ComplexPlane, View};
 use crate::mandelbrot_set::MandelbrotSet;
@@ -36,6 +36,8 @@ const VIEWS: [(&str, &View); 10] = [
 enum JobMessage {
     /// An intermediate image: the running average of the first `pass` of `total` supersampling layers
     Pass { colors: Vec<TrueColor>, pass: u8, total: u8, layer_time: Duration },
+    /// The iteration limit that auto iterations chose for the render, sent as soon as it is known, before the first layer is rendered
+    Limit { max_iterations: u32, palette_scale: u32 },
     /// The job has finished (or was cancelled), this is its final result
     Done { c: ComplexPlane, p: PixelBuffer, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool },
 }
@@ -91,6 +93,11 @@ pub struct MandelbrotApp {
     /// Whether the maximum iterations are chosen automatically for the zoom of every render, see `auto_iterations`
     auto_iterations: bool,
     auto_settings: AutoIterationSettings,
+    auto_preset: AutoPreset,
+    /// Whether the displayed auto limit is only the starting limit of the running render, because the probes that refine it have not finished
+    limit_pending: bool,
+    /// Whether supersampling puts the extra samples on boundary and detail pixels only, see `rendering::render_region_adaptively`
+    adaptive_supersampling: bool,
     /// Edited value of the supersampling field, applied when editing ends
     supersampling_input: u8,
     /// Edited text of the "go to view" fields
@@ -124,7 +131,10 @@ impl MandelbrotApp {
             p,
             max_iterations_input: m.max_iterations,
             auto_iterations: false,
-            auto_settings: AutoIterationSettings::default(),
+            auto_settings: AutoPreset::Balanced.settings(),
+            auto_preset: AutoPreset::Balanced,
+            limit_pending: false,
+            adaptive_supersampling: false,
             m,
             vars: InteractionVariables::default(),
             config: config.clone(),
@@ -200,8 +210,15 @@ impl MandelbrotApp {
                         bars.layer_started = Instant::now();
                     }
                 }
+                Ok(JobMessage::Limit { max_iterations, palette_scale }) => {
+                    //Only the running job can send this: the receiver of an interrupted job is dropped, so a stale limit never reaches the display
+                    self.m.max_iterations = max_iterations;
+                    self.m.palette_scale = Some(palette_scale);
+                    self.limit_pending = false;
+                }
                 Ok(JobMessage::Done { c, p, m, message, elapsed, completed }) => {
                     self.job = None;
+                    self.limit_pending = false;
                     self.m = m; //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept
                     self.buffer_is_complete = completed;
                     if self.progress.take().is_some() {
@@ -245,13 +262,25 @@ impl MandelbrotApp {
         self.interrupt_progressive_render();
         self.buffer_is_complete = false;
         let (sender, receiver) = mpsc::channel();
-        let (c, mut p, mut m) = (self.c.clone(), self.p.clone(), self.m.clone());
+        let (c, mut p) = (self.c.clone(), self.p.clone());
+        let adaptive = self.adaptive_supersampling.then(rendering::AdaptiveSampling::default);
         let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
-        if !self.auto_iterations {
-            m.max_iterations = self.max_iterations_input; //Manual mode: the value of the field, not the limit that auto mode chose
-        }
         //The pixels of a buffer that was rendered with the other mode have another limit and palette, so they cannot be reused
         let strip = strip.filter(|_| self.auto_iterations == self.m.palette_scale.is_some());
+        //Publish the limit of the new render right away, before anything is rendered: the starting limit of the auto settings (cheap and deterministic), refined by the job as soon as its probes finish
+        self.limit_pending = false;
+        if self.auto_iterations {
+            if strip.is_none() {
+                let initial = self.auto_settings.initial_limit(self.c.get_scale());
+                self.m.max_iterations = initial;
+                self.m.palette_scale = Some(initial);
+                self.limit_pending = true;
+            }
+        } else {
+            self.m.max_iterations = self.max_iterations_input;
+            self.m.palette_scale = None;
+        }
+        let mut m = self.m.clone();
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
         let pixels_total = strip.as_ref().map_or(width * height, |(_, region)| region.pixel_count(width, height));
@@ -269,6 +298,7 @@ impl MandelbrotApp {
                 //Choose the iteration limit for this zoom first; a cancelled choice cancels the render
                 match auto_iterations::choose_limit(&c, &m, width, height, settings, rendering::render_thread_count(), &thread_cancel) {
                     Some(result) => {
+                        let _ = sender.send(JobMessage::Limit { max_iterations: result.limit, palette_scale: result.palette_scale });
                         m.max_iterations = result.limit;
                         m.palette_scale = Some(result.palette_scale);
                         message = format!("{message} (auto iterations: limit {}, {} rounds, {:?}, {:.2} s)", result.limit, result.rounds.len(), result.stop, started.elapsed().as_secs_f64());
@@ -291,7 +321,7 @@ impl MandelbrotApp {
             };
             let base = p.colors.clone();
             let mut layer_started = started;
-            let completed = rendering::render_region_progressively(&c, &m, width, height, &region, &base, supersampling_amount, coloring_function, &thread_cancel, &thread_pixels_done, |colors, pass| {
+            let completed = rendering::render_region_adaptively(&c, &m, width, height, &region, &base, supersampling_amount, adaptive.as_ref(), coloring_function, &thread_cancel, &thread_pixels_done, |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 p.colors.copy_from_slice(colors);
                 let layer_time = layer_started.elapsed();
@@ -310,6 +340,17 @@ impl MandelbrotApp {
         self.log("Rendering...");
     }
 
+    /// Selects an auto iterations preset. With auto iterations on, the limit of the preset is published immediately (see `start_render`) and the render with it starts in the background.
+    fn select_preset(&mut self, preset: AutoPreset) {
+        self.auto_preset = preset;
+        self.auto_settings = preset.settings();
+        if self.auto_iterations {
+            self.render(&format!("Set the auto iterations preset to {}", preset.name()));
+        } else {
+            self.log(format!("Set the auto iterations preset to {}", preset.name()));
+        }
+    }
+
     fn translate(&mut self, name: &str, rows_up: i16, columns_right: i16) {
         rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
         //Moving the view to the right moves the content of the buffer to the left
@@ -323,7 +364,7 @@ impl MandelbrotApp {
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
         let (c, p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
         let (config, image_supersampling_amount, coloring_function) = (self.config.clone(), self.image_supersampling_amount, self.coloring_function);
-        let buffer_is_complete = self.progress.is_none();
+        let buffer_is_complete = self.progress.is_none() && !self.adaptive_supersampling; //An adaptively sampled buffer is not a full-quality image of the saved quality
         let sender = self.notice_sender.clone();
         std::thread::spawn(move || {
             let view = c.get_view();
@@ -453,16 +494,38 @@ impl MandelbrotApp {
                 self.render(&format!("Set max. iterations to {}", self.m.max_iterations));
             }
         });
-        let auto_response = ui.checkbox(&mut self.auto_iterations, "Auto iterations").on_hover_text("Chooses the max. iterations for the zoom of every render: a starting limit that grows with the magnification, raised while the extra iterations make more pixels escape. A heuristic, not a proof: very narrow detail can be missed.");
-        if auto_response.changed() {
+        let mut preset_selected: Option<AutoPreset> = None;
+        let mut auto_changed = false;
+        ui.horizontal(|ui| {
+            auto_changed = ui.checkbox(&mut self.auto_iterations, "Auto iterations").on_hover_text("Chooses the max. iterations for the zoom of every render: a starting limit that grows with the magnification, raised while the extra iterations make more pixels escape. A heuristic, not a proof: very narrow detail can be missed.").changed();
+            egui::ComboBox::from_id_salt("auto_preset").selected_text(self.auto_preset.name()).show_ui(ui, |ui| {
+                for preset in AutoPreset::SELECTABLE {
+                    if ui.selectable_label(self.auto_preset == preset, preset.name()).on_hover_text(match preset {
+                        AutoPreset::Performance => "Lower limits, coarser probes: faster, may leave deep boundary detail unresolved",
+                        AutoPreset::Balanced => "The default",
+                        _ => "Higher limits, finer probes: resolves more structure, can be much slower",
+                    }).clicked() && self.auto_preset != preset {
+                        preset_selected = Some(preset);
+                    }
+                }
+            });
+        });
+        if let Some(preset) = preset_selected {
+            self.select_preset(preset);
+        }
+        if auto_changed {
             if self.auto_iterations {
                 self.render("Turned auto iterations on");
             } else {
                 self.render(&format!("Turned auto iterations off, max. iterations {}", self.max_iterations_input));
             }
         }
+        if ui.checkbox(&mut self.adaptive_supersampling, "Adaptive supersampling").on_hover_text("Takes the first 2 samples of every pixel, and the remaining samples only for boundary and detail pixels (and their neighbors). Faster on smooth views; a heuristic that can differ from full supersampling. Saved images always use the full saved image quality.").changed() {
+            let state = if self.adaptive_supersampling { "on" } else { "off" };
+            self.render(&format!("Turned adaptive supersampling {state}"));
+        }
         if self.auto_iterations {
-            ui.label(format!("Current limit: {} iterations (chosen automatically)", self.m.max_iterations));
+            ui.label(format!("Current limit: {} iterations ({})", self.m.max_iterations, if self.limit_pending { "starting value, being refined..." } else { "chosen automatically" }));
             ui.horizontal(|ui| {
                 ui.label("Start at zoom 1:");
                 let a = ui.add(egui::DragValue::new(&mut self.auto_settings.start).range(10..=100_000).speed(10.0));
@@ -471,6 +534,7 @@ impl MandelbrotApp {
                 ui.label("up to:");
                 let c = ui.add(egui::DragValue::new(&mut self.auto_settings.ceiling).range(100..=200_000).speed(100.0));
                 if [a, b, c].iter().any(|r| r.drag_stopped() || r.lost_focus()) {
+                    self.auto_preset = if self.auto_settings.start == self.auto_preset.settings().start && self.auto_settings.per_doubling == self.auto_preset.settings().per_doubling && self.auto_settings.ceiling == self.auto_preset.settings().ceiling { self.auto_preset } else { AutoPreset::Custom };
                     self.render("Changed the auto iterations settings");
                 }
             });
@@ -483,10 +547,6 @@ impl MandelbrotApp {
                 self.image_supersampling_amount = self.supersampling_input;
                 self.render(&format!("Set the supersampling to {}x", self.supersampling_amount));
             }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Saved image quality:");
-            ui.add(egui::DragValue::new(&mut self.image_supersampling_amount).range(1..=64).suffix("x"));
         });
 
         ui.separator();
@@ -524,9 +584,15 @@ impl MandelbrotApp {
         });
 
         ui.separator();
+        ui.heading("Save Image");
+        ui.horizontal(|ui| {
+            ui.label("Saved image quality:");
+            ui.add(egui::DragValue::new(&mut self.image_supersampling_amount).range(1..=64).suffix("x"));
+        });
         if ui.button("Save image").clicked() {
             self.save_image();
         }
+        ui.separator();
         ui.label("Click the fractal to see a point's coordinates, right-click to center the view on it.");
     }
 
@@ -809,5 +875,110 @@ mod tests {
         wait_for_job(&mut app);
         assert_eq!(app.m.palette_scale, None);
         assert_eq!(app.bars.as_ref().unwrap().pixels_total, 64 * 48, "the buffer was colored with the auto palette and is rendered again");
+    }
+
+    #[test]
+    fn presets_and_adaptive_supersampling_toggle_independently_of_auto_iterations() {
+        let config = Config::build(["mandelbrot", "64", "48", "50", "4"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        assert_eq!(app.auto_preset, AutoPreset::Balanced, "Balanced is the default");
+        assert!(!app.auto_iterations && !app.adaptive_supersampling);
+        let uniform = app.p.pixels.clone();
+
+        //Adaptive supersampling works in manual mode, and switching it off gives the uniform image again
+        app.adaptive_supersampling = true;
+        app.render("adaptive on");
+        wait_for_job(&mut app);
+        assert_eq!(app.m.palette_scale, None);
+        assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 4, "every layer is still reported");
+        app.adaptive_supersampling = false;
+        app.render("adaptive off");
+        wait_for_job(&mut app);
+        assert_eq!(app.p.pixels, uniform);
+
+        //A preset changes the settings used by auto iterations
+        app.auto_iterations = true;
+        app.adaptive_supersampling = true;
+        app.auto_preset = AutoPreset::HighDetail;
+        app.auto_settings = AutoPreset::HighDetail.settings();
+        app.render("high detail");
+        wait_for_job(&mut app);
+        let high = app.m.max_iterations;
+        app.auto_preset = AutoPreset::Performance;
+        app.auto_settings = AutoPreset::Performance.settings();
+        app.render("performance");
+        wait_for_job(&mut app);
+        assert!(app.m.max_iterations <= high);
+        assert_eq!(app.m.palette_scale, Some(AutoPreset::Performance.settings().initial_limit(app.c.get_scale())));
+    }
+
+    #[test]
+    fn selecting_a_preset_shows_its_limit_immediately_and_stale_renders_cannot_overwrite_it() {
+        let config = Config::build(["mandelbrot", "64", "48", "50", "2"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        app.c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.000064));
+        app.auto_iterations = true;
+        app.render("auto");
+        wait_for_job(&mut app);
+        let balanced = app.m.max_iterations;
+
+        //Selecting: the starting limit of the preset is shown before any poll, while the render is only starting
+        app.select_preset(AutoPreset::HighDetail);
+        let initial = AutoPreset::HighDetail.settings().initial_limit(app.c.get_scale());
+        assert_eq!((app.m.max_iterations, app.m.palette_scale), (initial, Some(initial)), "published synchronously on selection");
+        assert!(app.limit_pending && app.is_busy());
+        assert_ne!(app.m.max_iterations, balanced);
+
+        //The refined limit is published before the render has finished
+        let start = std::time::Instant::now();
+        while app.limit_pending {
+            assert!(start.elapsed() < Duration::from_secs(60));
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll_job();
+        }
+        assert!(app.m.max_iterations >= initial);
+        let high = app.m.max_iterations;
+        wait_for_job(&mut app);
+        assert_eq!(app.m.max_iterations, high);
+
+        //Selecting twice quickly: the first render is interrupted and cannot change what is shown
+        app.select_preset(AutoPreset::Performance);
+        let first_cancel = Arc::clone(&app.progress.as_ref().unwrap().cancel);
+        app.select_preset(AutoPreset::Balanced);
+        assert!(first_cancel.load(Ordering::Relaxed));
+        let balanced_initial = AutoPreset::Balanced.settings().initial_limit(app.c.get_scale());
+        assert_eq!(app.m.max_iterations, balanced_initial);
+        wait_for_job(&mut app);
+        assert_eq!(app.m.palette_scale, Some(balanced_initial));
+        assert_eq!(app.m.max_iterations, balanced, "the same view and preset give the same limit as before, not the Performance one");
+        assert!(!app.limit_pending);
+    }
+
+    /// The texts that `controls_ui` draws, in drawing order
+    fn controls_texts(app: &mut MandelbrotApp) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.controls_ui(ui));
+        let texts = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+            _ => None,
+        }).collect();
+        output.drop_without_applying_deltas();
+        texts
+    }
+
+    #[test]
+    fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering_controls() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        let texts = controls_texts(&mut app);
+        let position = |needle: &str| texts.iter().position(|t| t.starts_with(needle)).unwrap_or_else(|| panic!("{needle:?} is not drawn: {texts:?}"));
+        let (quality, coloring, channels) = (position("Quality (supersampling"), position("Coloring:"), position("Color channels"));
+        let (heading, saved_quality, save) = (position("Save Image"), position("Saved image quality:"), position("Save image"));
+        assert!(quality < coloring && coloring < channels, "the rendering quality is with the rendering controls");
+        assert!(channels < heading && heading < saved_quality && saved_quality < save, "the saved image quality and the Save button are together in the Save Image section, after the rendering controls");
+        assert_eq!(texts.iter().filter(|t| t.starts_with("Saved image quality")).count(), 1);
     }
 }
