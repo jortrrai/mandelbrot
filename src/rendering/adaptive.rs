@@ -6,7 +6,7 @@ use super::render_thread_count;
 use super::region::ExposedRegion;
 use crate::coloring::TrueColor;
 
-/// Settings of adaptive supersampling, see `render_region_adaptively`
+/// Settings of adaptive supersampling, see `Render::adaptive`
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdaptiveSampling {
     /// Two colors differ when the sum of the differences of their red, green and blue channels (0..=765) is above this

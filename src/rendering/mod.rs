@@ -1,6 +1,6 @@
 //! Rendering: the progressive renderer used by the window, adaptive supersampling, the regions that a move exposes, and the whole-buffer renderer used for saving images.
 //!
-//! * `progressive`: `render_progressively`, `render_region_progressively` and `render_region_adaptively`, one supersampling layer at a time.
+//! * `progressive`: `Render`, the renderer that works one supersampling layer at a time.
 //! * `adaptive`: the mask that decides which pixels get more samples.
 //! * `region`: the pixels exposed by a move (`ExposedRegion`) and moving the complex plane by whole pixels.
 //! * `buffer`: the renderer of a whole buffer at once.
@@ -14,7 +14,7 @@ mod region;
 
 pub use adaptive::{adaptive_mask, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 pub use buffer::{render_box_render_complex_plane_into_buffer, render_complex_plane_into_buffer, RenderBox};
-pub use progressive::{render_progressively, render_region_adaptively, render_region_progressively};
+pub use progressive::Render;
 pub use region::{center_complex_plane_on, translate_complex_plane_by_pixels, ExposedRegion};
 
 /// The amount of threads that rendering functions use: all logical CPU threads except one, which is left free for the rest of the system and the GUI, but at least one

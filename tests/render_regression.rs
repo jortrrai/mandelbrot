@@ -7,14 +7,14 @@
 //! * The real palettes (`Bernstein`, `HSV`) are not pinned at all: they use `powi` and `fmod`-like functions that may differ between compilers; they are covered by the unit tests, which compare them with themselves.
 //!
 //! If a pinned checksum fails, the renderer's output changed: find out why before updating it (`cargo test --test render_regression -- --nocapture` prints the actual values).
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 
 use mandelbrot::auto_iterations::{choose_limit, AutoIterationSettings};
 use mandelbrot::coloring::TrueColor;
 use mandelbrot::complex::Complex;
 use mandelbrot::complex_plane::{ComplexPlane, View};
 use mandelbrot::mandelbrot_set::{MandelbrotSet, LANES};
-use mandelbrot::rendering::{self, AdaptiveSampling, ExposedRegion};
+use mandelbrot::rendering::{AdaptiveSampling, Render};
 
 /// FNV-1a, 64 bits
 fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
@@ -78,9 +78,9 @@ fn render(view: &View4, width: usize, height: usize, samples: u8, adaptive: Opti
     let plane = plane(&view.view, width, height);
     let mut set = MandelbrotSet::new(view.max_iterations, 2.0);
     set.smooth_coloring = false; //Integer positions: the colors then only depend on the counts and the integer palette
-    let base = vec![TrueColor::new(0, 0, 0); width * height];
+    let _base = vec![TrueColor::new(0, 0, 0); width * height];
     let mut last = Vec::new();
-    rendering::render_region_adaptively(&plane, &set, width, height, &ExposedRegion::full(width, height), &base, samples, adaptive, integer_palette, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+    Render::new(&plane, &set, width, height, integer_palette).supersampling(samples).adaptive(adaptive.copied()).run( |colors, _| {
         last.clear();
         last.extend_from_slice(colors);
     });

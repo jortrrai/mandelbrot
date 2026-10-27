@@ -12,6 +12,7 @@ use crate::complex_plane::ComplexPlane;
 use crate::mandelbrot_set::MandelbrotSet;
 use crate::pixel_buffer::PixelBuffer;
 use crate::rendering::{self, ExposedRegion};
+use crate::rendering::Render;
 use super::MandelbrotApp;
 
 
@@ -111,7 +112,7 @@ impl MandelbrotApp {
     }
 
     /// Renders the complete view in the background, then logs `message` and the current view.
-    /// Every supersampling layer is shown as soon as it is computed, see `rendering::render_region_progressively`
+    /// Every supersampling layer is shown as soon as it is computed, see `rendering::Render`
     pub(super) fn render(&mut self, message: &str) {
         self.start_render(message, None);
     }
@@ -192,7 +193,7 @@ impl MandelbrotApp {
             };
             let base = p.colors.clone();
             let mut layer_started = started;
-            let completed = rendering::render_region_adaptively(&c, &m, width, height, &region, &base, supersampling_amount, adaptive.as_ref(), coloring_function, &thread_cancel, &thread_pixels_done, |colors, pass| {
+            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).only(&region, &base).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 p.colors.copy_from_slice(colors);
                 let layer_time = layer_started.elapsed();

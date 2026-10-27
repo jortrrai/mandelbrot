@@ -40,7 +40,7 @@ fn progressive_rendering_matches_the_normal_render_and_reports_every_pass() {
     let pixels_done = AtomicUsize::new(0);
     let mut passes = Vec::new();
     let mut last = Vec::new();
-    let completed = render_progressively(&c, &m, width, height, supersampling_amount, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &pixels_done, |colors, pass| {
+    let completed = Render::new(&c, &m, width, height, TrueColor::new_from_bernstein_polynomials).supersampling(supersampling_amount).count_pixels_in(&pixels_done).run( |colors, pass| {
         passes.push(pass);
         last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
     });
@@ -73,7 +73,7 @@ fn region_rendering_only_changes_the_region_and_matches_the_normal_render_there(
     let pixels_done = AtomicUsize::new(0);
     let mut last = Vec::new();
     let mut passes = 0;
-    render_region_progressively(&c, &m, width, height, &region, &base, supersampling_amount, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &pixels_done, |colors, pass| {
+    Render::new(&c, &m, width, height, TrueColor::new_from_bernstein_polynomials).supersampling(supersampling_amount).only(&region, &base).count_pixels_in(&pixels_done).run( |colors, pass| {
         passes = pass;
         last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
     });
@@ -91,7 +91,7 @@ fn progressive_rendering_can_be_cancelled() {
     let m = MandelbrotSet::new(50, 2.0);
     let cancel = AtomicBool::new(false);
     let mut passes = 0;
-    let completed = render_progressively(&c, &m, 16, 16, 8, TrueColor::new_from_bernstein_polynomials, &cancel, &AtomicUsize::new(0), |_, pass| {
+    let completed = Render::new(&c, &m, 16, 16, TrueColor::new_from_bernstein_polynomials).supersampling(8).cancel_with(&cancel).run( |_, pass| {
         passes = pass;
         if pass == 2 {
             cancel.store(true, Ordering::Relaxed);
@@ -116,7 +116,7 @@ fn sample_jitter_is_in_unit_square_and_varies() {
 fn adaptive_render(c: &ComplexPlane, m: &MandelbrotSet, w: usize, h: usize, region: &ExposedRegion, base: &[TrueColor], samples: u8, adaptive: Option<&AdaptiveSampling>, cancel: &AtomicBool) -> (Vec<(u8, u8, u8)>, u8, bool) {
     let mut last = Vec::new();
     let mut passes = 0;
-    let done = render_region_adaptively(c, m, w, h, region, base, samples, adaptive, TrueColor::new_from_bernstein_polynomials, cancel, &AtomicUsize::new(0), |colors, pass| {
+    let done = Render::new(c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive.copied()).only(region, base).cancel_with(cancel).run( |colors, pass| {
         last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
         passes = pass;
     });

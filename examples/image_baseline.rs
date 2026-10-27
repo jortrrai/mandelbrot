@@ -12,7 +12,7 @@
 //!
 //! The values are reproducible on the same machine and build; they are **not** guaranteed to be the same on another CPU or math library (the real palettes and the smooth positions use `powi` and `ln`),
 //! so compare runs of the same machine, not runs of different machines. `tests/render_regression.rs` has the checks that are platform independent.
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 
 use mandelbrot::auto_iterations::{choose_limit, AutoIterationSettings};
 use mandelbrot::coloring::{ColorChannelMapping, TrueColor};
@@ -20,7 +20,7 @@ use mandelbrot::complex_plane::{ComplexPlane, View};
 use mandelbrot::mandelbrot_set::MandelbrotSet;
 use mandelbrot::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
 use mandelbrot::points_of_interest::{self, Coloring};
-use mandelbrot::rendering::{self, AdaptiveSampling, ExposedRegion};
+use mandelbrot::rendering::{self, AdaptiveSampling, ExposedRegion, Render};
 use mandelbrot::thumbnails::{self, ThumbnailRequest};
 
 const WIDTH: usize = 96;
@@ -47,9 +47,9 @@ fn plane(view: &View, width: usize, height: usize) -> ComplexPlane {
 
 /// Renders with every layer and returns the final colors
 fn render(plane: &ComplexPlane, set: &MandelbrotSet, samples: u8, adaptive: Option<&AdaptiveSampling>, coloring: fn(u32, u32) -> TrueColor) -> Vec<TrueColor> {
-    let base = vec![TrueColor::new(0, 0, 0); WIDTH * HEIGHT];
+    let _base = vec![TrueColor::new(0, 0, 0); WIDTH * HEIGHT];
     let mut last = Vec::new();
-    rendering::render_region_adaptively(plane, set, WIDTH, HEIGHT, &ExposedRegion::full(WIDTH, HEIGHT), &base, samples, adaptive, coloring, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+    Render::new(plane, set, WIDTH, HEIGHT, coloring).supersampling(samples).adaptive(adaptive.copied()).run( |colors, _| {
         last.clear();
         last.extend_from_slice(colors);
     });
@@ -97,7 +97,7 @@ fn main() {
         rendering::translate_complex_plane_by_pixels(&mut plane, rows_up as i16, -(columns_right as i16));
         let region = ExposedRegion::from_shift(WIDTH, HEIGHT, rows_up, columns_right).expect("a small shift");
         let mut last = Vec::new();
-        rendering::render_region_progressively(&plane, &set, WIDTH, HEIGHT, &region, &buffer.colors, 2, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+        Render::new(&plane, &set, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(2).only(&region, &buffer.colors).run( |colors, _| {
             last.clear();
             last.extend_from_slice(colors);
         });
