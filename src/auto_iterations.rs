@@ -17,6 +17,7 @@ use crate::complex_plane::ComplexPlane;
 use crate::mandelbrot_set::MandelbrotSet;
 
 /// The parameters of the automatic iteration limit: where it starts, how it grows with the zoom, and the bounds of the refinement (see the module documentation).
+///
 /// The named presets are `AutoPreset::settings`.
 #[derive(Clone, Debug)]
 pub struct AutoIterationSettings {
@@ -188,6 +189,9 @@ impl Probe {
 }
 
 /// Chooses the maximum iterations for the view of `c`. Returns `None` if `cancel` was set.
+///
+/// # Panics
+/// If a thread of the probes panics.
 pub fn choose_limit(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, settings: &AutoIterationSettings, threads: usize, cancel: &AtomicBool) -> Option<AutoIterationResult> {
     let initial = settings.initial_limit(c.get_scale());
     let stride = settings.probe_stride.max(1);

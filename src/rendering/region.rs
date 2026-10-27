@@ -3,6 +3,7 @@
 use crate::{complex::Complex, complex_plane::ComplexPlane};
 
 /// The pixels of a buffer that have to be rendered again after the buffer was shifted with `PixelBuffer::translate_buffer`:
+///
 /// the exposed `columns` and the exposed `rows`. A pixel is exposed if its column or its row is exposed, so a shift in one direction exposes a strip,
 /// and a shift in both directions an L shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +59,7 @@ pub fn center_complex_plane_on(c: &mut ComplexPlane, new_center: &Complex) -> (i
 }
 
 /// Moves the complex plane `c` up by `rows_up` and right by `columns_right` pixels, without rendering anything.
+///
 /// Each distance is taken modulo 256 pixels (`as u8`): a move of 256 pixels moves by 0 and one of 300 by 44. The window only moves by small steps.
 pub fn translate_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i16, columns_right: i16) {
     let row_sign: f64 = if rows_up > 0 {-1.0} else {1.0};

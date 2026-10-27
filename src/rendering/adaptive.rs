@@ -27,8 +27,10 @@ fn color_distance(a: TrueColor, b: TrueColor) -> u32 {
     u32::from(a.red.abs_diff(b.red)) + u32::from(a.green.abs_diff(b.green)) + u32::from(a.blue.abs_diff(b.blue))
 }
 
-/// The pixels (of `region`) that need more samples: a pixel is marked when its two samples differ (`first` is the color of sample 0, `colors` the average of the uniform samples),
-/// or when it differs from any of its 8 neighbors, and then every marked pixel also marks its 8 neighbors, so a thin feature that only one of the first samples hit is covered on both sides.
+/// The pixels (of `region`) that need more samples.
+///
+/// A pixel is marked when its two samples differ (`first` is the color of sample 0, `colors` the average of the uniform samples), or when it differs from any of its 8 neighbors.
+/// Then every marked pixel also marks its 8 neighbors, so a thin feature that only one of the first samples hit is covered on both sides.
 pub fn adaptive_mask(width: usize, height: usize, region: &ExposedRegion, first: &[TrueColor], colors: &[TrueColor], threshold: u32) -> Vec<bool> {
     let rows_per_chunk = height.div_ceil(render_thread_count()).max(1);
     let neighbors = |x: usize, y: usize| (y.saturating_sub(1)..=(y + 1).min(height - 1)).flat_map(move |ny| (x.saturating_sub(1)..=(x + 1).min(width - 1)).map(move |nx| ny * width + nx));

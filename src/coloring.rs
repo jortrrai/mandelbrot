@@ -6,11 +6,11 @@ use angular_units::Deg;
 use num::traits::Pow;
 use prisma::{Hsv, Rgb, FromColor};
 
+/// How the channels of a color are placed in a pixel.
+///
+/// The first letter of a variant names the channel that the red channel of the pixel takes, the second letter the channel of the green channel, the third letter the channel of the blue channel.
+/// For example `ColorChannelMapping::BGR` means that red takes the value of blue, green the value of green and blue the value of red (B => R, G => G, R => B).
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-///A mapping from ColorChannelMapping -> RGB, the first character denotes the new red channel, the second character the new green channel,
-/// the third character the new blue channel.\
-/// E.g: Ok(ColorChannelMapping::BGR) means that red will get the value of blue, green the value of green, and blue the value of red:
-/// B => R, G => G, R => B.
 pub enum ColorChannelMapping {
     /// Red takes the blue channel, green the blue channel and blue the blue channel
     BBB,

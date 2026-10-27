@@ -1,5 +1,7 @@
-//! The Mandelbrot set: the escape-time iteration of a point (one at a time, or four at a time in lockstep for the CPU's vector instructions),
-//! the shortcuts for points that are certainly inside the set, and the smooth (continuous) iteration count that the coloring uses.
+//! The Mandelbrot set: the escape-time iteration of a point.
+//!
+//! A point is iterated alone, or four at a time in lockstep so that the CPU's vector instructions can be used. Points that are certainly inside the set are recognized
+//! early (the main cardioid and the period-two bulb, and orbits that repeat exactly). The smooth (continuous) iteration count that the coloring uses is computed here too.
 
 use crate::complex::Complex;
 
@@ -8,7 +10,7 @@ use crate::complex::Complex;
 pub struct MandelbrotSet {
     /// The most iterations of the escape-time iteration of a point; a point that has not escaped by then counts as inside the set
     pub max_iterations: u32,
-    ///If z remains within the orbit_radius in max_iterations, we assume c does not tend to infinity
+    /// If `z` stays within the `orbit_radius` for `max_iterations` steps, `c` is assumed not to tend to infinity
     pub orbit_radius: f64,    
     ///When set (automatic iteration limit), the palette is scaled to this many iterations instead of `max_iterations`, so raising the limit does not recolor the image,
     ///see `MandelbrotSet::color`
@@ -70,7 +72,7 @@ impl MandelbrotSet {
     /// The continuous escape time of a point (normalized iteration count): the iteration count of `iterate` plus a fraction in about [-0.85, 0.53) that depends on how far
     /// beyond the orbit radius the orbit landed, so neighboring points in different integer bands get neighboring positions. Points that do not escape get `max_iterations`.
     /// The integer count and the interior classification are exactly those of `iterate`; only the escaped points do a few extra steps and two logarithms.
-    /// Formula: nu = n - log2(ln|z_n|) for a large |z_n|, see <https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set#Continuous_(smooth)_coloring>
+    /// Formula: `nu = n - log2(ln|z_n|)` for a large `|z_n|`, see <https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set#Continuous_(smooth)_coloring>
     pub fn iterate_smooth(&self, c: &Complex) -> f64 {
         if self.is_known_interior(c) {
             return f64::from(self.max_iterations);

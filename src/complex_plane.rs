@@ -94,7 +94,7 @@ impl ComplexPlane {
         c
     }
 
-    /// Resets the total translation and scaling applied to the Complex plane by the translate() and scale() functions
+    /// Resets the total translation and scaling applied to the Complex plane by `translate` and `scale`
     pub fn reset(&mut self) {
         *self = ComplexPlane::new(self.width, self.height);
     }

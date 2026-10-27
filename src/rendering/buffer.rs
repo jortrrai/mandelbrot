@@ -39,6 +39,7 @@ impl RenderBox {
 
 
 /// Render the Complex plane c into the 32-bit pixel buffer by applying the Mandelbrot formula iteratively to every Complex point mapped to a pixel in the buffer. 
+///
 /// The buffer should have a size of width*height.
 /// `orbit_radius` determines when Zn is considered to have gone to infinity.
 /// `max_iterations` concerns the maximum amount of times the Mandelbrot formula will be applied to each Complex number.
@@ -49,6 +50,7 @@ pub fn render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &ComplexPlane, m
 }
 
 /// Render the Complex plane c into the 32-bit pixel buffer by applying the Mandelbrot formula iteratively to every Complex point mapped to a pixel in the buffer. 
+///
 /// The buffer should have a size of width*height.
 /// Only renders Pixels inside the render box denoted by `render_min_x`, `render_max_x`, `render_min_y`, `render_max_y`
 /// `orbit_radius` determines when Zn is considered to have gone to infinity.

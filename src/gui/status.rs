@@ -28,6 +28,7 @@ impl CurrentView {
 }
 
 /// The zoom as text, "x" and the magnification: ordinary decimal numbers from 0.001 up to a billion (at most two decimals, none for a whole number, thousands separated by commas:
+///
 /// "x1", "x2.5", "x156.25", "x15,625", "x250,000"), and scientific notation only beyond that ("x1.00e9", "x1.00e-4").
 pub fn format_zoom(magnification: f64) -> String {
     if !magnification.is_finite() || magnification <= 0.0 {

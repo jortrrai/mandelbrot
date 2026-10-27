@@ -139,7 +139,11 @@ struct RawPointOfInterest {
 }
 
 /// Parses and checks the text of a point of interest file. `file_name` is only used in the messages.
+///
 /// Returns the point and warnings (an appearance that could not be used is left out with a warning), or the reason that the file cannot be used.
+///
+/// # Errors
+/// The text is not valid JSON or lacks a field, the format version is not supported, the name is empty, the center is not finite, the scale is not positive or the maximum iterations are outside the allowed range.
 pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String>), String> {
     let raw: RawPointOfInterest = serde_json::from_str(text).map_err(|error| format!("{file_name}: {error}"))?;
     if raw.format_version != FORMAT_VERSION {
@@ -190,6 +194,7 @@ pub struct LoadReport {
 }
 
 /// Loads every `.json` file of `folder`. Other files are ignored; a file that cannot be used is skipped and reported in `problems`, the rest loads.
+///
 /// A folder that does not exist or cannot be read gives no points and a problem.
 pub fn load_folder(folder: &Path) -> LoadReport {
     let mut report = LoadReport::default();
@@ -220,6 +225,7 @@ pub fn load_folder(folder: &Path) -> LoadReport {
 }
 
 /// The folder to load: `points_of_interest` in the current directory, or else the one next to the sources this program was built from (so `cargo run` works from any directory).
+///
 /// If neither exists, the one in the current directory, which `load_folder` then reports.
 pub fn find_folder() -> PathBuf {
     let in_current_directory = PathBuf::from(FOLDER_NAME);
