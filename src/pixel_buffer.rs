@@ -1,20 +1,29 @@
+//! The buffer of pixels of an image: the colors, the 32-bit pixels that the window draws, shifting for moves, and saving as a PNG file.
+
 use std::{path::Path, fs::File, io::BufWriter};
 
 use crate::{coloring::{TrueColor, ColorChannelMapping}, complex_plane::View, mandelbrot_set::MandelbrotSet};
 
 use self::pixel_plane::PixelPlane;
 
+/// The size of a pixel buffer
 pub mod pixel_plane;
 
+/// The pixels of an image, as colors and as the 32-bit pixels that the window draws, with the channel mapping that gets the pixels from the colors
 #[derive(Clone)]
 pub struct PixelBuffer {
+    /// The size of the image
     pub pixel_plane: PixelPlane,
+    /// The color of every pixel, row by row
     pub colors: Vec<TrueColor>,
+    /// The pixels as `0RGB` 32-bit values: the colors with the channel mapping applied (`update_pixels`)
     pub pixels: Vec<u32>,
+    /// How the channels of the colors are placed in the pixels
     pub color_channel_mapping: ColorChannelMapping,
 }
 
 impl PixelBuffer {
+    /// Creates a black buffer of the given size
     pub fn new(pixel_plane: PixelPlane) -> PixelBuffer {
         // Create a buffer to store pixel data in the form of TrueColor's
         let black = TrueColor::new(0, 0, 0);
@@ -69,9 +78,9 @@ impl PixelBuffer {
         }
     }
 
-    ///Saves the `PixelBuffer` as an RGB png image to `saved/{file_name_without_extension}.png` </br>
-    ///Stores the current `ComplexPlane` View in the png's metadata under the view keyword </br>
-    ///Stores the `supersampling_amount` in the metadata </br>
+    ///Saves the `PixelBuffer` as an RGB png image to `saved/{file_name_without_extension}.png`\
+    ///Stores the current `ComplexPlane` View in the png's metadata under the view keyword\
+    ///Stores the `supersampling_amount` in the metadata\
     ///Also stores author and application metadata
     /// # Panics
     /// If the file `saved/{file_name_without_extension}.png` cannot be created

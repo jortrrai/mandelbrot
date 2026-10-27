@@ -1,7 +1,12 @@
+//! The Mandelbrot set: the escape-time iteration of a point (one at a time, or four at a time in lockstep for the CPU's vector instructions),
+//! the shortcuts for points that are certainly inside the set, and the smooth (continuous) iteration count that the coloring uses.
+
 use crate::complex::Complex;
 
+/// The Mandelbrot set as a computation: the maximum iterations and the orbit radius, with the escape-time iteration of a point and the coloring options of the renderer
 #[derive(Clone)]
 pub struct MandelbrotSet {
+    /// The most iterations of the escape-time iteration of a point; a point that has not escaped by then counts as inside the set
     pub max_iterations: u32,
     ///If z remains within the orbit_radius in max_iterations, we assume c does not tend to infinity
     pub orbit_radius: f64,    
@@ -31,6 +36,7 @@ struct LaneResult {
 const CHECK_INTERVAL: u32 = 4;
 
 impl MandelbrotSet {
+    /// Creates the set with `max_iterations` and `orbit_radius`; smooth coloring is on and there is no palette scale
     pub fn new(max_iterations: u32, orbit_radius: f64) -> MandelbrotSet {
         MandelbrotSet { max_iterations, orbit_radius, palette_scale: None, smooth_coloring: true }
     }
@@ -143,6 +149,8 @@ impl MandelbrotSet {
         self.iterate_lanes_plain(points)
     }
 
+    /// The lockstep loop of `iterate_lanes`: AVX2 when the CPU has it, else the generic loop. This is a separate copy of the loop of `iterate_lanes_smooth_generic` on purpose: sharing one generic function
+    /// between the two made the plain loop 48% slower when all render threads are busy, so the plain loop is kept as it is
     fn iterate_lanes_plain(&self, points: &[Complex; LANES]) -> [u32; LANES] {
         #[cfg(target_arch = "x86_64")]
         {
@@ -154,12 +162,16 @@ impl MandelbrotSet {
         self.iterate_lanes_plain_generic(points)
     }
 
+    /// The loop of `iterate_lanes_plain_generic` compiled with AVX2 enabled
+    /// # Safety
+    /// The CPU must support AVX2 (checked by the caller with `is_x86_feature_detected!`)
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn iterate_lanes_plain_avx2(&self, points: &[Complex; LANES]) -> [u32; LANES] {
         self.iterate_lanes_plain_generic(points)
     }
 
+    /// The plain lockstep loop: the escape count of `LANES` points, all stepping together, with the interior shortcuts and the exact cycle detection of the module documentation
     #[inline(always)]
     fn iterate_lanes_plain_generic(&self, points: &[Complex; LANES]) -> [u32; LANES] {
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
@@ -225,6 +237,7 @@ impl MandelbrotSet {
     }
 
 
+    /// Runs the lockstep loop that also records where each point escaped (see `iterate_lanes_smooth_generic`): with AVX2 when the CPU has it, else without
     fn iterate_lanes_smooth_dispatch(&self, points: &[Complex; LANES]) -> LaneResult {
         let mut out = LaneResult { iterations: [0; LANES], escaped: [false; LANES], escape_x: [0.0; LANES], escape_y: [0.0; LANES] };
         #[cfg(target_arch = "x86_64")]
@@ -239,12 +252,16 @@ impl MandelbrotSet {
         out
     }
 
+    /// The loop of `iterate_lanes_smooth_generic` compiled with AVX2 enabled
+    /// # Safety
+    /// The CPU must support AVX2 (checked by the caller with `is_x86_feature_detected!`)
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn iterate_lanes_smooth_avx2(&self, points: &[Complex; LANES], out: &mut LaneResult) {
         self.iterate_lanes_smooth_generic(points, out);
     }
 
+    /// The lockstep loop that also records, for every point that escaped, z at the end of the block of steps in which it escaped (so the smooth position can be computed). Its arithmetic is exactly that of the plain loop
     #[inline(always)]
     fn iterate_lanes_smooth_generic(&self, points: &[Complex; LANES], out: &mut LaneResult) {
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;

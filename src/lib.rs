@@ -10,6 +10,7 @@
 //!
 //! The same view and settings always render the same image: the supersampling jitter is a hash of the pixel and the sample, never random.
 #![warn(
+    missing_docs,
     clippy::all,
     clippy::pedantic,
     clippy::nursery,

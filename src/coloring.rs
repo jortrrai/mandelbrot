@@ -1,3 +1,5 @@
+//! Colors: the true color of a pixel, the palettes that turn an iteration count into a color, and the mappings of the color channels.
+
 use std::{fmt, str::FromStr};
 
 use angular_units::Deg;
@@ -6,40 +8,70 @@ use prisma::{Hsv, Rgb, FromColor};
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 ///A mapping from ColorChannelMapping -> RGB, the first character denotes the new red channel, the second character the new green channel,
-/// the third character the new blue channel. </br>
+/// the third character the new blue channel.\
 /// E.g: Ok(ColorChannelMapping::BGR) means that red will get the value of blue, green the value of green, and blue the value of red:
 /// B => R, G => G, R => B.
 pub enum ColorChannelMapping {
+    /// Red takes the blue channel, green the blue channel and blue the blue channel
     BBB,
+    /// Red takes the blue channel, green the blue channel and blue the green channel
     BBG,
+    /// Red takes the blue channel, green the blue channel and blue the red channel
     BBR,
+    /// Red takes the blue channel, green the green channel and blue the blue channel
     BGB,
+    /// Red takes the blue channel, green the green channel and blue the green channel
     BGG,
+    /// Red takes the blue channel, green the green channel and blue the red channel
     BGR,
+    /// Red takes the blue channel, green the red channel and blue the blue channel
     BRB,
+    /// Red takes the blue channel, green the red channel and blue the green channel
     BRG,
+    /// Red takes the blue channel, green the red channel and blue the red channel
     BRR,
+    /// Red takes the green channel, green the blue channel and blue the blue channel
     GBB,
+    /// Red takes the green channel, green the blue channel and blue the green channel
     GBG,
+    /// Red takes the green channel, green the blue channel and blue the red channel
     GBR,
+    /// Red takes the green channel, green the green channel and blue the blue channel
     GGB,
+    /// Red takes the green channel, green the green channel and blue the green channel
     GGG,
+    /// Red takes the green channel, green the green channel and blue the red channel
     GGR,
+    /// Red takes the green channel, green the red channel and blue the blue channel
     GRB,
+    /// Red takes the green channel, green the red channel and blue the green channel
     GRG,
+    /// Red takes the green channel, green the red channel and blue the red channel
     GRR,
+    /// Red takes the red channel, green the blue channel and blue the blue channel
     RBB,
+    /// Red takes the red channel, green the blue channel and blue the green channel
     RBG,
+    /// Red takes the red channel, green the blue channel and blue the red channel
     RBR,
+    /// Red takes the red channel, green the green channel and blue the green channel
     RGG,
+    /// Red takes the red channel, green the green channel and blue the red channel
     RGR,
+    /// Red takes the red channel, green the red channel and blue the blue channel
     RRB,
+    /// Red takes the red channel, green the red channel and blue the green channel
     RRG,
+    /// Red takes the red channel, green the red channel and blue the red channel
     RRR,
+    /// Every channel keeps its own value (the identity)
     RGB,
 }
 
 impl ColorChannelMapping {
+    /// Parses a mapping such as "RGB" or "bgr" (case-insensitive)
+    /// # Errors
+    /// Returns an error message if `r_g_b` is not three characters from `R`, `G` and `B`
     pub fn new(r_g_b: &str) -> Result<ColorChannelMapping,String> {
         match &r_g_b.to_uppercase()[..] {
             "BBB" => Ok(ColorChannelMapping::BBB),
@@ -93,14 +125,19 @@ impl FromStr for ColorChannelMapping {
     }
 }
 
+/// A 24-bit color: 8 bits for each of the red, green and blue channels
 #[derive(Clone, Copy)]
 pub struct TrueColor {
+    /// The red channel, 0 to 255
     pub red: u8,
+    /// The green channel, 0 to 255
     pub green: u8,
+    /// The blue channel, 0 to 255
     pub blue: u8
 }
 
 impl TrueColor {
+    /// Creates a color from its three channels
     pub fn new(red: u8, green: u8, blue: u8) -> TrueColor { 
         TrueColor { red, green, blue } 
     }
@@ -119,6 +156,9 @@ impl TrueColor {
         (r << 16) | (g << 8) | b
     }
 
+    /// The value of the channel `color`, which is `'R'`, `'G'` or `'B'`
+    /// # Panics
+    /// If `color` is another character
     pub fn get_color(&self, color: char) -> u8 {
         assert!(color == 'R' || color == 'G' || color == 'B', "Error: color should be equal to R, G, or B, color = {}",color);
         match color {
@@ -129,9 +169,9 @@ impl TrueColor {
         }
     }
 
-    /// Creates a 24-bit truecolor struct from a normalized t ∈ [0, 1) </br>
+    /// Creates a 24-bit truecolor struct from a normalized t ∈ [0, 1)\
     /// Maps a normalized value t to a continous 3D color space
-    /// ![img](https://solarianprogrammer.com/images/2013/02/28/rgb_smooth.png)</br>
+    /// ![img](https://solarianprogrammer.com/images/2013/02/28/rgb_smooth.png)\
     /// Source: [Bernstein polynomial coloring](https://solarianprogrammer.com/2013/02/28/mandelbrot-set-cpp-11/)
     /// The polynomials are r = 9(1-t)t^3, g = 15(1-t)^2 t^2 and b = 8.5(1-t)^3 t, as in the source; none of them exceeds 1, so no channel is ever clipped at 255
     /// (earlier versions had the wrong powers in g and b, which saturated them over wide ranges of t and showed as flat bands with sharp edges).
@@ -145,9 +185,9 @@ impl TrueColor {
     }
 
     ///A `coloring_function`
-    /// Creates a 24-bit truecolor struct from a normalized t = `iterations`/`max_iterations` ∈ [0, 1) </br>
+    /// Creates a 24-bit truecolor struct from a normalized t = `iterations`/`max_iterations` ∈ [0, 1)\
     /// Maps a normalized value t to a continous 3D color space
-    /// ![img](https://solarianprogrammer.com/images/2013/02/28/rgb_smooth.png)</br>
+    /// ![img](https://solarianprogrammer.com/images/2013/02/28/rgb_smooth.png)\
     /// Source: [Bernstein polynomial coloring](https://solarianprogrammer.com/2013/02/28/mandelbrot-set-cpp-11/)
     pub fn new_from_bernstein_polynomials(iterations: u32, max_iterations: u32) -> TrueColor {
         let t: f64 = f64::from(iterations) / f64::from(max_iterations);

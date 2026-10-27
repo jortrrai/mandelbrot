@@ -16,6 +16,8 @@ use crate::complex::Complex;
 use crate::complex_plane::ComplexPlane;
 use crate::mandelbrot_set::MandelbrotSet;
 
+/// The parameters of the automatic iteration limit: where it starts, how it grows with the zoom, and the bounds of the refinement (see the module documentation).
+/// The named presets are `AutoPreset::settings`.
 #[derive(Clone, Debug)]
 pub struct AutoIterationSettings {
     /// Limit at magnification 1
@@ -58,8 +60,10 @@ pub enum AutoPreset {
 }
 
 impl AutoPreset {
+    /// The presets that the window offers (`Custom` only appears once settings were edited by hand)
     pub const SELECTABLE: [AutoPreset; 3] = [AutoPreset::Performance, AutoPreset::Balanced, AutoPreset::HighDetail];
 
+    /// The name of the preset as the window shows it
     pub fn name(self) -> &'static str {
         match self {
             AutoPreset::Performance => "Performance",
@@ -88,34 +92,48 @@ impl AutoIterationSettings {
     }
 }
 
+/// Why the search for a limit stopped
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StopReason {
     /// The last round did not uncover enough new detail; the limit before it is used
     Converged,
     /// Every probe is escaped or certified interior
     NothingUnresolved,
+    /// The ceiling of the settings was reached
     Ceiling,
+    /// The settings allowed no more refinement rounds
     MaxRounds,
+    /// The next round would have gone over the work budget of the settings
     WorkBudget,
 }
 
+/// What one round of the search found
 #[derive(Clone, Debug)]
 pub struct Round {
+    /// The limit the probes were iterated to in this round
     pub limit: u32,
+    /// Probes that have escaped, in this and the earlier rounds
     pub escaped: usize,
+    /// Probes certified to be inside the set (the cardioid and bulb test, or an exactly repeating orbit)
     pub certified: usize,
+    /// Probes that are at the limit without a certificate: inside the set, or just slow to escape
     pub unresolved: usize,
     /// Probes that escaped in this round after being unresolved at the previous limit
     pub newly_escaped: usize,
 }
 
+/// The outcome of choosing a limit
 #[derive(Clone, Debug)]
 pub struct AutoIterationResult {
+    /// The limit to render with
     pub limit: u32,
     /// The palette scale to use: the limit before any refinement, which only depends on the zoom
     pub palette_scale: u32,
+    /// The rounds of the search, the first one being the starting limit
     pub rounds: Vec<Round>,
+    /// Why the search stopped
     pub stop: StopReason,
+    /// The total amount of iteration steps that the probes took, over all rounds
     pub steps: u64,
 }
 
@@ -133,6 +151,7 @@ struct Probe {
 enum State { Escaped, Certified, Unresolved }
 
 impl Probe {
+    /// Creates the orbit of the point `c`, at the start (before the first step)
     fn new(c: Complex) -> Probe {
         Probe { c, z: (0.0, 0.0), iterations: 0, saved: (0.0, 0.0), since_saved: 0, until_save: 1, escaped: false }
     }

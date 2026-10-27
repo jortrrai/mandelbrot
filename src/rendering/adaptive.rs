@@ -22,6 +22,7 @@ impl Default for AdaptiveSampling {
 /// The amount of samples every pixel gets before adaptive supersampling decides where more samples are needed
 pub const ADAPTIVE_UNIFORM_SAMPLES: u8 = 2;
 
+/// The distance between two colors: the sum of the differences of the red, green and blue channels (0 to 765)
 fn color_distance(a: TrueColor, b: TrueColor) -> u32 {
     u32::from(a.red.abs_diff(b.red)) + u32::from(a.green.abs_diff(b.green)) + u32::from(a.blue.abs_diff(b.blue))
 }

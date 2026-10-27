@@ -126,6 +126,8 @@ impl MandelbrotApp {
         self.start_render(message, strip);
     }
 
+    /// Starts a render of the view on a background thread and logs `message` when it is done. With `strip` the old image is shifted and only the exposed region is rendered; otherwise everything is.
+    /// A render that is running is interrupted first.
     pub(super) fn start_render(&mut self, message: &str, strip: Option<((i128, i128), ExposedRegion)>) {
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();

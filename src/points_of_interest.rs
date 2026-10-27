@@ -44,11 +44,14 @@ pub const MAX_ITERATIONS_RANGE: RangeInclusive<u32> = 1..=1_000_000;
 /// The coloring of an appearance
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coloring {
+    /// The HSV palette
     Hsv,
+    /// The Bernstein polynomial palette
     Bernstein,
 }
 
 impl Coloring {
+    /// The coloring with the key `key` (case-insensitive), if there is one
     pub fn from_key(key: &str) -> Option<Coloring> {
         match key.trim().to_lowercase().as_str() {
             "hsv" => Some(Coloring::Hsv),
@@ -57,6 +60,7 @@ impl Coloring {
         }
     }
 
+    /// The key of the coloring as it is written in a file
     pub fn key(self) -> &'static str {
         match self {
             Coloring::Hsv => "hsv",
@@ -68,25 +72,35 @@ impl Coloring {
 /// Where to look
 #[derive(Clone, Debug, PartialEq)]
 pub struct Location {
+    /// The real part of the center of the view
     pub real: f64,
+    /// The imaginary part of the center of the view
     pub imaginary: f64,
     /// The scale of the renderer, see the module documentation
     pub scale: f64,
+    /// The most iterations of the escape-time iteration
     pub max_iterations: u32,
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Appearance {
+    /// The coloring, if the file gives one
     pub coloring: Option<Coloring>,
+    /// The color channel mapping, if the file gives one
     pub color_channels: Option<ColorChannelMapping>,
 }
 
+/// A named place: where to look, and optionally how it should look
 #[derive(Clone, Debug, PartialEq)]
 pub struct PointOfInterest {
+    /// The display name
     pub name: String,
+    /// A longer text for a tooltip, possibly empty
     pub description: String,
+    /// Where to look
     pub location: Location,
+    /// How it looks; `None` if the file has no appearance
     pub appearance: Option<Appearance>,
     /// The name of the file it was loaded from
     pub file_name: String,

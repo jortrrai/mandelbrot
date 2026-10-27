@@ -21,6 +21,7 @@ pub struct CurrentView {
 }
 
 impl CurrentView {
+    /// The texts for the view with the center `center` and the scale `scale`
     pub fn new(center: &Complex, scale: f64) -> CurrentView {
         CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), zoom: format_zoom(1.0 / scale) }
     }
@@ -133,6 +134,7 @@ impl MandelbrotApp {
         });
     }
 
+    /// Draws the status: the render that is running with its Cancel button, the progress bar of the last render, and the scrollable log
     pub(super) fn log_ui(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Status");
