@@ -133,12 +133,14 @@ impl TrueColor {
     /// Maps a normalized value t to a continous 3D color space
     /// ![img](https://solarianprogrammer.com/images/2013/02/28/rgb_smooth.png)</br>
     /// Source: [Bernstein polynomial coloring](https://solarianprogrammer.com/2013/02/28/mandelbrot-set-cpp-11/)
+    /// The polynomials are r = 9(1-t)t^3, g = 15(1-t)^2 t^2 and b = 8.5(1-t)^3 t, as in the source; none of them exceeds 1, so no channel is ever clipped at 255
+    /// (earlier versions had the wrong powers in g and b, which saturated them over wide ranges of t and showed as flat bands with sharp edges).
     fn new_from_bernstein_polynomials_normalized(t: f64) -> TrueColor {
         let t = t.abs().min(0.999);
         let one_minus_t = 1.0-t;
         let red: f64 = 9.0 * one_minus_t * t.pow(3) * 255.0;
-        let green: f64 = 15.0 * one_minus_t * t.pow(2) * 255.0;
-        let blue: f64 = 8.5 * one_minus_t * t * 255.0;
+        let green: f64 = 15.0 * one_minus_t.pow(2) * t.pow(2) * 255.0;
+        let blue: f64 = 8.5 * one_minus_t.pow(3) * t * 255.0;
         TrueColor { red: red as u8, green: green as u8, blue: blue as u8 }
     }
 
@@ -204,6 +206,25 @@ mod tests {
         "BBB", "BBG", "BBR", "BGB", "BGG", "BGR", "BRB", "BRG", "BRR", "GBB", "GBG", "GBR", "GGB", "GGG",
         "GGR", "GRB", "GRG", "GRR", "RBB", "RBG", "RBR", "RGG", "RGR", "RRB", "RRG", "RRR", "RGB",
     ];
+
+    #[test]
+    fn bernstein_polynomials_match_the_source_and_never_clip() {
+        let reference = |t: f64| (9.0 * (1.0 - t) * t.powi(3) * 255.0, 15.0 * (1.0 - t).powi(2) * t.powi(2) * 255.0, 8.5 * (1.0 - t).powi(3) * t * 255.0);
+        let mut plateau = (0, 0, 0);
+        for i in 0..=1000u32 {
+            let t = f64::from(i) / 1000.0;
+            let color = TrueColor::new_from_bernstein_polynomials(i, 1000);
+            let (r, g, b) = reference(t.min(0.999));
+            assert!(r < 255.0 && g < 255.0 && b < 255.0, "t = {t}: a channel would be clipped");
+            assert_eq!((color.red, color.green, color.blue), (r as u8, g as u8, b as u8), "t = {t}");
+            plateau.1 += usize::from(color.green == 255);
+            plateau.2 += usize::from(color.blue == 255);
+        }
+        assert_eq!((plateau.1, plateau.2), (0, 0), "no channel is saturated");
+        //The old powers saturated green over t in [0.31, 0.92]
+        let mid = TrueColor::new_from_bernstein_polynomials(600, 1000);
+        assert!(mid.green < 255 && mid.blue < 255);
+    }
 
     #[test]
     fn to_32_bit_matches_reference_for_all_mappings() {

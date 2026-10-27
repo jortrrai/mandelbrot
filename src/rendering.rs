@@ -138,8 +138,8 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
                         let (jitter_x, jitter_y) = sample_jitter(point.0, point.1, sample);
                         let (x, y) : (f64, f64) = (original_x+jitter_x, original_y+jitter_y);
                         let complex = plane.complex_from_pixel_plane(x, y);
-                        let iterations = ms.iterate(&complex);
-                        let color = ms.color(coloring_function, iterations);
+                        let position = ms.position(&complex);
+                        let color = ms.interpolated_color(position, |iterations| ms.color(coloring_function, iterations));
                         colors.push(color);    
                     }
                     let supersampled_color = TrueColor::average(&colors);
@@ -338,8 +338,8 @@ pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usiz
                         let (jitter_x, jitter_y) = sample_jitter(x, y, sample);
                         c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y)
                     };
-                    let mut add_color = |x: usize, iterations: u32| {
-                        let color = color_table.as_ref().map_or_else(|| m.color(coloring_function, iterations), |table| table[iterations as usize]);
+                    let mut add_color = |x: usize, position: f64| {
+                        let color = m.interpolated_color(position, |iterations| color_table.as_ref().map_or_else(|| m.color(coloring_function, iterations), |table| table[iterations as usize]));
                         let sum = &mut row[x];
                         sum[0] += u32::from(color.red);
                         sum[1] += u32::from(color.green);
@@ -349,13 +349,13 @@ pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usiz
                     let mut groups = xs.chunks_exact(LANES);
                     for group in &mut groups {
                         let points: [Complex; LANES] = std::array::from_fn(|lane| sample_point(group[lane]));
-                        let iterations = m.iterate_lanes(&points);
+                        let positions = m.position_lanes(&points);
                         for (lane, x) in group.iter().enumerate() {
-                            add_color(*x, iterations[lane]);
+                            add_color(*x, positions[lane]);
                         }
                     }
                     for x in groups.remainder() {
-                        add_color(*x, m.iterate(&sample_point(*x)));
+                        add_color(*x, m.position(&sample_point(*x)));
                     }
                     //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
                     for x in &xs {
@@ -651,5 +651,41 @@ mod tests {
         for y in 0..h { for x in 0..w { if !strip.contains(x, y) { assert_eq!(result[y * w + x], (7, 8, 9)); } } }
         let (_, passes, done) = adaptive_render(&c, &m, w, h, &strip, &base, 6, Some(&AdaptiveSampling::default()), &AtomicBool::new(true));
         assert!(!done && passes == 0);
+    }
+
+    /// The colors of the progressive render must be those of the scalar functions for the same sample points, for both coloring modes (the width is no multiple of the lanes, so the scalar remainder is used too)
+    #[test]
+    fn rendering_colors_every_pixel_like_the_scalar_functions_with_and_without_smooth_coloring() {
+        let (w, h) = (30, 14);
+        let (c, mut m) = boundary_plane(w, h);
+        for smooth in [false, true] {
+            m.smooth_coloring = smooth;
+            let (region, base, never) = (ExposedRegion::full(w, h), vec![TrueColor::new(0, 0, 0); w * h], AtomicBool::new(false));
+            let (rendered, _, _) = adaptive_render(&c, &m, w, h, &region, &base, 1, None, &never);
+            for y in 0..h {
+                for x in 0..w {
+                    let (jx, jy) = sample_jitter(x, y, 0);
+                    let point = c.complex_from_pixel_plane(x as f64 + jx, y as f64 + jy);
+                    let expected = if smooth {
+                        m.interpolated_color(m.iterate_smooth(&point), |i| m.color(TrueColor::new_from_bernstein_polynomials, i))
+                    } else {
+                        m.color(TrueColor::new_from_bernstein_polynomials, m.iterate(&point))
+                    };
+                    assert_eq!(rendered[y * w + x], (expected.red, expected.green, expected.blue), "smooth = {smooth}, pixel ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smooth_rendering_is_deterministic_and_progressive_passes_are_all_reported() {
+        let (w, h) = (40, 24);
+        let (c, m) = boundary_plane(w, h);
+        let (region, base, never) = (ExposedRegion::full(w, h), vec![TrueColor::new(0, 0, 0); w * h], AtomicBool::new(false));
+        let (a, passes, done) = adaptive_render(&c, &m, w, h, &region, &base, 3, None, &never);
+        assert!(done && passes == 3);
+        assert_eq!(a, adaptive_render(&c, &m, w, h, &region, &base, 3, None, &never).0);
+        let (_, passes, done) = adaptive_render(&c, &m, w, h, &region, &base, 3, None, &AtomicBool::new(true));
+        assert!(!done && passes == 0, "cancelling still works");
     }
 }

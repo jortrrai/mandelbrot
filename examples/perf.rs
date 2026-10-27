@@ -32,6 +32,10 @@ fn workloads() -> Vec<Workload> {
         Workload { name: "overhead", view: View::new(-0.75, 0.0, 1.0), max_iterations: 1, supersampling_amount: 1 },
         //Inside the period-3 bulb: interior points that are not in the main cardioid or period-2 bulb, so they iterate until the limit
         Workload { name: "interior-bulb", view: View::new(-0.12256116687665362, 0.7448617666197442, 0.03), max_iterations: 1000, supersampling_amount: 1 },
+        //The same views with supersampling
+        Workload { name: "exterior-4x", view: View::new(0.9, 0.9, 0.3), max_iterations: 1000, supersampling_amount: 4 },
+        Workload { name: "interior-bulb-4x", view: View::new(-0.12256116687665362, 0.7448617666197442, 0.03), max_iterations: 1000, supersampling_amount: 4 },
+        Workload { name: "detail-4x", view: View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002), max_iterations: 5000, supersampling_amount: 4 },
     ]
 }
 
