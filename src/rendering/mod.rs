@@ -1,10 +1,10 @@
 //! Rendering: the progressive renderer used by the window, adaptive supersampling, the regions that a move exposes, and the whole-buffer renderer used for saving images.
 //!
-//! * [`progressive`]: `render_progressively`, `render_region_progressively` and `render_region_adaptively`, one supersampling layer at a time.
-//! * [`adaptive`]: the mask that decides which pixels get more samples.
-//! * [`region`]: the pixels exposed by a move (`ExposedRegion`) and moving the complex plane by whole pixels.
-//! * [`buffer`]: the renderer of a whole buffer at once.
-//! * [`jitter`]: the deterministic offsets of the samples.
+//! * `progressive`: `render_progressively`, `render_region_progressively` and `render_region_adaptively`, one supersampling layer at a time.
+//! * `adaptive`: the mask that decides which pixels get more samples.
+//! * `region`: the pixels exposed by a move (`ExposedRegion`) and moving the complex plane by whole pixels.
+//! * `buffer`: the renderer of a whole buffer at once.
+//! * `jitter`: the deterministic offsets of the samples.
 
 mod adaptive;
 mod buffer;
