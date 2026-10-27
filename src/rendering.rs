@@ -1,5 +1,5 @@
 //Temporary file to group together all rendering functionality
-use std::{time::Instant, thread, sync::{Arc, Mutex, atomic::{AtomicU8, Ordering}}, io::{self, Write}};
+use std::{time::Instant, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, Ordering}}, io::{self, Write}};
 
 use crate::{pixel_buffer::PixelBuffer, complex_plane::ComplexPlane, mandelbrot_set::MandelbrotSet, complex::Complex, coloring::TrueColor};
 
@@ -158,6 +158,49 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
     benchmark("render_box_render_complex_plane_into_buffer()", time);
 }
 
+/// Renders the whole Complex plane `c` progressively, one supersampling layer (pass) at a time, so intermediate images can be shown early.
+/// Pass `k` computes sample `k` of every pixel, with the same deterministic jitter as `render_box_render_complex_plane_into_buffer`,
+/// so after the last pass the colors are identical to the ones that function produces.
+/// After every completed pass, `on_pass` is called with the running average of all samples so far (`width * height` colors, row by row) and the pass number (1-based).
+/// Returns `false` if `cancel` was set before all passes completed; the last completed pass has then been reported. A partially computed pass is discarded.
+/// Note: This function is multithreaded; `on_pass` is called on the calling thread
+/// # Panics
+/// If `lock().unwrap()` panics
+pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
+    let supersampling_amount = supersampling_amount.clamp(1, 64);
+    let amount_of_threads = num_cpus::get();
+    let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
+    for sample in 0..supersampling_amount {
+        let rows = Mutex::new(sums.chunks_mut(width).enumerate());
+        thread::scope(|scope| {
+            for _ in 0..amount_of_threads {
+                scope.spawn(|| loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let next_row = rows.lock().unwrap().next();
+                    let Some((y, row)) = next_row else { return };
+                    for (x, sum) in row.iter_mut().enumerate() {
+                        let (jitter_x, jitter_y) = sample_jitter(x, y, sample);
+                        let complex = c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y);
+                        let color = coloring_function(m.iterate(&complex), m.max_iterations);
+                        sum[0] += u32::from(color.red);
+                        sum[1] += u32::from(color.green);
+                        sum[2] += u32::from(color.blue);
+                    }
+                });
+            }
+        });
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        let divisor = u32::from(sample) + 1;
+        let colors: Vec<TrueColor> = sums.iter().map(|sum| TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8)).collect();
+        on_pass(&colors, sample + 1);
+    }
+    true
+}
+
 pub fn translate_and_render_complex_plane_buffer(p: &mut PixelBuffer, c: &ComplexPlane, m: &MandelbrotSet, rows: i128, columns: i128, supersampling_amount: u8,coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor) {
     println!("rows: {}, columns: {}",rows, columns);
     let max_x: usize = if columns > 0 {columns as usize} else {p.pixel_plane.width-1};
@@ -177,12 +220,17 @@ pub fn translate_and_render_complex_plane_buffer(p: &mut PixelBuffer, c: &Comple
 
 ///# Panics
 /// If `rows_up` != 0 && `columns_right` != 0
-pub fn translate_and_render_efficiently(c: &mut ComplexPlane, p: &mut PixelBuffer, m: &MandelbrotSet, rows_up: i16, columns_right: i16, supersampling_amount: u8,coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor) {
-    assert!(rows_up == 0 || columns_right == 0, "translate_and_render_efficiently: rows_up should be 0 or columns_right should be 0!");
-
+/// Moves the complex plane `c` up by `rows_up` and right by `columns_right` pixels, without rendering anything
+pub fn translate_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i16, columns_right: i16) {
     let row_sign: f64 = if rows_up > 0 {-1.0} else {1.0};
     let column_sign: f64 = if columns_right > 0 {1.0} else {-1.0};
     c.translate(column_sign*c.pixels_to_real(columns_right.unsigned_abs() as u8), row_sign*c.pixels_to_imaginary(rows_up.unsigned_abs() as u8)); 
+}
+
+pub fn translate_and_render_efficiently(c: &mut ComplexPlane, p: &mut PixelBuffer, m: &MandelbrotSet, rows_up: i16, columns_right: i16, supersampling_amount: u8,coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor) {
+    assert!(rows_up == 0 || columns_right == 0, "translate_and_render_efficiently: rows_up should be 0 or columns_right should be 0!");
+
+    translate_complex_plane_by_pixels(c, rows_up, columns_right);
     translate_and_render_complex_plane_buffer(p, c, m, rows_up.into(), (-columns_right).into(), supersampling_amount, coloring_function);
 }
 
@@ -243,6 +291,39 @@ mod tests {
                 assert_eq!(first, render(64, 48, ssaa), "ssaa = {ssaa}");
             }
         }
+    }
+
+    #[test]
+    fn progressive_rendering_matches_the_normal_render_and_reports_every_pass() {
+        let (width, height, supersampling_amount) = (48, 32, 4);
+        let expected = render(width, height, supersampling_amount);
+        let c = ComplexPlane::new(width, height);
+        let m = MandelbrotSet::new(200, 2.0);
+        let mut passes = Vec::new();
+        let mut last = Vec::new();
+        let completed = render_progressively(&c, &m, width, height, supersampling_amount, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), |colors, pass| {
+            passes.push(pass);
+            last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
+        });
+        assert!(completed);
+        assert_eq!(passes, [1, 2, 3, 4]);
+        assert_eq!(last, expected, "the last pass should equal the normal render");
+    }
+
+    #[test]
+    fn progressive_rendering_can_be_cancelled() {
+        let c = ComplexPlane::new(16, 16);
+        let m = MandelbrotSet::new(50, 2.0);
+        let cancel = AtomicBool::new(false);
+        let mut passes = 0;
+        let completed = render_progressively(&c, &m, 16, 16, 8, TrueColor::new_from_bernstein_polynomials, &cancel, |_, pass| {
+            passes = pass;
+            if pass == 2 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(!completed);
+        assert_eq!(passes, 2, "no pass should be reported after cancelling");
     }
 
     #[test]
