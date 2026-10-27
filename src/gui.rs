@@ -112,11 +112,8 @@ pub struct CurrentView {
     pub real: String,
     /// The imaginary part of the center, all digits
     pub imaginary: String,
-    /// The zoom: the magnification relative to the starting view, `1 / scale`, e.g. "x15.6" or "x1.56e4 (2^13.9)". At scale 1, the view is 2.5 units wide on the real axis.
+    /// The zoom: the magnification relative to the starting view, `1 / scale`, e.g. "x15.60" or "x1.56e4 (2^13.9)". At scale 1, the view is 2.5 units wide on the real axis.
     pub zoom: String,
-    /// The scale of the renderer (all digits) and the width of the view on the real axis, `2.5 * scale`
-    pub scale: String,
-    pub width: String,
 }
 
 impl CurrentView {
@@ -127,7 +124,7 @@ impl CurrentView {
         } else {
             format!("\u{d7}{magnification:.2e} (2^{:.1})", magnification.log2())
         };
-        CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), zoom, scale: format!("{scale:e}"), width: format!("{:e}", 2.5 * scale) }
+        CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), zoom }
     }
 }
 
@@ -894,12 +891,6 @@ impl MandelbrotApp {
             ui.label("Zoom:").on_hover_text("The magnification relative to the starting view: 1 / scale. At scale 1 the view is 2.5 units wide on the real axis.");
             value(ui, &view.zoom);
             ui.end_row();
-            ui.label("Scale:");
-            value(ui, &view.scale);
-            ui.end_row();
-            ui.label("Width:").on_hover_text("The width of the view on the real axis: 2.5 * scale");
-            value(ui, &view.width);
-            ui.end_row();
         });
     }
 
@@ -1346,8 +1337,6 @@ mod tests {
         assert_eq!(view.real.parse::<f64>().unwrap().to_bits(), (-0.7498100000000001_f64).to_bits(), "the text reads back as the same number");
         assert_eq!(view.imaginary.parse::<f64>().unwrap().to_bits(), (-0.020300000000000054_f64).to_bits());
         assert_eq!(view.zoom, "\u{d7}1.56e4 (2^13.9)");
-        assert_eq!(view.scale.parse::<f64>().unwrap().to_bits(), 0.00006400000000000002_f64.to_bits());
-        assert_eq!(view.width.parse::<f64>().unwrap().to_bits(), (2.5 * 0.00006400000000000002_f64).to_bits());
         assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 1.0).zoom, "\u{d7}1.00", "the starting view is x1");
         assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 0.1).zoom, "\u{d7}10.00");
         assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 2.0).zoom, "\u{d7}0.50", "zoomed out");
