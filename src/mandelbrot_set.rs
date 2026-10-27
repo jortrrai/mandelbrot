@@ -10,6 +10,13 @@ pub struct MandelbrotSet {
     pub palette_scale: Option<u32>,
     ///Whether colors use the smooth (fractional) iteration position of `iterate_smooth` instead of the integer iteration count, see `MandelbrotSet::position`
     pub smooth_coloring: bool,
+    ///Experimental: with `Some(threshold)`, smooth coloring only places escaped points between palette entries where two neighboring palette colors differ by more than `threshold`
+    ///(sum of the channel differences, 0-765); elsewhere the integer iteration count is used, because mixing nearly equal colors changes nothing visible. `None` smooths everywhere.
+    ///See `rendering` (`smoothing_plan`), a heuristic with no guarantee of equal output.
+    pub smooth_threshold: Option<u32>,
+    ///Experimental: how selective smoothing finds the escape value of the points that need it: `false` records it inside the lockstep loop, `true` runs the plain loop and then iterates
+    ///those points again one by one
+    pub selective_replay: bool,
 }
 
 /// The amount of points `MandelbrotSet::iterate_lanes` iterates at the same time
@@ -32,7 +39,7 @@ const CHECK_INTERVAL: u32 = 4;
 
 impl MandelbrotSet {
     pub fn new(max_iterations: u32, orbit_radius: f64) -> MandelbrotSet {
-        MandelbrotSet { max_iterations, orbit_radius, palette_scale: None, smooth_coloring: true }
+        MandelbrotSet { max_iterations, orbit_radius, palette_scale: None, smooth_coloring: true, smooth_threshold: None, selective_replay: false }
     }
 
     /// The color of a point with the given iteration count. Without a `palette_scale` this is exactly `coloring_function(iterations, max_iterations)`.
@@ -66,6 +73,15 @@ impl MandelbrotSet {
     /// The integer count and the interior classification are exactly those of `iterate`; only the escaped points do a few extra steps and two logarithms.
     /// Formula: nu = n - log2(ln|z_n|) for a large |z_n|, see <https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set#Continuous_(smooth)_coloring>
     pub fn iterate_smooth(&self, c: &Complex) -> f64 {
+        self.iterate_smooth_inner(c, None)
+    }
+
+    /// Like `iterate_smooth`, but a point whose integer count `n` has `wanted[n] == false` gets the position `n` (no extra steps or logarithms)
+    pub fn iterate_smooth_selective(&self, c: &Complex, wanted: &[bool]) -> f64 {
+        self.iterate_smooth_inner(c, Some(wanted))
+    }
+
+    fn iterate_smooth_inner(&self, c: &Complex, wanted: Option<&[bool]>) -> f64 {
         if self.is_known_interior(c) {
             return f64::from(self.max_iterations);
         }
@@ -75,6 +91,9 @@ impl MandelbrotSet {
         for _ in 0..self.max_iterations {
             z = z.squared().add(c);
             if (z.x * z.x + z.y * z.y) > orbit_radius_squared {
+                if wanted.is_some_and(|wanted| !wanted[iterations as usize]) {
+                    return f64::from(iterations);
+                }
                 //Continue to the end of the block of CHECK_INTERVAL steps, like the lockstep loop does for its points, so both paths start the smooth position from the same z
                 let end = self.block_end(iterations + 1);
                 for _ in (iterations + 1)..end {
@@ -210,6 +229,25 @@ impl MandelbrotSet {
             }
         }
         iterations
+    }
+
+    /// Like `iterate_lanes_smooth`, but only the points with `wanted[count]` get a smooth position, see `iterate_smooth_selective`; identical to it for every point.
+    /// Uses `selective_replay` to find the escape value of those points.
+    pub fn position_lanes_selective(&self, points: &[Complex; LANES], wanted: &[bool]) -> [f64; LANES] {
+        if self.selective_replay {
+            let counts = self.iterate_lanes_plain(points);
+            return std::array::from_fn(|lane| {
+                if counts[lane] < self.max_iterations && wanted[counts[lane] as usize] { self.iterate_smooth(&points[lane]) } else { f64::from(counts[lane]) }
+            });
+        }
+        let result = self.iterate_lanes_smooth_dispatch(points);
+        std::array::from_fn(|lane| {
+            if result.escaped[lane] && wanted[result.iterations[lane] as usize] {
+                self.smooth_position(self.block_end(result.iterations[lane] + 1), (result.escape_x[lane], result.escape_y[lane]), &points[lane])
+            } else {
+                f64::from(result.iterations[lane])
+            }
+        })
     }
 
     /// Like `iterate_lanes`, but returns the smooth color position of every point, see `iterate_smooth`; identical to it for every point
@@ -543,5 +581,28 @@ mod tests {
         assert_eq!((half.red, half.green, half.blue), (35, 200, 220));
         let inside = m.interpolated_color(10.0, lookup);
         assert_eq!((inside.red, inside.green, inside.blue), (100, 200, 155), "the limit itself is never mixed with a color beyond it");
+    }
+
+    #[test]
+    fn selective_positions_match_the_scalar_path_in_both_strategies_and_the_extremes() {
+        let points = test_points();
+        let max_iterations = 300;
+        let mut m = MandelbrotSet::new(max_iterations, 2.0);
+        let patterns: [Vec<bool>; 3] = [vec![true; 301], vec![false; 301], (0..=300).map(|n| n % 3 == 0 || (50..80).contains(&n)).collect()];
+        for replay in [false, true] {
+            m.selective_replay = replay;
+            for wanted in &patterns {
+                for group in points.chunks_exact(LANES) {
+                    let group: [Complex; LANES] = std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y));
+                    let lanes = m.position_lanes_selective(&group, wanted);
+                    for lane in 0..LANES {
+                        assert_eq!(lanes[lane].to_bits(), m.iterate_smooth_selective(&group[lane], wanted).to_bits(), "replay {replay}, {:?}", group[lane]);
+                        let (count, full) = (m.iterate(&group[lane]), m.iterate_smooth(&group[lane]));
+                        let expected = if count < max_iterations && !wanted[count as usize] { f64::from(count) } else { full };
+                        assert_eq!(lanes[lane].to_bits(), expected.to_bits(), "an unwanted count gets the integer position, a wanted one the full smooth position");
+                    }
+                }
+            }
+        }
     }
 }

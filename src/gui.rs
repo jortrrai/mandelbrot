@@ -98,6 +98,8 @@ pub struct MandelbrotApp {
     limit_pending: bool,
     /// Whether supersampling puts the extra samples on boundary and detail pixels only, see `rendering::render_region_adaptively`
     adaptive_supersampling: bool,
+    /// Experimental: smooth coloring only where the palette makes large steps, see `MandelbrotSet::smooth_threshold`
+    selective_smoothing: bool,
     /// Edited value of the supersampling field, applied when editing ends
     supersampling_input: u8,
     /// Edited text of the "go to view" fields
@@ -135,6 +137,7 @@ impl MandelbrotApp {
             auto_preset: AutoPreset::Balanced,
             limit_pending: false,
             adaptive_supersampling: false,
+            selective_smoothing: false,
             m,
             vars: InteractionVariables::default(),
             config: config.clone(),
@@ -281,6 +284,9 @@ impl MandelbrotApp {
             self.m.palette_scale = None;
         }
         let mut m = self.m.clone();
+        //Experimental selective smoothing: palette steps above 4 (sum of the channel differences), neighbors recorded again one by one; off keeps full smoothing
+        m.smooth_threshold = self.selective_smoothing.then_some(4);
+        m.selective_replay = self.selective_smoothing;
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
         let pixels_total = strip.as_ref().map_or(width * height, |(_, region)| region.pixel_count(width, height));
@@ -550,6 +556,10 @@ impl MandelbrotApp {
         });
 
         ui.separator();
+        if ui.checkbox(&mut self.selective_smoothing, "Selective smoothing (experimental)").on_hover_text("Smooth coloring only where the palette makes visible steps between iteration counts; faster, but a heuristic that can differ from full smoothing").changed() {
+            let state = if self.selective_smoothing { "on" } else { "off" };
+            self.render(&format!("Turned selective smoothing {state}"));
+        }
         ui.horizontal(|ui| {
             ui.label("Coloring:");
             egui::ComboBox::from_id_salt("coloring").selected_text(COLORING_FUNCTIONS[self.coloring_index].0).show_ui(ui, |ui| {
@@ -980,5 +990,24 @@ mod tests {
         assert!(quality < coloring && coloring < channels, "the rendering quality is with the rendering controls");
         assert!(channels < heading && heading < saved_quality && saved_quality < save, "the saved image quality and the Save button are together in the Save Image section, after the rendering controls");
         assert_eq!(texts.iter().filter(|t| t.starts_with("Saved image quality")).count(), 1);
+    }
+
+    #[test]
+    fn selective_smoothing_is_off_by_default_and_switches_without_changing_other_settings() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        assert!(!app.selective_smoothing && app.m.smooth_threshold.is_none() && app.m.smooth_coloring, "full smoothing is the default");
+        let full = app.p.pixels.clone();
+        app.selective_smoothing = true;
+        app.render("selective on");
+        wait_for_job(&mut app);
+        assert_eq!(app.m.smooth_threshold, Some(4));
+        assert_eq!(app.m.max_iterations, 50, "the iteration limit is untouched");
+        app.selective_smoothing = false;
+        app.render("selective off");
+        wait_for_job(&mut app);
+        assert_eq!(app.m.smooth_threshold, None);
+        assert_eq!(app.p.pixels, full, "switching back gives the fully smoothed image again");
     }
 }

@@ -102,6 +102,7 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
 
         let handle = thread::spawn(move || {
             let mut thread_chunks = Vec::new();
+            let smoothing = smoothing_plan(&ms, coloring_function, None);
 
             loop {
                 let mut data = thread_mutex.lock().unwrap();
@@ -138,7 +139,11 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
                         let (jitter_x, jitter_y) = sample_jitter(point.0, point.1, sample);
                         let (x, y) : (f64, f64) = (original_x+jitter_x, original_y+jitter_y);
                         let complex = plane.complex_from_pixel_plane(x, y);
-                        let position = ms.position(&complex);
+                        let position = match &smoothing {
+                            Smoothing::Integer => f64::from(ms.iterate(&complex)),
+                            Smoothing::Full => ms.position(&complex),
+                            Smoothing::Selective(wanted) => ms.iterate_smooth_selective(&complex, wanted),
+                        };
                         let color = ms.interpolated_color(position, |iterations| ms.color(coloring_function, iterations));
                         colors.push(color);    
                     }
@@ -255,6 +260,29 @@ impl Default for AdaptiveSampling {
 /// The amount of samples every pixel gets before adaptive supersampling decides where more samples are needed
 pub const ADAPTIVE_UNIFORM_SAMPLES: u8 = 2;
 
+/// How the colors of a render are placed in the color table
+enum Smoothing {
+    /// The integer iteration count
+    Integer,
+    /// Smooth position everywhere
+    Full,
+    /// Smooth position only for the points whose iteration count `n` has `wanted[n]`: where the palette makes a visible jump
+    Selective(Vec<bool>),
+}
+
+/// Experimental selective smoothing, see `MandelbrotSet::smooth_threshold`: a count `n` is wanted when the palette colors of `n - 1`, `n`, `n + 1` and `n + 2` are not all within the threshold of
+/// their neighbor (a smooth position of a point that counted `n` lies between `n - 1` and `n + 2`, and mixes two neighboring entries)
+fn smoothing_plan(m: &MandelbrotSet, coloring_function: fn(u32, u32) -> TrueColor, table: Option<&[TrueColor]>) -> Smoothing {
+    if !m.smooth_coloring {
+        return Smoothing::Integer;
+    }
+    let Some(threshold) = m.smooth_threshold else { return Smoothing::Full };
+    let color = |iterations: u32| table.map_or_else(|| m.color(coloring_function, iterations), |table| table[iterations as usize]);
+    let jumps: Vec<bool> = (0..m.max_iterations).map(|n| color_distance(color(n), color(n + 1)) > threshold).collect(); //jumps[n]: between entry n and n + 1
+    let wanted: Vec<bool> = (0..=m.max_iterations as usize).map(|n| (n.saturating_sub(1)..=(n + 1).min(jumps.len().saturating_sub(1))).any(|i| jumps.get(i).copied().unwrap_or(false))).collect();
+    if wanted.iter().any(|w| *w) { Smoothing::Selective(wanted) } else { Smoothing::Integer }
+}
+
 fn color_distance(a: TrueColor, b: TrueColor) -> u32 {
     u32::from(a.red.abs_diff(b.red)) + u32::from(a.green.abs_diff(b.green)) + u32::from(a.blue.abs_diff(b.blue))
 }
@@ -315,6 +343,7 @@ pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usiz
     let adaptive = adaptive.filter(|_| supersampling_amount > ADAPTIVE_UNIFORM_SAMPLES);
     let mut first_colors: Vec<TrueColor> = Vec::new();
     let mut mask: Option<Vec<bool>> = None;
+    let smoothing = smoothing_plan(m, coloring_function, color_table.as_deref());
     for sample in 0..supersampling_amount {
         pixels_done.store(0, Ordering::Relaxed);
         let divisor = u32::from(sample) + 1;
@@ -349,13 +378,22 @@ pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usiz
                     let mut groups = xs.chunks_exact(LANES);
                     for group in &mut groups {
                         let points: [Complex; LANES] = std::array::from_fn(|lane| sample_point(group[lane]));
-                        let positions = m.position_lanes(&points);
+                        let positions = match &smoothing {
+                            Smoothing::Integer => m.iterate_lanes(&points).map(f64::from),
+                            Smoothing::Full => m.position_lanes(&points),
+                            Smoothing::Selective(wanted) => m.position_lanes_selective(&points, wanted),
+                        };
                         for (lane, x) in group.iter().enumerate() {
                             add_color(*x, positions[lane]);
                         }
                     }
                     for x in groups.remainder() {
-                        add_color(*x, m.position(&sample_point(*x)));
+                        let point = sample_point(*x);
+                        add_color(*x, match &smoothing {
+                            Smoothing::Integer => f64::from(m.iterate(&point)),
+                            Smoothing::Full => m.position(&point),
+                            Smoothing::Selective(wanted) => m.iterate_smooth_selective(&point, wanted),
+                        });
                     }
                     //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
                     for x in &xs {
@@ -687,5 +725,50 @@ mod tests {
         assert_eq!(a, adaptive_render(&c, &m, w, h, &region, &base, 3, None, &never).0);
         let (_, passes, done) = adaptive_render(&c, &m, w, h, &region, &base, 3, None, &AtomicBool::new(true));
         assert!(!done && passes == 0, "cancelling still works");
+    }
+
+    #[test]
+    fn the_smoothing_plan_follows_the_palette_steps() {
+        let f = TrueColor::new_from_bernstein_polynomials;
+        let mut m = MandelbrotSet::new(1000, 2.0);
+        assert!(matches!(smoothing_plan(&m, f, None), Smoothing::Full), "no threshold: smooth everywhere");
+        let steps: Vec<u32> = (0..1000).map(|n| color_distance(m.color(f, n), m.color(f, n + 1))).collect();
+        let largest = *steps.iter().max().unwrap();
+        m.smooth_threshold = Some(largest);
+        assert!(matches!(smoothing_plan(&m, f, None), Smoothing::Integer), "no step is above the threshold, so nothing is smoothed");
+        m.smooth_threshold = Some(largest - 1);
+        let Smoothing::Selective(wanted) = smoothing_plan(&m, f, None) else { panic!("a step above the threshold makes the plan selective") };
+        assert_eq!(wanted.len(), 1001);
+        for n in 0..=1000usize {
+            let expected = (n.saturating_sub(1)..=(n + 1).min(999)).any(|i| steps[i] > largest - 1);
+            assert_eq!(wanted[n], expected, "count {n}: wanted when one of the steps around it is above the threshold");
+        }
+        //A smaller palette scale (auto iterations) makes bigger steps per iteration
+        m.palette_scale = Some(100);
+        m.smooth_threshold = Some(largest);
+        assert!(matches!(smoothing_plan(&m, f, None), Smoothing::Selective(_)));
+        m.smooth_coloring = false;
+        m.smooth_threshold = Some(0);
+        assert!(matches!(smoothing_plan(&m, f, None), Smoothing::Integer));
+    }
+
+    #[test]
+    fn selective_smoothing_only_differs_where_the_palette_is_nearly_flat_and_both_strategies_agree() {
+        let (w, h) = (96, 64);
+        let (c, mut m) = boundary_plane(w, h);
+        let (region, base, never) = (ExposedRegion::full(w, h), vec![TrueColor::new(0, 0, 0); w * h], AtomicBool::new(false));
+        let full = adaptive_render(&c, &m, w, h, &region, &base, 1, None, &never).0;
+        m.smooth_threshold = Some(0);
+        let zero = adaptive_render(&c, &m, w, h, &region, &base, 1, None, &never).0;
+        assert_eq!(zero, full, "with threshold 0 only identical neighboring colors are skipped, so nothing changes");
+        for threshold in [3, 12] {
+            m.smooth_threshold = Some(threshold);
+            m.selective_replay = false;
+            let capture = adaptive_render(&c, &m, w, h, &region, &base, 1, None, &never).0;
+            m.selective_replay = true;
+            assert_eq!(capture, adaptive_render(&c, &m, w, h, &region, &base, 1, None, &never).0, "recording in the loop and replaying give the same image");
+            let worst = capture.iter().zip(&full).map(|(a, b)| u32::from(a.0.abs_diff(b.0)) + u32::from(a.1.abs_diff(b.1)) + u32::from(a.2.abs_diff(b.2))).max().unwrap();
+            assert!(worst <= 3 * threshold + 3, "threshold {threshold}: the largest difference to full smoothing is {worst}");
+        }
     }
 }
