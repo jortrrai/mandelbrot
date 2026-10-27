@@ -156,3 +156,19 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     eframe::run_native("Mandelbrot set viewer", options, Box::new(|_creation_context| Ok(Box::new(app))))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_interaction_variables_start_with_the_values_of_the_window() {
+        let variables = InteractionVariables::default();
+        assert_eq!((variables.translation_amount, variables.scale_numerator, variables.scale_denominator), (10, 9.0, 10.0));
+        assert_eq!(variables.scaling_factor(), 0.9, "zooming in multiplies the plane by 9/10");
+        assert_eq!(variables.inverse_scaling_factor(), 10.0 / 9.0);
+        let faster = InteractionVariables::new(3, 1.0, 10.0);
+        assert_eq!((faster.translation_amount, faster.scaling_factor()), (3, 0.1));
+    }
+}
+

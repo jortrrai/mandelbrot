@@ -251,4 +251,61 @@ mod tests {
             assert_eq!(crate::pixel_buffer::PixelBuffer::colors_to_pixels(&colors, &mapping), expected, "{name}");
         }
     }
+
+    #[test]
+    fn color_channel_mappings_are_parsed_case_insensitively_and_invalid_ones_are_refused() {
+        for name in ALL_MAPPINGS {
+            assert_eq!(format!("{:?}", ColorChannelMapping::new(&name.to_lowercase()).unwrap()), name);
+            assert_eq!(ColorChannelMapping::new(name).unwrap().to_string(), name);
+            assert_eq!(name.parse::<ColorChannelMapping>().unwrap(), ColorChannelMapping::new(name).unwrap());
+            assert_eq!(ColorChannelMapping::new(name).unwrap().get_r_g_b_mapping(), (name.chars().next().unwrap(), name.chars().nth(1).unwrap(), name.chars().nth(2).unwrap()));
+        }
+        for invalid in ["", "RG", "RGBA", "XYZ", "R G"] {
+            assert!(ColorChannelMapping::new(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn the_average_of_colors_truncates_each_channel_and_an_empty_average_is_black() {
+        let average = TrueColor::average(&vec![TrueColor::new(255, 0, 1), TrueColor::new(0, 1, 2), TrueColor::new(0, 1, 2)]);
+        assert_eq!((average.red, average.green, average.blue), (85, 0, 1), "255 / 3 = 85, 2 / 3 = 0, 5 / 3 = 1");
+        let single = TrueColor::average(&vec![TrueColor::new(9, 8, 7)]);
+        assert_eq!((single.red, single.green, single.blue), (9, 8, 7));
+        let empty = TrueColor::average(&Vec::new());
+        assert_eq!((empty.red, empty.green, empty.blue), (0, 0, 0));
+    }
+
+    #[test]
+    fn the_channels_of_a_color_are_found_by_letter() {
+        let color = TrueColor::new(1, 2, 3);
+        assert_eq!((color.get_color('R'), color.get_color('G'), color.get_color('B')), (1, 2, 3));
+        assert_eq!(color.to_32_bit(&ColorChannelMapping::RGB), 0x0001_0203);
+        assert_eq!(color.to_32_bit(&ColorChannelMapping::BGR), 0x0003_0201);
+    }
+
+    /// The colors of both palettes at some positions, to within one level per channel (the palettes use floating point functions that may round differently on another platform)
+    #[test]
+    fn the_palettes_give_the_colors_they_always_gave() {
+        let near = |actual: TrueColor, expected: (u8, u8, u8)| {
+            let (a, e) = ([actual.red, actual.green, actual.blue], [expected.0, expected.1, expected.2]);
+            assert!(a.iter().zip(e).all(|(a, e)| a.abs_diff(e) <= 1), "{a:?} is not near {e:?}");
+        };
+        //Bernstein polynomials of t = iterations / max_iterations: black at t = 0 and almost black inside the set (t = 1 is clamped to 0.999, which leaves a little red)
+        near(TrueColor::new_from_bernstein_polynomials(0, 1000), (0, 0, 0));
+        near(TrueColor::new_from_bernstein_polynomials(100, 1000), (2, 30, 158));
+        near(TrueColor::new_from_bernstein_polynomials(200, 1000), (14, 97, 221));
+        near(TrueColor::new_from_bernstein_polynomials(400, 1000), (88, 220, 187));
+        near(TrueColor::new_from_bernstein_polynomials(500, 1000), (143, 239, 135));
+        near(TrueColor::new_from_bernstein_polynomials(750, 1000), (242, 134, 25));
+        near(TrueColor::new_from_bernstein_polynomials(1000, 1000), (2, 0, 0));
+        //HSV: the hue turns 0.3 degrees per iteration (a full turn after about 1200), full value outside the set and black inside it
+        near(TrueColor::new_from_hsv_colors(0, 1000), (255, 0, 0));
+        near(TrueColor::new_from_hsv_colors(100, 1000), (255, 127, 0));
+        near(TrueColor::new_from_hsv_colors(200, 1000), (255, 255, 0));
+        near(TrueColor::new_from_hsv_colors(400, 1000), (0, 255, 0));
+        near(TrueColor::new_from_hsv_colors(500, 1000), (0, 255, 127));
+        near(TrueColor::new_from_hsv_colors(750, 1000), (0, 63, 255));
+        near(TrueColor::new_from_hsv_colors(999, 1000), (253, 0, 255));
+        near(TrueColor::new_from_hsv_colors(1000, 1000), (0, 0, 0));
+    }
 }
