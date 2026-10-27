@@ -91,6 +91,31 @@ fn main() {
         }
     }
 
+    //What the window does after every layer of a progressive render (on the render thread): copy the layer into the buffer, convert it to pixels, and copy both to send them to the window
+    if filter.as_ref().map_or(true, |f| "gui-layers".contains(f.as_str())) {
+        let workload = &workloads()[1]; //default view, 4 layers
+        let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+        c.set_view(&workload.view);
+        let m = MandelbrotSet::new(workload.max_iterations, 2.0);
+        let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
+        let mut sent = (Vec::new(), Vec::new());
+        summarize("4x render, empty layer callback", time_runs(runs, || {
+            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |_, _| {});
+        }));
+        summarize("4x render, window layer callback", time_runs(runs, || {
+            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+                buffer.colors.copy_from_slice(colors);
+                buffer.update_pixels();
+                sent = std::hint::black_box((buffer.colors.clone(), buffer.pixels.clone()));
+            });
+        }));
+        summarize("4x render, colors-only layer callback", time_runs(runs, || {
+            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+                sent.0 = std::hint::black_box(colors.to_vec());
+            });
+        }));
+    }
+
     //Shifting the pixel buffer, which is what a move does before rendering the exposed strip
     if filter.as_ref().map_or(true, |f| "shift".contains(f.as_str())) {
         let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
