@@ -102,7 +102,7 @@ impl MandelbrotApp {
             notices,
             notice_sender,
         };
-        app.log(format!("Window: {}x{} pixels, {} CPU threads used for rendering", config.window_width, config.window_height, num_cpus::get()));
+        app.log(format!("Window: {}x{} pixels, {} CPU threads used for rendering", config.window_width, config.window_height, rendering::render_thread_count()));
         app.log(format!("Max. iterations: {}, orbit radius: {}, supersampling: {}x", config.max_iterations, config.orbit_radius, config.supersampling_amount));
         app.render("Rendered the default view");
         app
