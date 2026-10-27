@@ -19,6 +19,11 @@ fn sample_jitter(x: usize, y: usize, sample: u8) -> (f64, f64) {
     (to_unit(h), to_unit(splitmix64(h)))
 }
 
+/// The amount of threads that rendering functions use: all logical CPU threads except one, which is left free for the rest of the system and the GUI, but at least one
+pub fn render_thread_count() -> usize {
+    num_cpus::get().saturating_sub(1).max(1)
+}
+
 ///A box representing the area to render by rendering functions
 #[derive(Clone,Copy)]
 pub struct RenderBox {
@@ -78,7 +83,7 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
     let chunks_len = chunks.len();
     //println!("chunks.len(): {}", chunks.len());
     let mut handles = Vec::new();
-    let amount_of_threads = num_cpus::get(); //Amount of CPU threads to use
+    let amount_of_threads = render_thread_count(); //Amount of CPU threads to use
     let global_mutex = Arc::new(Mutex::new(0));
     let max_progress: u8 = 30;
     let chunks_len_over_max_progress = chunks_len / max_progress as usize;
@@ -168,7 +173,7 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
 /// If `lock().unwrap()` panics
 pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
     let supersampling_amount = supersampling_amount.clamp(1, 64);
-    let amount_of_threads = num_cpus::get();
+    let amount_of_threads = render_thread_count();
     let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
     for sample in 0..supersampling_amount {
         let rows = Mutex::new(sums.chunks_mut(width).enumerate());
@@ -281,6 +286,13 @@ mod tests {
         let m = MandelbrotSet::new(200, 2.0);
         render_complex_plane_into_buffer(&mut p, &c, &m, supersampling_amount, TrueColor::new_from_bernstein_polynomials);
         p.colors.iter().map(|c| (c.red, c.green, c.blue)).collect()
+    }
+
+    #[test]
+    fn render_thread_count_leaves_one_thread_free_but_is_at_least_one() {
+        let threads = render_thread_count();
+        assert!(threads >= 1);
+        assert_eq!(threads, (num_cpus::get() - 1).max(1));
     }
 
     #[test]
