@@ -3,7 +3,7 @@
 //! * `progressive`: `Render`, the renderer that works one supersampling layer at a time.
 //! * `adaptive`: the mask that decides which pixels get more samples.
 //! * `region`: the pixels exposed by a move (`ExposedRegion`) and moving the complex plane by whole pixels.
-//! * `buffer`: the renderer of a whole buffer at once.
+//! * `buffer`: rendering a whole buffer at once, for saving images.
 //! * `jitter`: the deterministic offsets of the samples.
 
 mod adaptive;
@@ -13,7 +13,7 @@ mod progressive;
 mod region;
 
 pub use adaptive::{adaptive_mask, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
-pub use buffer::{render_box_render_complex_plane_into_buffer, render_complex_plane_into_buffer, RenderBox};
+pub use buffer::render_complex_plane_into_buffer;
 pub use progressive::Render;
 pub use region::{center_complex_plane_on, translate_complex_plane_by_pixels, ExposedRegion};
 
