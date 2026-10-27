@@ -1245,7 +1245,6 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
- "xkbcommon",
 ]
 
 [[package]]
@@ -1253,15 +1252,6 @@ name = "memchr"
 version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
-
-[[package]]
-name = "memmap2"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43a5a03cefb0d953ec0be133036f14e109412fa594edc2f77227249db66cc3ed"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "memmap2"
@@ -2318,7 +2308,7 @@ dependencies = [
  "cursor-icon",
  "libc",
  "log",
- "memmap2 0.9.12",
+ "memmap2",
  "rustix 0.38.34",
  "thiserror 1.0.69",
  "wayland-backend",
@@ -2343,7 +2333,7 @@ dependencies = [
  "cursor-icon",
  "libc",
  "log",
- "memmap2 0.9.12",
+ "memmap2",
  "rustix 1.1.6",
  "thiserror 2.0.21",
  "wayland-backend",
@@ -3093,7 +3083,7 @@ dependencies = [
  "dpi",
  "js-sys",
  "libc",
- "memmap2 0.9.12",
+ "memmap2",
  "ndk",
  "objc2 0.5.3",
  "objc2-app-kit 0.2.2",
@@ -3193,17 +3183,6 @@ name = "xcursor"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a0ccd7b4a5345edfcd0c3535718a4e9ff7798ffc536bb5b5a0e26ff84732911"
-
-[[package]]
-name = "xkbcommon"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13867d259930edc7091a6c41b4ce6eee464328c6ff9659b7e4c668ca20d4c91e"
-dependencies = [
- "libc",
- "memmap2 0.8.0",
- "xkeysym",
-]
 
 [[package]]
 name = "xkbcommon-dl"

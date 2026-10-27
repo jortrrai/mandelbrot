@@ -45,14 +45,6 @@ impl PixelBuffer {
         self.pixels = PixelBuffer::colors_to_pixels(&self.colors, &self.color_channel_mapping);
     }
 
-    /// Returns the amount of Mandelbrot iterations at a given point inside the pixel plane //TODO: move this somewhere else
-    /*pub fn iterations_at_point(&self, x: usize, y: usize, max_iterations: u32) -> u32 {
-        let index = self.point_to_index(x, y);
-        let pixel = self.buffer[index];
-        let iterations = crate::iterations_from_hsv_pixel(pixel, max_iterations);
-        iterations
-    }*/ 
-
     /// Translate the complex plane in the `buffer` `rows` up and `columns` to the right.
     /// This operation is significantly less expensive than the `render_box_render_complex_plane_into_buffer` function, as it does not rerender anything in the complex plane, it simply
     /// get rids of `rows.abs()` rows and `columns.abs()` columns, and moves the image rows to the right and columns up.

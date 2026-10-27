@@ -33,13 +33,6 @@ impl Complex {
         Complex { x: new_x, y: new_y }
     }
 
-    ///Multiply with a complex
-    pub fn multiply(&self, c: &Complex) -> Complex {
-        let new_x = self.x * c.x - self.y * c.y;
-        let new_y = self.x * c.y + self.y * c.x;
-        Complex { x: new_x, y: new_y }
-    }
-
     ///Square the complex
     pub fn squared(&self) -> Complex {
         let new_x = self.x * self.x - self.y * self.y;
@@ -64,7 +57,6 @@ impl fmt::Debug for Complex {
         )
     }
 }
-//Complex
 
 #[cfg(test)]
 mod tests {
@@ -80,7 +72,6 @@ mod tests {
         assert_eq!(parts(&a.add(&b)), (4.0, -2.0));
         assert_eq!(parts(&a.subtract(&b)), (-2.0, 6.0));
         assert_eq!(parts(&a.multiply_real(2.5)), (2.5, 5.0));
-        assert_eq!(parts(&a.multiply(&b)), (11.0, 2.0), "(1 + 2i)(3 - 4i) = 11 + 2i");
         assert_eq!(parts(&a.squared()), (-3.0, 4.0), "(1 + 2i)^2 = -3 + 4i");
         assert_eq!(Complex::new(3.0, 4.0).abs(), 5.0);
     }
