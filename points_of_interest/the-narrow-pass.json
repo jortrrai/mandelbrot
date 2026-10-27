@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "name": "The Narrow Pass",
+  "description": "A huge round wall meets the diagonal and leaves a sharp V-shaped valley of thin filaments.",
+  "formerly": "View 4 (VIEW_4)",
+  "order": 4,
+  "location": {
+    "center": { "real": -0.46395833333333325, "imaginary": 0.5531250000000001 },
+    "scale": 0.03,
+    "max_iterations": 2000
+  },
+  "appearance": {
+    "coloring": "bernstein",
+    "color_channels": "RGB"
+  }
+}

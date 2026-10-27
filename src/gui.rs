@@ -13,7 +13,7 @@ use crate::mandelbrot_set::MandelbrotSet;
 use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
 use crate::rendering::ExposedRegion;
 use crate::{rendering, ColoringFunction, Config, InteractionVariables, COLORING_FUNCTION, COLOR_CHANNEL_MAPPING};
-use crate::{VIEW_0, VIEW_1, VIEW_2, VIEW_3, VIEW_4, VIEW_5, VIEW_6, VIEW_7, VIEW_8, VIEW_9};
+use crate::points_of_interest::{self, Coloring, PointOfInterest};
 
 /// Width in points of the right side panel, used to size the initial window
 pub const SIDE_PANEL_WIDTH: f32 = 380.0;
@@ -26,10 +26,6 @@ const COLOR_CHANNEL_MAPPINGS: [&str; 27] = [
     "RGB", "RBG", "GRB", "GBR", "BRG", "BGR", "RRR", "GGG", "BBB", "RRG", "RRB", "RGG", "RGR", "RBB", "RBR", "GGB", "GGR", "GBB", "GBG", "GRG", "GRR", "BBG", "BBR", "BGB", "BGG", "BRB", "BRR",
 ];
 
-const VIEWS: [(&str, &View); 10] = [
-    ("View 1", &VIEW_1), ("View 2", &VIEW_2), ("View 3", &VIEW_3), ("View 4", &VIEW_4), ("View 5", &VIEW_5),
-    ("View 6", &VIEW_6), ("View 7", &VIEW_7), ("View 8", &VIEW_8), ("View 9", &VIEW_9), ("View 10", &VIEW_0),
-];
 
 /// A message from a rendering job that runs on a background thread
 enum JobMessage {
@@ -76,6 +72,11 @@ pub struct MandelbrotApp {
     max_iterations_input: u32,
     /// Edited value of the supersampling field, applied when editing ends
     supersampling_input: u8,
+    /// The points of interest of the folder, see `points_of_interest`, and the folder they were loaded from
+    points: Vec<PointOfInterest>,
+    points_folder: std::path::PathBuf,
+    /// Whether going to a point of interest also restores the appearance saved in its file (the coloring and the color channels); off by default
+    restore_appearance: bool,
     /// Edited text of the "go to view" fields
     view_inputs: [String; 3],
     /// Messages shown to the user in the status box
@@ -114,6 +115,9 @@ impl MandelbrotApp {
             supersampling_amount: config.supersampling_amount,
             supersampling_input: config.supersampling_amount,
             image_supersampling_amount: config.supersampling_amount,
+            points: Vec::new(),
+            points_folder: std::path::PathBuf::new(),
+            restore_appearance: false,
             view_inputs: [String::new(), String::new(), String::new()],
             log: Vec::new(),
             texture: None,
@@ -127,6 +131,7 @@ impl MandelbrotApp {
         };
         app.log(format!("Window: {}x{} pixels, {} CPU threads used for rendering", config.window_width, config.window_height, rendering::render_thread_count()));
         app.log(format!("Max. iterations: {}, orbit radius: {}, supersampling: {}x", config.max_iterations, config.orbit_radius, config.supersampling_amount));
+        app.load_points_of_interest(points_of_interest::find_folder());
         app.render("Rendered the default view");
         app
     }
@@ -296,6 +301,44 @@ impl MandelbrotApp {
         self.log("Saving the image...");
     }
 
+    /// Loads the points of interest of `folder`, and logs how many were found and every problem (a skipped file, an ignored appearance)
+    fn load_points_of_interest(&mut self, folder: std::path::PathBuf) {
+        let report = points_of_interest::load_folder(&folder);
+        self.log(format!("Points of interest: {} loaded from {}", report.points.len(), folder.display()));
+        for problem in report.problems {
+            self.log(format!("Points of interest: {problem}"));
+        }
+        self.points = report.points;
+        self.points_folder = folder;
+    }
+
+    /// Goes to the point of interest at `index`: its center, scale and maximum iterations are applied, and with `restore_appearance` also the coloring and color channels saved in its file.
+    /// Otherwise the current appearance, and the supersampling, stay as they are.
+    fn go_to_point_of_interest(&mut self, index: usize) {
+        let Some(point) = self.points.get(index).cloned() else { return };
+        let location = &point.location;
+        self.c.set_view(&View::new(location.real, location.imaginary, location.scale));
+        self.m.max_iterations = location.max_iterations;
+        self.max_iterations_input = location.max_iterations;
+        let mut restored = String::new();
+        if let (true, Some(appearance)) = (self.restore_appearance, &point.appearance) {
+            if let Some(coloring) = appearance.coloring {
+                self.coloring_index = match coloring {
+                    Coloring::Hsv => 0,
+                    Coloring::Bernstein => 1,
+                }; //See COLORING_FUNCTIONS
+                self.coloring_function = COLORING_FUNCTIONS[self.coloring_index].1;
+                restored += &format!(", coloring {}", COLORING_FUNCTIONS[self.coloring_index].0);
+            }
+            if let Some(mapping) = appearance.color_channels {
+                self.p.color_channel_mapping = mapping;
+                restored += &format!(", color channels {mapping:?}");
+            }
+        }
+        let message = if restored.is_empty() { format!("Moved to {}", point.name) } else { format!("Moved to {} and restored its appearance{restored}", point.name) };
+        self.render(&message);
+    }
+
     fn go_to_view(&mut self) {
         let parsed: Vec<Result<f64, _>> = self.view_inputs.iter().map(|text| text.trim().parse::<f64>()).collect();
         match parsed.as_slice() {
@@ -382,16 +425,27 @@ impl MandelbrotApp {
 
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label("Go to view:");
-            egui::ComboBox::from_id_salt("views").selected_text("Pick a view").show_ui(ui, |ui| {
-                for (name, view) in VIEWS {
-                    if ui.selectable_label(false, name).clicked() {
-                        self.c.set_view(view);
-                        self.render(&format!("Moved to {name}"));
+            ui.label("Points of interest:");
+            let mut chosen = None;
+            egui::ComboBox::from_id_salt("points_of_interest").selected_text("Pick a place").show_ui(ui, |ui| {
+                for (index, point) in self.points.iter().enumerate() {
+                    let mut response = ui.selectable_label(false, &point.name);
+                    if !point.description.is_empty() {
+                        response = response.on_hover_text(&point.description);
+                    }
+                    if response.clicked() {
+                        chosen = Some(index);
                     }
                 }
             });
+            if ui.button("Reload").on_hover_text(format!("Loads the .json files of {} again", self.points_folder.display())).clicked() {
+                self.load_points_of_interest(self.points_folder.clone());
+            }
+            if let Some(index) = chosen {
+                self.go_to_point_of_interest(index);
+            }
         });
+        ui.checkbox(&mut self.restore_appearance, "Restore the saved appearance (coloring, color channels)").on_hover_text("Off: going to a place keeps your current appearance. The supersampling is never part of a place.");
         ui.horizontal(|ui| {
             for (input, hint) in self.view_inputs.iter_mut().zip(["x", "y", "scale"]) {
                 ui.add(egui::TextEdit::singleline(input).hint_text(hint).desired_width(80.0));
@@ -678,5 +732,83 @@ mod tests {
         assert_eq!(app.bars.as_ref().unwrap().pixels_total, 64 * 48, "a partially refined buffer cannot be reused");
         wait_for_job(&mut app);
         assert!(app.buffer_is_complete);
+    }
+
+    fn app_with_points(files: &[(&str, &str)]) -> (MandelbrotApp, std::path::PathBuf) {
+        let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        let folder = std::env::temp_dir().join(format!("mandelbrot-gui-poi-{}-{}", std::process::id(), files.len()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        for (name, text) in files {
+            std::fs::write(folder.join(name), text).unwrap();
+        }
+        app.load_points_of_interest(folder.clone());
+        (app, folder)
+    }
+
+    const HSV_BGR_PLACE: &str = r#"{ "format_version": 1, "name": "Test Place", "location": { "center": { "real": -0.7498100000000001, "imaginary": -0.020300000000000054 }, "scale": 0.00006400000000000002, "max_iterations": 321 },
+        "appearance": { "coloring": "hsv", "color_channels": "BGR" } }"#;
+
+    #[test]
+    fn the_application_lists_the_points_of_interest_of_the_folder_at_startup() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        assert_eq!(app.points.len(), 10, "the ten former views are found without a list of file names in the code");
+        assert_eq!(app.points[9].name, "Sunlit Reef", "View 10 (VIEW_0) is the last one");
+        assert!(app.log.iter().any(|message| message.starts_with("Points of interest: 10 loaded from")));
+        assert!(!app.restore_appearance);
+    }
+
+    #[test]
+    fn going_to_a_point_applies_the_location_and_keeps_the_current_appearance_and_supersampling() {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        let (coloring_index, mapping, supersampling) = (app.coloring_index, app.p.color_channel_mapping, app.supersampling_amount);
+        app.go_to_point_of_interest(0);
+        wait_for_job(&mut app);
+        let center = app.c.center();
+        assert!((center.x - -0.7498100000000001).abs() < 1e-12 && (center.y - -0.020300000000000054).abs() < 1e-12, "{center:?}");
+        assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18);
+        assert_eq!((app.m.max_iterations, app.max_iterations_input), (321, 321));
+        assert_eq!((app.coloring_index, app.p.color_channel_mapping, app.supersampling_amount), (coloring_index, mapping, supersampling), "the appearance is only restored on request");
+        assert!(app.log.last().unwrap().starts_with("Moved to Test Place in"), "{:?}", app.log.last());
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn restoring_the_appearance_applies_the_saved_coloring_and_channels_but_never_the_supersampling() {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        let supersampling = app.supersampling_amount;
+        app.restore_appearance = true;
+        app.go_to_point_of_interest(0);
+        wait_for_job(&mut app);
+        assert_eq!(app.coloring_index, 0, "HSV");
+        assert_eq!(format!("{:?}", app.p.color_channel_mapping), "BGR");
+        assert_eq!(app.supersampling_amount, supersampling);
+        assert!(app.log.last().unwrap().contains("restored its appearance"), "{:?}", app.log.last());
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn a_malformed_file_is_reported_in_the_status_box_and_the_other_places_still_load() {
+        let (app, folder) = app_with_points(&[("good.json", HSV_BGR_PLACE), ("bad.json", "{ this is not json"), ("zero.json", &HSV_BGR_PLACE.replace("0.00006400000000000002", "0"))]);
+        assert_eq!(app.points.len(), 1);
+        assert!(app.log.iter().any(|message| message.starts_with("Points of interest: bad.json")), "{:?}", app.log);
+        assert!(app.log.iter().any(|message| message.starts_with("Points of interest: zero.json: the scale should be")));
+        assert!(app.log.iter().any(|message| message.starts_with("Points of interest: 1 loaded from")));
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn reloading_finds_files_that_were_added_and_a_missing_folder_is_reported_not_fatal() {
+        let (mut app, folder) = app_with_points(&[("good.json", HSV_BGR_PLACE)]);
+        std::fs::write(folder.join("mine.json"), HSV_BGR_PLACE.replace("Test Place", "My Place")).unwrap();
+        app.load_points_of_interest(folder.clone());
+        assert_eq!(app.points.len(), 2, "a user's own file appears after reloading");
+        let _ = std::fs::remove_dir_all(&folder);
+        app.load_points_of_interest(folder);
+        assert!(app.points.is_empty() && app.log.iter().any(|message| message.contains("Cannot read the points of interest folder")));
     }
 }

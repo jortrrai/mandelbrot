@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "name": "Seahorse Embers",
+  "description": "The seahorse valley area, with red and orange glowing cores among spirals.",
+  "formerly": "View 6 (VIEW_6)",
+  "order": 6,
+  "location": {
+    "center": { "real": -0.7498100000000001, "imaginary": -0.020300000000000054 },
+    "scale": 0.00006400000000000002,
+    "max_iterations": 5000
+  },
+  "appearance": {
+    "coloring": "bernstein",
+    "color_channels": "RGB"
+  }
+}

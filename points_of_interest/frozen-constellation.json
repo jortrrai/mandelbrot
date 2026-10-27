@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "name": "Frozen Constellation",
+  "description": "A ten-armed star in dark blue, with a small copy of the whole set at the bottom.",
+  "formerly": "View 2 (VIEW_2)",
+  "order": 2,
+  "location": {
+    "center": { "real": -1.0591666666666668, "imaginary": 0.2629166666666668 },
+    "scale": 0.01,
+    "max_iterations": 2000
+  },
+  "appearance": {
+    "coloring": "bernstein",
+    "color_channels": "RGB"
+  }
+}

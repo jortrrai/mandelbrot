@@ -86,6 +86,10 @@ KeyBindings {
 }
 
 </pre>
+## Points of interest
+The places in the *Points of interest* list of the window are the `.json` files of the [`points_of_interest`](points_of_interest) folder (the one in the current directory, or else the one next to the sources). Add your own file to the folder and press *Reload*; nothing in the code lists the files.
+A file has a **location** (center, `scale`, `max_iterations`) and an optional **appearance** (`coloring`, `color_channels`). The `scale` is the scale of the renderer: the view is `2.5 * scale` wide, so a smaller scale is a deeper zoom. Going to a place always applies the location; its saved appearance is only applied when *Restore the saved appearance* is ticked, and the supersampling is never part of a place. A file that cannot be used is skipped with a message in the status box. See the documentation of `src/points_of_interest.rs` for the format.
+
 ## Controls
 Keys | Action
 :---:|:------
