@@ -122,7 +122,7 @@ fn texture_bytes_equal_the_converted_pixels_for_all_mappings() {
         let mapping = ColorChannelMapping::new(name).unwrap();
         let pixels = PixelBuffer::colors_to_pixels(&colors, &mapping);
         let expected: Vec<u8> = pixels.iter().flat_map(|pixel| [(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8]).collect();
-        assert_eq!(colors_to_rgb_bytes(&colors, &mapping), expected, "{name}");
+        assert_eq!(colors_to_rgb_bytes(&colors, mapping), expected, "{name}");
     }
 }
 

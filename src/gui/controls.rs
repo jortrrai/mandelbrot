@@ -64,7 +64,7 @@ impl MandelbrotApp {
             }
         });
         let frame = self.points_ui(ui);
-        self.thumbs_visible = frame.visible.clone();
+        self.thumbs_visible.clone_from(&frame.visible);
         let ctx = ui.ctx().clone();
         self.schedule_thumbnails(&ctx, &frame);
         if let Some(index) = frame.chosen {

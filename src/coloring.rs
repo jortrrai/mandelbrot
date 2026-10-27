@@ -151,7 +151,7 @@ impl TrueColor {
 
     /// Same as `to_32_bit`, but takes an already resolved `ColorChannelMapping::get_r_g_b_mapping()`,
     /// so a conversion of many colors only has to resolve the mapping once.
-    pub(crate) fn to_32_bit_resolved(&self, (r_map, g_map, b_map): (char, char, char)) -> u32 {
+    pub(crate) fn to_32_bit_resolved(self, (r_map, g_map, b_map): (char, char, char)) -> u32 {
         let (r, g, b) = (u32::from(self.get_color(r_map)), u32::from(self.get_color(g_map)), u32::from(self.get_color(b_map)));
         (r << 16) | (g << 8) | b
     }

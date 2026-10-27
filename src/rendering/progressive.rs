@@ -72,7 +72,7 @@ pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usiz
                     }
                     let next_row = rows.lock().unwrap().next();
                     let Some((y, (row, color_row))) = next_row else { return };
-                    let xs: Vec<usize> = (0..width).filter(|x| region.contains(*x, y) && mask_ref.map_or(true, |mask| mask[y * width + x])).collect();
+                    let xs: Vec<usize> = (0..width).filter(|x| region.contains(*x, y) && mask_ref.is_none_or(|mask| mask[y * width + x])).collect();
                     let sample_point = |x: usize| {
                         let (jitter_x, jitter_y) = sample_jitter(x, y, sample);
                         c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y)
@@ -85,15 +85,15 @@ pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usiz
                         sum[2] += u32::from(color.blue);
                     };
                     //Iterate LANES pixels at the same time, the remaining pixels one by one
-                    let mut groups = xs.chunks_exact(LANES);
-                    for group in &mut groups {
+                    let (groups, remainder) = xs.as_chunks::<LANES>();
+                    for group in groups {
                         let points: [Complex; LANES] = std::array::from_fn(|lane| sample_point(group[lane]));
                         let positions = m.position_lanes(&points);
                         for (lane, x) in group.iter().enumerate() {
                             add_color(*x, positions[lane]);
                         }
                     }
-                    for x in groups.remainder() {
+                    for x in remainder {
                         add_color(*x, m.position(&sample_point(*x)));
                     }
                     //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
@@ -111,7 +111,7 @@ pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usiz
         }
         if let Some(adaptive) = adaptive {
             if sample == 0 {
-                first_colors = colors.clone();
+                first_colors.clone_from(&colors);
             } else if sample + 1 == ADAPTIVE_UNIFORM_SAMPLES {
                 mask = Some(adaptive_mask(width, height, region, &first_colors, &colors, adaptive.threshold));
             }

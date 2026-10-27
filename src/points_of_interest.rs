@@ -83,7 +83,7 @@ pub struct Location {
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Appearance {
     /// The coloring, if the file gives one
     pub coloring: Option<Coloring>,

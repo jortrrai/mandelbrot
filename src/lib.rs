@@ -21,6 +21,8 @@
     clippy::complexity
 )]
 #![allow(
+    // Image sizes, pixel counts and iteration counts are far below 2^23, so converting them to floats is exact
+    clippy::cast_precision_loss,
     clippy::must_use_candidate,
     clippy::multiple_crate_versions,
     clippy::uninlined_format_args,
