@@ -139,7 +139,7 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
                         let (x, y) : (f64, f64) = (original_x+jitter_x, original_y+jitter_y);
                         let complex = plane.complex_from_pixel_plane(x, y);
                         let iterations = ms.iterate(&complex);
-                        let color = coloring_function(iterations, ms.max_iterations);
+                        let color = ms.color(coloring_function, iterations);
                         colors.push(color);    
                     }
                     let supersampled_color = TrueColor::average(&colors);
@@ -242,7 +242,7 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
     let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
     let mut colors: Vec<TrueColor> = base.to_vec();
     //The color of a pixel only depends on its iteration count, which is at most `max_iterations`, so compute every color once
-    let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| (0..=m.max_iterations).map(|iterations| coloring_function(iterations, m.max_iterations)).collect());
+    let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| (0..=m.max_iterations).map(|iterations| m.color(coloring_function, iterations)).collect());
     for sample in 0..supersampling_amount {
         pixels_done.store(0, Ordering::Relaxed);
         let divisor = u32::from(sample) + 1;
@@ -261,7 +261,7 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
                         c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y)
                     };
                     let mut add_color = |x: usize, iterations: u32| {
-                        let color = color_table.as_ref().map_or_else(|| coloring_function(iterations, m.max_iterations), |table| table[iterations as usize]);
+                        let color = color_table.as_ref().map_or_else(|| m.color(coloring_function, iterations), |table| table[iterations as usize]);
                         let sum = &mut row[x];
                         sum[0] += u32::from(color.red);
                         sum[1] += u32::from(color.green);
