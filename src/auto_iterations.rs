@@ -44,6 +44,41 @@ impl Default for AutoIterationSettings {
     }
 }
 
+/// Named settings for the automatic iteration limit. None of them guarantees that every slowly escaping pixel is found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoPreset {
+    /// Lower limits and fewer, coarser probes: faster renders, more deep boundary detail left unresolved
+    Performance,
+    /// The default: a limit of 250 at zoom 1 plus 100 per zoom doubling, refined while at least 0.2% of the probes newly escape
+    Balanced,
+    /// Higher starting limits, finer probes and a lower threshold for refining: resolves more structure, renders can take much longer
+    HighDetail,
+    /// Settings that were edited by hand and match no preset
+    Custom,
+}
+
+impl AutoPreset {
+    pub const SELECTABLE: [AutoPreset; 3] = [AutoPreset::Performance, AutoPreset::Balanced, AutoPreset::HighDetail];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            AutoPreset::Performance => "Performance",
+            AutoPreset::Balanced => "Balanced",
+            AutoPreset::HighDetail => "High Detail",
+            AutoPreset::Custom => "Custom",
+        }
+    }
+
+    /// The settings of the preset; `Custom` has none of its own and gives the default
+    pub fn settings(self) -> AutoIterationSettings {
+        match self {
+            AutoPreset::Performance => AutoIterationSettings { start: 150, per_doubling: 60, minimum: 100, ceiling: 20_000, growth: 2, max_rounds: 4, min_new_escape_fraction: 0.005, probe_stride: 12, work_budget: 500_000_000 },
+            AutoPreset::Balanced | AutoPreset::Custom => AutoIterationSettings::default(),
+            AutoPreset::HighDetail => AutoIterationSettings { start: 500, per_doubling: 150, minimum: 100, ceiling: 200_000, growth: 2, max_rounds: 8, min_new_escape_fraction: 0.0005, probe_stride: 4, work_budget: 8_000_000_000 },
+        }
+    }
+}
+
 impl AutoIterationSettings {
     /// The logarithmic starting limit for a view with the given scale (scale 1 = magnification 1; a smaller scale is a higher magnification)
     pub fn initial_limit(&self, scale: f64) -> u32 {
@@ -216,6 +251,25 @@ mod tests {
 
     fn choose(c: &ComplexPlane, settings: &AutoIterationSettings, threads: usize) -> AutoIterationResult {
         choose_limit(c, &MandelbrotSet::new(1000, 2.0), 160, 120, settings, threads, &AtomicBool::new(false)).unwrap()
+    }
+
+    #[test]
+    fn presets_are_ordered_from_less_to_more_work_and_balanced_is_the_default() {
+        let (p, b, h) = (AutoPreset::Performance.settings(), AutoPreset::Balanced.settings(), AutoPreset::HighDetail.settings());
+        assert_eq!(format!("{b:?}"), format!("{:?}", AutoIterationSettings::default()));
+        assert!(p.start < b.start && b.start < h.start && p.per_doubling < b.per_doubling && b.per_doubling < h.per_doubling);
+        assert!(p.ceiling < b.ceiling && b.ceiling < h.ceiling && p.work_budget < b.work_budget && b.work_budget < h.work_budget);
+        assert!(p.min_new_escape_fraction > b.min_new_escape_fraction && b.min_new_escape_fraction > h.min_new_escape_fraction);
+        //The starting limits are ordered at every zoom; the final limits also on a boundary view (on smooth views the refinement steps of the presets can land on different multiples)
+        for view in [(-0.7498100000000001, -0.020300000000000054, 0.000064), (-0.75, 0.0, 1.0)] {
+            let c = plane(view.0, view.1, view.2);
+            let results: Vec<AutoIterationResult> = [p.clone(), b.clone(), h.clone()].iter().map(|s| choose(&c, s, 4)).collect();
+            assert!(results[0].palette_scale <= results[1].palette_scale && results[1].palette_scale <= results[2].palette_scale);
+            assert!(results.iter().all(|r| r.limit >= r.palette_scale));
+        }
+        let c = plane(-0.7498100000000001, -0.020300000000000054, 0.000064);
+        let limits: Vec<u32> = [p, b, h].iter().map(|s| choose(&c, s, 4).limit).collect();
+        assert!(limits[0] <= limits[1] && limits[1] <= limits[2], "{limits:?}");
     }
 
     #[test]
