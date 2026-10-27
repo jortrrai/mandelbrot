@@ -1,5 +1,8 @@
 //! The graphical user interface: the fractal on the left, the controls in the top right and a scrollable status log in the bottom right.
 //! The terminal is only used for developer output.
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
+
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 
 use crate::coloring::{ColorChannelMapping, TrueColor};
@@ -25,6 +28,13 @@ const VIEWS: [(&str, &View); 10] = [
     ("View 6", &VIEW_6), ("View 7", &VIEW_7), ("View 8", &VIEW_8), ("View 9", &VIEW_9), ("View 10", &VIEW_0),
 ];
 
+/// The result of a rendering job that ran on a background thread
+struct JobResult {
+    c: ComplexPlane,
+    p: PixelBuffer,
+    message: String,
+}
+
 pub struct MandelbrotApp {
     c: ComplexPlane,
     p: PixelBuffer,
@@ -45,6 +55,8 @@ pub struct MandelbrotApp {
     log: Vec<String>,
     texture: Option<TextureHandle>,
     texture_outdated: bool,
+    /// The receiving end of the running background rendering job, if any. While a job runs, the controls are disabled.
+    job: Option<Receiver<JobResult>>,
 }
 
 impl MandelbrotApp {
@@ -69,6 +81,7 @@ impl MandelbrotApp {
             log: Vec::new(),
             texture: None,
             texture_outdated: true,
+            job: None,
         };
         app.log(format!("Window: {}x{} pixels, {} CPU threads used for rendering", config.window_width, config.window_height, num_cpus::get()));
         app.log(format!("Max. iterations: {}, orbit radius: {}, supersampling: {}x", config.max_iterations, config.orbit_radius, config.supersampling_amount));
@@ -88,36 +101,75 @@ impl MandelbrotApp {
         format!("center = ({}, {}), scale = {}", center.x, center.y, self.c.get_scale())
     }
 
-    /// Renders the complete view into the buffer, then logs `message` and the current view
+    fn is_busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    /// Runs `job` on a clone of the complex plane and pixel buffer on a background thread, so the window stays responsive.
+    /// When the job finishes, the results replace the current plane and buffer, and `message` and the current view are logged.
+    fn start_job(&mut self, message: String, job: impl FnOnce(&mut ComplexPlane, &mut PixelBuffer, &MandelbrotSet, u8, ColoringFunction) + Send + 'static) {
+        let (sender, receiver) = mpsc::channel();
+        let (mut c, mut p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
+        let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
+        std::thread::spawn(move || {
+            job(&mut c, &mut p, &m, supersampling_amount, coloring_function);
+            let _ = sender.send(JobResult { c, p, message }); //The receiver is gone if the window was closed
+        });
+        self.job = Some(receiver);
+        self.log("Rendering...");
+    }
+
+    /// Takes the results of the background job if it has finished
+    fn poll_job(&mut self) {
+        let Some(receiver) = &self.job else { return };
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.job = None;
+                self.c = result.c;
+                self.p = result.p;
+                self.texture_outdated = true;
+                let description = self.view_description();
+                self.log(format!("{}: {description}", result.message));
+            }
+            Err(TryRecvError::Empty) => (),
+            Err(TryRecvError::Disconnected) => {
+                self.job = None;
+                self.log("Rendering failed, see the terminal for details");
+            }
+        }
+    }
+
+    /// Renders the complete view in the background, then logs `message` and the current view
     fn render(&mut self, message: &str) {
-        rendering::render_complex_plane_into_buffer(&mut self.p, &self.c, &self.m, self.supersampling_amount, self.coloring_function);
-        self.texture_outdated = true;
-        let description = self.view_description();
-        self.log(format!("{message}: {description}"));
+        self.start_job(message.to_string(), |c, p, m, supersampling_amount, coloring_function| {
+            rendering::render_complex_plane_into_buffer(p, c, m, supersampling_amount, coloring_function);
+        });
     }
 
     fn translate(&mut self, name: &str, rows_up: i16, columns_right: i16) {
-        rendering::translate_and_render_efficiently(&mut self.c, &mut self.p, &self.m, rows_up, columns_right, self.supersampling_amount, self.coloring_function);
-        self.texture_outdated = true;
-        let description = self.view_description();
-        self.log(format!("Moved {name} {} pixels: {description}", self.vars.translation_amount));
+        let message = format!("Moved {name} {} pixels", self.vars.translation_amount);
+        self.start_job(message, move |c, p, m, supersampling_amount, coloring_function| {
+            rendering::translate_and_render_efficiently(c, p, m, rows_up, columns_right, supersampling_amount, coloring_function);
+        });
     }
 
     fn save_image(&mut self) {
         let time_stamp = chrono::Utc::now().to_string();
-        let view = self.c.get_view();
-        if self.config.window_scale == 1.0 {
-            self.p.save_as_png(&time_stamp, &view, &self.m, self.image_supersampling_amount);
-        } else {
-            let mut image_p = PixelBuffer::new(PixelPlane::new(self.config.image_width, self.config.image_height));
-            let mut image_c = ComplexPlane::new(self.config.image_width, self.config.image_height);
-            image_p.color_channel_mapping = self.p.color_channel_mapping;
-            image_c.set_view(&view);
-            rendering::render_complex_plane_into_buffer(&mut image_p, &image_c, &self.m, self.image_supersampling_amount, self.coloring_function);
-            image_p.save_as_png(&time_stamp, &view, &self.m, self.image_supersampling_amount);
-        }
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
-        self.log(format!("Saved the image to saved/{file_name}.png"));
+        let (config, image_supersampling_amount) = (self.config.clone(), self.image_supersampling_amount);
+        self.start_job(format!("Saved the image to saved/{file_name}.png"), move |c, p, m, _, coloring_function| {
+            let view = c.get_view();
+            if config.window_scale == 1.0 {
+                p.save_as_png(&time_stamp, &view, m, image_supersampling_amount);
+            } else {
+                let mut image_p = PixelBuffer::new(PixelPlane::new(config.image_width, config.image_height));
+                let mut image_c = ComplexPlane::new(config.image_width, config.image_height);
+                image_p.color_channel_mapping = p.color_channel_mapping;
+                image_c.set_view(&view);
+                rendering::render_complex_plane_into_buffer(&mut image_p, &image_c, m, image_supersampling_amount, coloring_function);
+                image_p.save_as_png(&time_stamp, &view, m, image_supersampling_amount);
+            }
+        });
     }
 
     fn go_to_view(&mut self) {
@@ -133,12 +185,15 @@ impl MandelbrotApp {
 
     /// Handles a click on the fractal at `(x, y)` in pixel buffer coordinates
     fn handle_image_click(&mut self, x: f32, y: f32, centering: bool) {
+        if self.is_busy() {
+            return; //The view is being rendered, clicks would map to a stale image
+        }
         let complex = self.c.complex_from_pixel_plane(x.into(), y.into());
         if centering {
-            rendering::translate_to_center_and_render_efficiently(&mut self.c, &mut self.p, &self.m, &complex, self.supersampling_amount, self.coloring_function);
-            self.texture_outdated = true;
-            let description = self.view_description();
-            self.log(format!("Centered the view on ({:.10}, {:.10}): {description}", complex.x, complex.y));
+            let message = format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y);
+            self.start_job(message, move |c, p, m, supersampling_amount, coloring_function| {
+                rendering::translate_to_center_and_render_efficiently(c, p, m, &complex, supersampling_amount, coloring_function);
+            });
         } else {
             self.log(format!("Clicked pixel ({}, {}) = complex point ({:.10}, {:.10})", x as usize, y as usize, complex.x, complex.y));
         }
@@ -288,7 +343,13 @@ impl MandelbrotApp {
     }
 
     fn log_ui(&self, ui: &mut egui::Ui) {
-        ui.heading("Status");
+        ui.horizontal(|ui| {
+            ui.heading("Status");
+            if self.is_busy() {
+                ui.spinner();
+                ui.label("Rendering...");
+            }
+        });
         egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             for message in &self.log {
                 ui.add(egui::Label::new(message).wrap());
@@ -300,12 +361,19 @@ impl MandelbrotApp {
 impl eframe::App for MandelbrotApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_job();
+        if self.is_busy() {
+            ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
+        }
         self.update_texture(&ctx);
 
         egui::Panel::right("side_panel").default_size(SIDE_PANEL_WIDTH).min_size(280.0).show(ui, |ui| {
             egui::Panel::bottom("status_panel").resizable(true).default_size(220.0).min_size(80.0).show(ui, |ui| self.log_ui(ui));
             egui::CentralPanel::default().show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.controls_ui(ui));
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let enabled = !self.is_busy();
+                    ui.add_enabled_ui(enabled, |ui| self.controls_ui(ui));
+                });
             });
         });
 
@@ -326,5 +394,36 @@ impl eframe::App for MandelbrotApp {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wait_for_job(app: &mut MandelbrotApp) {
+        let start = std::time::Instant::now();
+        while app.is_busy() {
+            assert!(start.elapsed() < Duration::from_secs(60), "the background job did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+            app.poll_job();
+        }
+    }
+
+    #[test]
+    fn rendering_runs_in_the_background_and_updates_the_buffer() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        assert!(app.is_busy(), "the initial render should run in the background");
+        wait_for_job(&mut app);
+        assert!(app.p.pixels.iter().any(|pixel| *pixel != 0), "the default view should not be all black");
+        assert!(app.log.last().unwrap().starts_with("Rendered the default view"));
+
+        let before = app.p.pixels.clone();
+        app.c.scale(0.5);
+        app.render("Zoomed in");
+        assert!(app.is_busy());
+        wait_for_job(&mut app);
+        assert_ne!(before, app.p.pixels, "zooming should change the image");
     }
 }
