@@ -1059,7 +1059,8 @@ mod tests {
         let mut app = MandelbrotApp::new(&config);
         wait_for_job(&mut app);
         assert_eq!(app.points.len(), 10, "the ten former views are found without a list of file names in the code");
-        assert_eq!(app.points[9].name, "Sunlit Reef", "View 10 (VIEW_0) is the last one");
+        assert!(app.points.iter().any(|point| point.name == "Sunlit Reef"), "the former View 10 (VIEW_0)");
+        assert!(app.points.windows(2).all(|pair| pair[0].name.to_lowercase() <= pair[1].name.to_lowercase()), "listed by name");
         assert!(app.log.iter().any(|message| message.starts_with("Points of interest: 10 loaded from")));
         assert!(!app.restore_appearance);
     }
