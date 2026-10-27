@@ -112,19 +112,41 @@ pub struct CurrentView {
     pub real: String,
     /// The imaginary part of the center, all digits
     pub imaginary: String,
-    /// The zoom: the magnification relative to the starting view, `1 / scale`, e.g. "x15.60" or "x1.56e4 (2^13.9)". At scale 1, the view is 2.5 units wide on the real axis.
+    /// The zoom: the magnification relative to the starting view, `1 / scale`, see `format_zoom`. At scale 1, the view is 2.5 units wide on the real axis.
     pub zoom: String,
 }
 
 impl CurrentView {
     pub fn new(center: &Complex, scale: f64) -> CurrentView {
-        let magnification = 1.0 / scale;
-        let zoom = if magnification < 1000.0 {
-            format!("\u{d7}{magnification:.2}")
-        } else {
-            format!("\u{d7}{magnification:.2e} (2^{:.1})", magnification.log2())
-        };
-        CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), zoom }
+        CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), zoom: format_zoom(1.0 / scale) }
+    }
+}
+
+/// The zoom as text, "x" and the magnification: ordinary decimal numbers from 0.001 up to a billion (at most two decimals, none for a whole number, thousands separated by commas:
+/// "x1", "x2.5", "x156.25", "x15,625", "x250,000"), and scientific notation only beyond that ("x1.00e9", "x1.00e-4").
+pub fn format_zoom(magnification: f64) -> String {
+    if !magnification.is_finite() || magnification <= 0.0 {
+        return String::from("\u{d7}?");
+    }
+    let trimmed = |text: String| if text.contains('.') { text.trim_end_matches('0').trim_end_matches('.').to_string() } else { text };
+    if magnification < 0.001 || magnification >= 1e9 {
+        return format!("\u{d7}{magnification:.2e}");
+    }
+    if magnification >= 999.995 {
+        let digits = format!("{:.0}", magnification);
+        let mut grouped = String::new();
+        for (index, digit) in digits.chars().enumerate() {
+            if index > 0 && (digits.len() - index) % 3 == 0 {
+                grouped.push(',');
+            }
+            grouped.push(digit);
+        }
+        return format!("\u{d7}{grouped}");
+    }
+    if magnification >= 1.0 {
+        format!("\u{d7}{}", trimmed(format!("{magnification:.2}")))
+    } else {
+        format!("\u{d7}{}", trimmed(format!("{magnification:.4}")))
     }
 }
 
@@ -1336,11 +1358,27 @@ mod tests {
         assert_eq!(view.imaginary, "-0.020300000000000054");
         assert_eq!(view.real.parse::<f64>().unwrap().to_bits(), (-0.7498100000000001_f64).to_bits(), "the text reads back as the same number");
         assert_eq!(view.imaginary.parse::<f64>().unwrap().to_bits(), (-0.020300000000000054_f64).to_bits());
-        assert_eq!(view.zoom, "\u{d7}1.56e4 (2^13.9)");
-        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 1.0).zoom, "\u{d7}1.00", "the starting view is x1");
-        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 0.1).zoom, "\u{d7}10.00");
-        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 2.0).zoom, "\u{d7}0.50", "zoomed out");
-        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 4e-6).zoom, "\u{d7}2.50e5 (2^17.9)");
+        assert_eq!(view.zoom, "\u{d7}15,625");
+        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 1.0).zoom, "\u{d7}1", "the starting view is x1");
+        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 0.1).zoom, "\u{d7}10");
+        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 2.0).zoom, "\u{d7}0.5", "zoomed out");
+        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 4e-6).zoom, "\u{d7}250,000");
+    }
+
+    #[test]
+    fn the_zoom_is_an_ordinary_number_in_the_readable_range_and_scientific_only_beyond_it() {
+        let cases = [
+            (1.0, "\u{d7}1"), (2.0, "\u{d7}2"), (2.5, "\u{d7}2.5"), (3.3333333, "\u{d7}3.33"), (10.0, "\u{d7}10"), (156.25, "\u{d7}156.25"), (999.0, "\u{d7}999"),
+            (999.99, "\u{d7}999.99"), (999.996, "\u{d7}1,000"), (1000.0, "\u{d7}1,000"), (15625.000000000002, "\u{d7}15,625"), (250000.0, "\u{d7}250,000"), (123456789.4, "\u{d7}123,456,789"),
+            (999999999.0, "\u{d7}999,999,999"), (1e9, "\u{d7}1.00e9"), (1.5e12, "\u{d7}1.50e12"),
+            (0.5, "\u{d7}0.5"), (0.25, "\u{d7}0.25"), (0.0625, "\u{d7}0.0625"), (0.001, "\u{d7}0.001"), (0.0009, "\u{d7}9.00e-4"), (1e-4, "\u{d7}1.00e-4"),
+        ];
+        for (magnification, expected) in cases {
+            assert_eq!(format_zoom(magnification), expected, "{magnification}");
+            assert!(!format_zoom(magnification).contains("2^"), "no power of two");
+        }
+        assert_eq!(format_zoom(f64::INFINITY), "\u{d7}?");
+        assert_eq!(format_zoom(0.0), "\u{d7}?");
     }
 
     #[test]
@@ -1355,7 +1393,7 @@ mod tests {
         let texts = side_panel_texts(&mut app);
         let before = app.c.center();
         assert!(texts.iter().any(|t| *t == format!("{}", before.x)) && texts.iter().any(|t| *t == format!("{}", before.y)), "{texts:?}");
-        assert!(texts.iter().any(|t| t == "\u{d7}1.00"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "\u{d7}1"), "{texts:?}");
 
         //A move, a zoom and a jump change the texts at once, before any render has finished
         app.translate("up", 10, 0);
@@ -1365,12 +1403,12 @@ mod tests {
         wait_for_job(&mut app);
         app.c.scale(0.1);
         app.render("Zoomed in");
-        assert!(side_panel_texts(&mut app).iter().any(|t| t == "\u{d7}10.00"));
+        assert!(side_panel_texts(&mut app).iter().any(|t| t == "\u{d7}10"));
         wait_for_job(&mut app);
         app.c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002));
         app.render("Moved to a view");
         let texts = side_panel_texts(&mut app);
-        assert!(texts.iter().any(|t| t == "\u{d7}1.56e4 (2^13.9)") && texts.iter().any(|t| t.starts_with("-0.74981000000000")), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "\u{d7}15,625") && texts.iter().any(|t| t.starts_with("-0.74981000000000")), "{texts:?}");
         wait_for_job(&mut app);
     }
 
