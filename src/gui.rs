@@ -1506,4 +1506,53 @@ mod tests {
         assert_eq!(current.height, thumbnails::thumbnail_height(64, 48));
         let _ = std::fs::remove_dir_all(folder);
     }
+
+    /// Clicks at `position` in the side panel (move, press and release in three frames, like a mouse) and returns the clipboard texts that the window asked for
+    fn click_side_panel(app: &mut MandelbrotApp, ctx: &egui::Context, position: egui::Pos2) -> Vec<String> {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 1000.0));
+        let mut copied = Vec::new();
+        for events in [
+            vec![egui::Event::PointerMoved(position)],
+            vec![egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }],
+            vec![egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }],
+        ] {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app.side_panel_ui(ui));
+            copied.extend(output.platform_output.commands.iter().filter_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            }));
+            output.drop_without_applying_deltas();
+        }
+        copied
+    }
+
+    #[test]
+    fn the_copy_button_asks_for_the_center_and_scale_with_all_digits_to_be_copied() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        app.c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002));
+        let ctx = egui::Context::default();
+        let copy = side_panel_positions(&mut app).into_iter().find(|(text, _)| text == "Copy").expect("the Copy button is drawn");
+        //Clicking elsewhere copies nothing; clicking the button copies the description of the view
+        assert!(click_side_panel(&mut app, &ctx, egui::pos2(5.0, 5.0)).is_empty());
+        let x = copy_x(&mut app);
+        let copied = click_side_panel(&mut app, &ctx, egui::pos2(x, copy.1 + 4.0));
+        assert_eq!(copied.len(), 1, "one click copies once: {copied:?}");
+        let center = app.c.center();
+        assert_eq!(copied[0], format!("center = ({}, {}), scale = {}", center.x, center.y, app.c.get_scale()));
+        assert!(copied[0].contains("scale = 0.00006400000000000002"), "{}", copied[0]);
+    }
+
+    /// The horizontal position of the middle of the Copy button: where the text of the button is drawn
+    fn copy_x(app: &mut MandelbrotApp) -> f32 {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 1000.0))), ..Default::default() }, |ui| app.side_panel_ui(ui));
+        let x = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "Copy" => Some(text.pos.x + text.galley.size().x / 2.0),
+            _ => None,
+        });
+        output.drop_without_applying_deltas();
+        x.expect("the Copy button is drawn")
+    }
 }
