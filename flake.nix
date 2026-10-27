@@ -14,16 +14,33 @@
 
         naersk' = pkgs.callPackage naersk {};
 
+        # eframe/egui (winit + glow) loads these libraries at runtime with dlopen, so they must be on the library path
+        runtimeLibs = with pkgs; [
+          libxkbcommon
+          libGL
+          wayland
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXi
+          xorg.libXrandr
+        ];
+        runtimeLibPath = pkgs.lib.makeLibraryPath runtimeLibs;
+
       in rec {
         # For `nix build` & `nix run`:
         defaultPackage = naersk'.buildPackage {
           src = ./.;
-          buildInputs = [ pkgs.libxkbcommon ];
+          buildInputs = runtimeLibs;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postInstall = ''
+            wrapProgram "$out/bin/mandelbrot" --prefix LD_LIBRARY_PATH : "${runtimeLibPath}"
+          '';
         };
 
         # For `nix develop`:
         devShell = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [ rustc cargo libxkbcommon  ];
+          nativeBuildInputs = with pkgs; [ rustc cargo ] ++ runtimeLibs;
+          LD_LIBRARY_PATH = runtimeLibPath;
         };
       }
     );
