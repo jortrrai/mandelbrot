@@ -1,5 +1,5 @@
 //Temporary file to group together all rendering functionality
-use std::{time::Instant, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, Ordering}}, io::{self, Write}};
+use std::{time::Instant, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering}}, io::{self, Write}};
 
 use crate::{pixel_buffer::PixelBuffer, complex_plane::ComplexPlane, mandelbrot_set::MandelbrotSet, complex::Complex, coloring::TrueColor};
 
@@ -166,16 +166,18 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
 /// Renders the whole Complex plane `c` progressively, one supersampling layer (pass) at a time, so intermediate images can be shown early.
 /// Pass `k` computes sample `k` of every pixel, with the same deterministic jitter as `render_box_render_complex_plane_into_buffer`,
 /// so after the last pass the colors are identical to the ones that function produces.
+/// `rows_done` is reset to 0 at the start of every pass and incremented for every finished row, so another thread can show how far the current pass is.
 /// After every completed pass, `on_pass` is called with the running average of all samples so far (`width * height` colors, row by row) and the pass number (1-based).
 /// Returns `false` if `cancel` was set before all passes completed; the last completed pass has then been reported. A partially computed pass is discarded.
 /// Note: This function is multithreaded; `on_pass` is called on the calling thread
 /// # Panics
 /// If `lock().unwrap()` panics
-pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
+pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, rows_done: &AtomicUsize, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
     let supersampling_amount = supersampling_amount.clamp(1, 64);
     let amount_of_threads = render_thread_count();
     let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
     for sample in 0..supersampling_amount {
+        rows_done.store(0, Ordering::Relaxed);
         let rows = Mutex::new(sums.chunks_mut(width).enumerate());
         thread::scope(|scope| {
             for _ in 0..amount_of_threads {
@@ -193,6 +195,7 @@ pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, h
                         sum[1] += u32::from(color.green);
                         sum[2] += u32::from(color.blue);
                     }
+                    rows_done.fetch_add(1, Ordering::Relaxed);
                 });
             }
         });
@@ -311,13 +314,15 @@ mod tests {
         let expected = render(width, height, supersampling_amount);
         let c = ComplexPlane::new(width, height);
         let m = MandelbrotSet::new(200, 2.0);
+        let rows_done = AtomicUsize::new(0);
         let mut passes = Vec::new();
         let mut last = Vec::new();
-        let completed = render_progressively(&c, &m, width, height, supersampling_amount, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), |colors, pass| {
+        let completed = render_progressively(&c, &m, width, height, supersampling_amount, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &rows_done, |colors, pass| {
             passes.push(pass);
             last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
         });
         assert!(completed);
+        assert_eq!(rows_done.load(Ordering::Relaxed), height, "every row of the last pass should be counted");
         assert_eq!(passes, [1, 2, 3, 4]);
         assert_eq!(last, expected, "the last pass should equal the normal render");
     }
@@ -328,7 +333,7 @@ mod tests {
         let m = MandelbrotSet::new(50, 2.0);
         let cancel = AtomicBool::new(false);
         let mut passes = 0;
-        let completed = render_progressively(&c, &m, 16, 16, 8, TrueColor::new_from_bernstein_polynomials, &cancel, |_, pass| {
+        let completed = render_progressively(&c, &m, 16, 16, 8, TrueColor::new_from_bernstein_polynomials, &cancel, &AtomicUsize::new(0), |_, pass| {
             passes = pass;
             if pass == 2 {
                 cancel.store(true, Ordering::Relaxed);

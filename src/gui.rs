@@ -1,9 +1,9 @@
 //! The graphical user interface: the fractal on the left, the controls in the top right and a scrollable status log in the bottom right.
 //! The terminal is only used for developer output.
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 
@@ -33,9 +33,25 @@ const VIEWS: [(&str, &View); 10] = [
 /// A message from a rendering job that runs on a background thread
 enum JobMessage {
     /// An intermediate image: the running average of the first `pass` of `total` supersampling layers
-    Pass { colors: Vec<TrueColor>, pixels: Vec<u32>, pass: u8, total: u8 },
+    Pass { colors: Vec<TrueColor>, pixels: Vec<u32>, pass: u8, total: u8, layer_time: Duration },
     /// The job has finished (or was cancelled), this is its final result
-    Done { c: ComplexPlane, p: PixelBuffer, message: String },
+    Done { c: ComplexPlane, p: PixelBuffer, message: String, elapsed: Duration, completed: bool },
+}
+
+/// What the render progress bar shows: the time of every finished layer and how far the current layer is.
+/// It stays visible after the render has finished, showing the benchmark of that render.
+struct RenderBars {
+    total_layers: u8,
+    /// How long every finished layer took
+    layer_times: Vec<Duration>,
+    /// When the render started, and the current layer started, for the running timers
+    started: Instant,
+    layer_started: Instant,
+    /// The rows of the current layer that are done, and the amount of rows in a layer
+    rows_done: Arc<AtomicUsize>,
+    rows: usize,
+    /// How long the whole render took, and whether it was completed, once it has finished
+    finished: Option<(Duration, bool)>,
 }
 
 /// A progressive render that is currently running: how far it is and how to cancel it
@@ -69,6 +85,8 @@ pub struct MandelbrotApp {
     job: Option<Receiver<JobMessage>>,
     /// Set while a progressive render runs
     progress: Option<Progress>,
+    /// The progress bar of the last progressive render
+    bars: Option<RenderBars>,
     /// Messages from background tasks that do not change the view, e.g. saving an image
     notices: Receiver<String>,
     notice_sender: Sender<String>,
@@ -99,6 +117,7 @@ impl MandelbrotApp {
             texture_outdated: true,
             job: None,
             progress: None,
+            bars: None,
             notices,
             notice_sender,
         };
@@ -145,10 +164,12 @@ impl MandelbrotApp {
         let (mut c, mut p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         std::thread::spawn(move || {
+            let started = Instant::now();
             job(&mut c, &mut p, &m, supersampling_amount, coloring_function);
-            let _ = sender.send(JobMessage::Done { c, p, message }); //The receiver is gone if the window was closed
+            let _ = sender.send(JobMessage::Done { c, p, message, elapsed: started.elapsed(), completed: true }); //The receiver is gone if the window was closed
         });
         self.job = Some(receiver);
+        self.bars = None; //The bars would show an older render
         self.log("Rendering...");
     }
 
@@ -160,7 +181,7 @@ impl MandelbrotApp {
         loop {
             let Some(receiver) = &self.job else { return };
             match receiver.try_recv() {
-                Ok(JobMessage::Pass { colors, pixels, pass, total }) => {
+                Ok(JobMessage::Pass { colors, pixels, pass, total, layer_time }) => {
                     self.p.colors = colors;
                     self.p.pixels = pixels;
                     self.texture_outdated = true;
@@ -168,15 +189,23 @@ impl MandelbrotApp {
                         progress.pass = pass;
                         progress.total = total;
                     }
+                    if let Some(bars) = &mut self.bars {
+                        bars.layer_times.push(layer_time);
+                        bars.layer_started = Instant::now();
+                    }
                 }
-                Ok(JobMessage::Done { c, p, message }) => {
+                Ok(JobMessage::Done { c, p, message, elapsed, completed }) => {
                     self.job = None;
-                    self.progress = None;
+                    if self.progress.take().is_some() {
+                        if let Some(bars) = &mut self.bars {
+                            bars.finished = Some((elapsed, completed));
+                        }
+                    }
                     self.c = c;
                     self.p = p;
                     self.texture_outdated = true;
                     let description = self.view_description();
-                    self.log(format!("{message}: {description}"));
+                    self.log(format!("{message} in {:.2} s: {description}", elapsed.as_secs_f64()));
                 }
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
@@ -197,18 +226,26 @@ impl MandelbrotApp {
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
+        let rows_done = Arc::new(AtomicUsize::new(0));
+        let thread_rows_done = Arc::clone(&rows_done);
         let message = message.to_string();
         std::thread::spawn(move || {
             let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
-            let completed = rendering::render_progressively(&c, &m, width, height, supersampling_amount, coloring_function, &thread_cancel, |colors, pass| {
+            let started = Instant::now();
+            let mut layer_started = started;
+            let completed = rendering::render_progressively(&c, &m, width, height, supersampling_amount, coloring_function, &thread_cancel, &thread_rows_done, |colors, pass| {
                 p.colors.copy_from_slice(colors);
                 p.update_pixels();
-                println!("Rendered supersampling layer {pass} of {supersampling_amount}");
-                let _ = sender.send(JobMessage::Pass { colors: p.colors.clone(), pixels: p.pixels.clone(), pass, total: supersampling_amount });
+                let layer_time = layer_started.elapsed();
+                println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
+                let _ = sender.send(JobMessage::Pass { colors: p.colors.clone(), pixels: p.pixels.clone(), pass, total: supersampling_amount, layer_time });
+                layer_started = Instant::now();
             });
             let message = if completed { message } else { String::from("Cancelled the rendering, showing the layers that were completed") };
-            let _ = sender.send(JobMessage::Done { c, p, message }); //The receiver is gone if the window was closed
+            let _ = sender.send(JobMessage::Done { c, p, message, elapsed: started.elapsed(), completed }); //The receiver is gone if the window was closed
         });
+        let now = Instant::now();
+        self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, rows_done, rows: self.p.pixel_plane.height, finished: None });
         self.job = Some(receiver);
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel });
         self.log("Rendering...");
@@ -430,6 +467,46 @@ impl MandelbrotApp {
         ui.label("Click the fractal to see a point's coordinates, right-click to center the view on it.");
     }
 
+    /// Draws the render progress bar: a main bar with a smaller bar for every supersampling layer, each showing how long that layer took.
+    /// The caption above it shows the total time of the render.
+    fn render_bars_ui(ui: &mut egui::Ui, bars: &RenderBars) {
+        let caption = match bars.finished {
+            Some((total, true)) => format!("Rendered in {:.2} s", total.as_secs_f64()),
+            Some((total, false)) => format!("Cancelled after {} of {} layers, {:.2} s", bars.layer_times.len(), bars.total_layers, total.as_secs_f64()),
+            None => format!("Rendering: {:.1} s", bars.started.elapsed().as_secs_f64()),
+        };
+        ui.label(caption);
+
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, Color32::from_gray(40));
+        let inner = rect.shrink(3.0);
+        let gap = 2.0;
+        let layers = f32::from(bars.total_layers);
+        let layer_width = (inner.width() - gap * (layers - 1.0)) / layers;
+        let current_fraction = bars.rows_done.load(Ordering::Relaxed) as f32 / bars.rows.max(1) as f32;
+        for layer in 0..usize::from(bars.total_layers) {
+            let left = inner.left() + layer as f32 * (layer_width + gap);
+            let layer_rect = egui::Rect::from_min_size(egui::pos2(left, inner.top()), egui::vec2(layer_width, inner.height()));
+            painter.rect_filled(layer_rect, 2.0, Color32::from_gray(70));
+            let finished_time = bars.layer_times.get(layer);
+            let is_current = finished_time.is_none() && layer == bars.layer_times.len() && bars.finished.is_none();
+            let fraction = if finished_time.is_some() { 1.0 } else if is_current { current_fraction.clamp(0.0, 1.0) } else { 0.0 };
+            let fill = egui::Rect::from_min_size(layer_rect.min, egui::vec2(layer_width * fraction, layer_rect.height()));
+            painter.rect_filled(fill, 2.0, Color32::from_rgb(60, 140, 220));
+            let label = match finished_time {
+                Some(time) => Some(format!("{:.2}s", time.as_secs_f64())),
+                None if is_current => Some(format!("{:.1}s", bars.layer_started.elapsed().as_secs_f64())),
+                None => None,
+            };
+            if let Some(label) = label {
+                if layer_width >= 40.0 {
+                    painter.text(layer_rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(11.0), Color32::WHITE);
+                }
+            }
+        }
+    }
+
     fn log_ui(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Status");
@@ -448,6 +525,10 @@ impl MandelbrotApp {
                 }
             }
         });
+        if let Some(bars) = &self.bars {
+            Self::render_bars_ui(ui, bars);
+            ui.add_space(4.0);
+        }
         egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             for message in &self.log {
                 ui.add(egui::Label::new(message).wrap());
@@ -545,5 +626,25 @@ mod tests {
         assert_eq!(app.c.center().y, moved_center.y, "the moved view should be kept");
         assert!(!app.log.iter().any(|message| message.starts_with("Cancelled")), "interrupting is not reported as a cancelled render");
         assert!(app.log.last().unwrap().starts_with("Moved up 10 pixels"));
+    }
+
+    #[test]
+    fn the_progress_bar_records_the_time_of_every_layer() {
+        let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+
+        let bars = app.bars.as_ref().expect("a full render should have a progress bar");
+        assert_eq!(bars.total_layers, 3);
+        assert_eq!(bars.layer_times.len(), 3, "every layer should have a time");
+        let (total, completed) = bars.finished.expect("the render should be finished");
+        assert!(completed);
+        assert!(total >= bars.layer_times.iter().sum(), "the total includes all layers");
+        assert!(app.log.last().unwrap().contains(" s: "), "the log should mention the render time: {:?}", app.log.last());
+
+        //A move only redraws a strip, so the bars of the full render are removed
+        app.translate("up", 10, 0);
+        assert!(app.bars.is_none(), "the bars of the previous render should be removed when only a strip is rendered");
+        wait_for_job(&mut app);
     }
 }
