@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 
+use crate::auto_iterations::{self, AutoIterationSettings};
 use crate::coloring::{ColorChannelMapping, TrueColor};
 use crate::complex_plane::{ComplexPlane, View};
 use crate::mandelbrot_set::MandelbrotSet;
@@ -36,7 +37,7 @@ enum JobMessage {
     /// An intermediate image: the running average of the first `pass` of `total` supersampling layers
     Pass { colors: Vec<TrueColor>, pass: u8, total: u8, layer_time: Duration },
     /// The job has finished (or was cancelled), this is its final result
-    Done { c: ComplexPlane, p: PixelBuffer, message: String, elapsed: Duration, completed: bool },
+    Done { c: ComplexPlane, p: PixelBuffer, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool },
 }
 
 /// What the render progress bar shows: the time of every finished layer and how far the current layer is.
@@ -87,6 +88,9 @@ pub struct MandelbrotApp {
     image_supersampling_amount: u8,
     /// Edited values of the max iterations field, applied when editing ends
     max_iterations_input: u32,
+    /// Whether the maximum iterations are chosen automatically for the zoom of every render, see `auto_iterations`
+    auto_iterations: bool,
+    auto_settings: AutoIterationSettings,
     /// Edited value of the supersampling field, applied when editing ends
     supersampling_input: u8,
     /// Edited text of the "go to view" fields
@@ -119,6 +123,8 @@ impl MandelbrotApp {
             c,
             p,
             max_iterations_input: m.max_iterations,
+            auto_iterations: false,
+            auto_settings: AutoIterationSettings::default(),
             m,
             vars: InteractionVariables::default(),
             config: config.clone(),
@@ -194,8 +200,9 @@ impl MandelbrotApp {
                         bars.layer_started = Instant::now();
                     }
                 }
-                Ok(JobMessage::Done { c, p, message, elapsed, completed }) => {
+                Ok(JobMessage::Done { c, p, m, message, elapsed, completed }) => {
                     self.job = None;
+                    self.m = m; //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept
                     self.buffer_is_complete = completed;
                     if self.progress.take().is_some() {
                         if let Some(bars) = &mut self.bars {
@@ -238,7 +245,13 @@ impl MandelbrotApp {
         self.interrupt_progressive_render();
         self.buffer_is_complete = false;
         let (sender, receiver) = mpsc::channel();
-        let (c, mut p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
+        let (c, mut p, mut m) = (self.c.clone(), self.p.clone(), self.m.clone());
+        let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
+        if !self.auto_iterations {
+            m.max_iterations = self.max_iterations_input; //Manual mode: the value of the field, not the limit that auto mode chose
+        }
+        //The pixels of a buffer that was rendered with the other mode have another limit and palette, so they cannot be reused
+        let strip = strip.filter(|_| self.auto_iterations == self.m.palette_scale.is_some());
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
         let pixels_total = strip.as_ref().map_or(width * height, |(_, region)| region.pixel_count(width, height));
@@ -249,6 +262,26 @@ impl MandelbrotApp {
         let message = message.to_string();
         std::thread::spawn(move || {
             let started = Instant::now();
+            let mut message = message;
+            if auto_settings.is_some() && strip.is_some() {
+                //A move keeps the limit of the image that is being moved, so only the exposed strip is rendered; the limit is chosen again on zooms, jumps and setting changes
+            } else if let Some(settings) = &auto_settings {
+                //Choose the iteration limit for this zoom first; a cancelled choice cancels the render
+                match auto_iterations::choose_limit(&c, &m, width, height, settings, rendering::render_thread_count(), &thread_cancel) {
+                    Some(result) => {
+                        m.max_iterations = result.limit;
+                        m.palette_scale = Some(result.palette_scale);
+                        message = format!("{message} (auto iterations: limit {}, {} rounds, {:?}, {:.2} s)", result.limit, result.rounds.len(), result.stop, started.elapsed().as_secs_f64());
+                        println!("{result:?}");
+                    }
+                    None => {
+                        let _ = sender.send(JobMessage::Done { c, p, m, message: String::from("Cancelled the rendering"), elapsed: started.elapsed(), completed: false });
+                        return;
+                    }
+                }
+            } else if auto_settings.is_none() {
+                m.palette_scale = None;
+            }
             let region = match strip {
                 Some((shift, region)) => {
                     p.translate_buffer(shift.0, shift.1);
@@ -268,7 +301,7 @@ impl MandelbrotApp {
             });
             p.update_pixels(); //The pixels of the last completed layer
             let message = if completed { message } else { String::from("Cancelled the rendering, showing the layers that were completed") };
-            let _ = sender.send(JobMessage::Done { c, p, message, elapsed: started.elapsed(), completed }); //The receiver is gone if the window was closed
+            let _ = sender.send(JobMessage::Done { c, p, m, message, elapsed: started.elapsed(), completed }); //The receiver is gone if the window was closed
         });
         let now = Instant::now();
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
@@ -414,12 +447,34 @@ impl MandelbrotApp {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Max. iterations:");
-            let response = ui.add(egui::DragValue::new(&mut self.max_iterations_input).range(1..=1_000_000).speed(10.0));
+            let response = ui.add_enabled(!self.auto_iterations, egui::DragValue::new(&mut self.max_iterations_input).range(1..=1_000_000).speed(10.0));
             if (response.drag_stopped() || response.lost_focus()) && self.max_iterations_input != self.m.max_iterations {
                 self.m.max_iterations = self.max_iterations_input;
                 self.render(&format!("Set max. iterations to {}", self.m.max_iterations));
             }
         });
+        let auto_response = ui.checkbox(&mut self.auto_iterations, "Auto iterations").on_hover_text("Chooses the max. iterations for the zoom of every render: a starting limit that grows with the magnification, raised while the extra iterations make more pixels escape. A heuristic, not a proof: very narrow detail can be missed.");
+        if auto_response.changed() {
+            if self.auto_iterations {
+                self.render("Turned auto iterations on");
+            } else {
+                self.render(&format!("Turned auto iterations off, max. iterations {}", self.max_iterations_input));
+            }
+        }
+        if self.auto_iterations {
+            ui.label(format!("Current limit: {} iterations (chosen automatically)", self.m.max_iterations));
+            ui.horizontal(|ui| {
+                ui.label("Start at zoom 1:");
+                let a = ui.add(egui::DragValue::new(&mut self.auto_settings.start).range(10..=100_000).speed(10.0));
+                ui.label("+ per zoom doubling:");
+                let b = ui.add(egui::DragValue::new(&mut self.auto_settings.per_doubling).range(0..=10_000).speed(5.0));
+                ui.label("up to:");
+                let c = ui.add(egui::DragValue::new(&mut self.auto_settings.ceiling).range(100..=200_000).speed(100.0));
+                if [a, b, c].iter().any(|r| r.drag_stopped() || r.lost_focus()) {
+                    self.render("Changed the auto iterations settings");
+                }
+            });
+        }
         ui.horizontal(|ui| {
             ui.label("Quality (supersampling, 1x-64x):");
             let response = ui.add(egui::DragValue::new(&mut self.supersampling_input).range(1..=64).suffix("x"));
@@ -492,7 +547,7 @@ impl MandelbrotApp {
         let gap = 2.0;
         let layers = f32::from(bars.total_layers);
         let layer_width = (inner.width() - gap * (layers - 1.0)) / layers;
-        let current_fraction = bars.pixels_done.load(Ordering::Relaxed) as f32 / bars.pixels_total.max(1) as f32;
+        let current_fraction = (bars.pixels_done.load(Ordering::Relaxed) as f32 / bars.pixels_total.max(1) as f32).min(1.0);
         for layer in 0..usize::from(bars.total_layers) {
             let left = inner.left() + layer as f32 * (layer_width + gap);
             let layer_rect = egui::Rect::from_min_size(egui::pos2(left, inner.top()), egui::vec2(layer_width, inner.height()));
@@ -699,5 +754,60 @@ mod tests {
             let expected: Vec<u8> = pixels.iter().flat_map(|pixel| [(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8]).collect();
             assert_eq!(colors_to_rgb_bytes(&colors, &mapping), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        assert_eq!(app.m.max_iterations, 50);
+        assert_eq!(app.m.palette_scale, None, "manual mode colors exactly as before");
+        let manual_pixels = app.p.pixels.clone();
+
+        //Turn auto on: the limit is chosen for the zoom, and shown in the max. iterations field
+        app.auto_iterations = true;
+        app.render("Turned auto iterations on");
+        wait_for_job(&mut app);
+        let limit = app.m.max_iterations;
+        assert_eq!(app.m.palette_scale, Some(app.auto_settings.initial_limit(app.c.get_scale())));
+        assert!(app.log.last().unwrap().contains("auto iterations: limit"), "{:?}", app.log.last());
+        assert_eq!(app.max_iterations_input, 50, "the manual value is kept while auto is on");
+
+        //A move keeps the limit and only renders the strip
+        app.translate("up", 10, 0);
+        assert_eq!(app.bars.as_ref().unwrap().pixels_total, 10 * 64);
+        wait_for_job(&mut app);
+        assert_eq!(app.m.max_iterations, limit);
+
+        //A zoom chooses a new limit, a deeper zoom never a lower start
+        app.c.scale(1e-4);
+        app.render("Zoomed in");
+        wait_for_job(&mut app);
+        assert!(app.m.max_iterations >= app.auto_settings.initial_limit(app.c.get_scale()));
+        assert!(app.m.max_iterations > limit.min(300) || limit >= 300);
+
+        //Turn auto off: the manual value is used again and the image is the manual image
+        app.auto_iterations = false;
+        app.c.reset();
+        app.render("Turned auto iterations off");
+        wait_for_job(&mut app);
+        assert_eq!(app.m.max_iterations, 50);
+        assert_eq!(app.m.palette_scale, None);
+        assert_eq!(app.p.pixels, manual_pixels, "back in manual mode the same view renders the same image");
+    }
+
+    #[test]
+    fn moving_after_turning_auto_off_does_not_reuse_an_auto_colored_buffer() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        app.auto_iterations = true;
+        app.render("auto");
+        wait_for_job(&mut app);
+        app.auto_iterations = false;
+        app.translate("up", 10, 0);
+        wait_for_job(&mut app);
+        assert_eq!(app.m.palette_scale, None);
+        assert_eq!(app.bars.as_ref().unwrap().pixels_total, 64 * 48, "the buffer was colored with the auto palette and is rendered again");
     }
 }
