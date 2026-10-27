@@ -2,8 +2,6 @@
   "format_version": 1,
   "name": "The Whirlpool",
   "description": "A double spiral with a yellow and orange eye at the center.",
-  "formerly": "View 9 (VIEW_9)",
-  "order": 9,
   "location": {
     "center": { "real": -0.4687339999999999, "imaginary": 0.5425518958333333 },
     "scale": 0.000010000000000000003,

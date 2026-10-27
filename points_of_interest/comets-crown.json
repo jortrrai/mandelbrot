@@ -2,8 +2,6 @@
   "format_version": 1,
   "name": "Comet's Crown",
   "description": "The same place as Lone Comet, zoomed in about 3x: the head and beaded satellites of the comet.",
-  "formerly": "View 8 (VIEW_8)",
-  "order": 8,
   "location": {
     "center": { "real": -1.7862581627050718, "imaginary": 0.00005198056959995248 },
     "scale": 0.000006039797760000003,

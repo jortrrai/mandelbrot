@@ -9,8 +9,6 @@
 //!   "format_version": 1,
 //!   "name": "Frost on the Shoreline",
 //!   "description": "Optional text shown as a tooltip.",
-//!   "formerly": "Optional note, e.g. the old name of the view.",
-//!   "order": 1,
 //!   "location": {
 //!     "center": { "real": -0.6604166666666667, "imaginary": 0.4437500000000001 },
 //!     "scale": 0.1,
@@ -24,7 +22,7 @@
 //!   `-0.46395833333333325` was read one bit off, which a test of the shipped files caught).
 //! * `max_iterations` is a whole number from 1 to 1,000,000, the range of the control in the window.
 //! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. Both are optional.
-//! * `order` is optional: points are listed by `order` (the ones without it last), then by name. Fields that are not known are ignored, so newer files still load.
+//! * The points are listed by name (ignoring case), then by file name. Fields that are not known are ignored, so newer files still load.
 //!
 //! A file that cannot be used is skipped with a message that names the file; the others still load. See `load_folder`.
 use std::ops::RangeInclusive;
@@ -86,8 +84,6 @@ pub struct Appearance {
 pub struct PointOfInterest {
     pub name: String,
     pub description: String,
-    pub formerly: Option<String>,
-    pub order: Option<i64>,
     pub location: Location,
     pub appearance: Option<Appearance>,
     /// The name of the file it was loaded from
@@ -121,10 +117,6 @@ struct RawPointOfInterest {
     name: String,
     #[serde(default)]
     description: String,
-    #[serde(default)]
-    formerly: Option<String>,
-    #[serde(default)]
-    order: Option<i64>,
     location: RawLocation,
     #[serde(default)]
     appearance: Option<RawAppearance>,
@@ -169,13 +161,13 @@ pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String
         appearance
     });
     let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations };
-    Ok((PointOfInterest { name, description: raw.description, formerly: raw.formerly, order: raw.order, location, appearance, file_name: file_name.to_string() }, warnings))
+    Ok((PointOfInterest { name, description: raw.description, location, appearance, file_name: file_name.to_string() }, warnings))
 }
 
 /// What loading a folder gave
 #[derive(Debug, Default)]
 pub struct LoadReport {
-    /// The usable points, sorted by `order`, then by name
+    /// The usable points, sorted by name (ignoring case), then by file name
     pub points: Vec<PointOfInterest>,
     /// One message for every problem: files that were skipped, appearances that were ignored, a folder that cannot be read
     pub problems: Vec<String>,
@@ -207,7 +199,7 @@ pub fn load_folder(folder: &Path) -> LoadReport {
             Err(error) => report.problems.push(format!("{file_name}: cannot be read: {error}")),
         }
     }
-    report.points.sort_by(|a, b| a.order.unwrap_or(i64::MAX).cmp(&b.order.unwrap_or(i64::MAX)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())).then_with(|| a.file_name.cmp(&b.file_name)));
+    report.points.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.file_name.cmp(&b.file_name)));
     report
 }
 
@@ -249,7 +241,7 @@ mod tests {
     use super::*;
 
     const VALID: &str = r#"{
-        "format_version": 1, "name": " Test Place ", "description": "d", "order": 3,
+        "format_version": 1, "name": " Test Place ", "description": "d",
         "location": { "center": { "real": -0.75, "imaginary": 0.1 }, "scale": 0.5, "max_iterations": 200 },
         "appearance": { "coloring": "HSV", "color_channels": "bgr" },
         "something_new": [1, 2, 3]
@@ -271,7 +263,7 @@ mod tests {
         let appearance = point.appearance.unwrap();
         assert_eq!(appearance.coloring, Some(Coloring::Hsv));
         assert_eq!(format!("{:?}", appearance.color_channels.unwrap()), "BGR");
-        assert_eq!((point.order, point.formerly), (Some(3), None));
+        assert_eq!(point.description, "d");
     }
 
     #[test]
@@ -324,15 +316,15 @@ mod tests {
     #[test]
     fn a_folder_loads_the_good_files_sorts_them_and_reports_the_bad_ones() {
         let folder = temp_folder("mixed");
-        std::fs::write(folder.join("b.json"), VALID.replace("Test Place", "Banana").replace("\"order\": 3,", "")).unwrap();
-        std::fs::write(folder.join("a.JSON"), VALID.replace("Test Place", "Apple").replace("\"order\": 3,", "")).unwrap();
-        std::fs::write(folder.join("c.json"), VALID.replace("Test Place", "Cherry").replace("\"order\": 3", "\"order\": 1")).unwrap();
+        std::fs::write(folder.join("b.json"), VALID.replace("Test Place", "Banana")).unwrap();
+        std::fs::write(folder.join("a.JSON"), VALID.replace("Test Place", "apple")).unwrap();
+        std::fs::write(folder.join("c.json"), VALID.replace("Test Place", "Cherry")).unwrap();
         std::fs::write(folder.join("broken.json"), "{ nope").unwrap();
         std::fs::write(folder.join("notes.txt"), "not a point").unwrap();
         std::fs::create_dir(folder.join("sub.json")).unwrap();
         let report = load_folder(&folder);
         let names: Vec<&str> = report.points.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Cherry", "Apple", "Banana"], "by order first, those without an order by name");
+        assert_eq!(names, ["apple", "Banana", "Cherry"], "sorted by name, ignoring case");
         assert_eq!(report.problems.len(), 1);
         assert!(report.problems[0].starts_with("broken.json"));
         let _ = std::fs::remove_dir_all(&folder);
@@ -351,18 +343,18 @@ mod tests {
         assert_eq!(slugify("  The  Narrow--Pass! "), "the-narrow-pass");
     }
 
-    /// The ten views that were hard-coded in `lib.rs` (`VIEW_1` to `VIEW_9`, `VIEW_0`), with the exact numbers they had
-    const FORMER_VIEWS: [(&str, &str, i64, f64, f64, f64); 10] = [
-        ("frost-on-the-shoreline", "VIEW_1", 1, -0.6604166666666667, 0.4437500000000001, 0.1),
-        ("frozen-constellation", "VIEW_2", 2, -1.0591666666666668, 0.2629166666666668, 0.01),
-        ("harbor-of-moons", "VIEW_3", 3, -0.4624999999999999, 0.55, 0.1),
-        ("the-narrow-pass", "VIEW_4", 4, -0.46395833333333325, 0.5531250000000001, 0.03),
-        ("coral-atoll", "VIEW_5", 5, -0.4375218333333333, 0.5632133750000003, 0.00002000000000000002),
-        ("seahorse-embers", "VIEW_6", 6, -0.7498100000000001, -0.020300000000000054, 0.00006400000000000002),
-        ("lone-comet", "VIEW_7", 7, -1.7862712000000047, 0.000052399999999991516, 0.00001677721600000001),
-        ("comets-crown", "VIEW_8", 8, -1.7862581627050718, 0.00005198056959995248, 0.000006039797760000003),
-        ("the-whirlpool", "VIEW_9", 9, -0.4687339999999999, 0.5425518958333333, 0.000010000000000000003),
-        ("sunlit-reef", "VIEW_0", 10, -0.437520465811966, 0.5632133750000006, 0.000004000000000000004),
+    /// The numbers of the ten views that were hard-coded in `lib.rs` (`VIEW_1` to `VIEW_9`, `VIEW_0`), by the file that holds them now: (file, real, imaginary, scale)
+    const FORMER_VIEWS: [(&str, f64, f64, f64); 10] = [
+        ("frost-on-the-shoreline", -0.6604166666666667, 0.4437500000000001, 0.1),
+        ("frozen-constellation", -1.0591666666666668, 0.2629166666666668, 0.01),
+        ("harbor-of-moons", -0.4624999999999999, 0.55, 0.1),
+        ("the-narrow-pass", -0.46395833333333325, 0.5531250000000001, 0.03),
+        ("coral-atoll", -0.4375218333333333, 0.5632133750000003, 0.00002000000000000002),
+        ("seahorse-embers", -0.7498100000000001, -0.020300000000000054, 0.00006400000000000002),
+        ("lone-comet", -1.7862712000000047, 0.000052399999999991516, 0.00001677721600000001),
+        ("comets-crown", -1.7862581627050718, 0.00005198056959995248, 0.000006039797760000003),
+        ("the-whirlpool", -0.4687339999999999, 0.5425518958333333, 0.000010000000000000003),
+        ("sunlit-reef", -0.437520465811966, 0.5632133750000006, 0.000004000000000000004),
     ];
 
     #[test]
@@ -370,17 +362,16 @@ mod tests {
         let report = load_folder(&find_folder());
         assert!(report.problems.is_empty(), "{:?}", report.problems);
         assert_eq!(report.points.len(), 10);
-        for (point, (slug, old_name, order, real, imaginary, scale)) in report.points.iter().zip(FORMER_VIEWS) {
-            assert_eq!(point.file_name, format!("{slug}.json"));
+        for (slug, real, imaginary, scale) in FORMER_VIEWS {
+            let point = report.points.iter().find(|point| point.file_name == format!("{slug}.json")).unwrap_or_else(|| panic!("{slug}.json is not loaded"));
             assert_eq!(slugify(&point.name), slug, "the file is named after the display name");
-            assert_eq!(point.order, Some(order));
-            assert!(point.formerly.as_deref().is_some_and(|formerly| formerly.contains(old_name)), "{:?} remembers {old_name}", point.formerly);
+            assert!(!point.description.is_empty());
             assert_eq!((point.location.real.to_bits(), point.location.imaginary.to_bits(), point.location.scale.to_bits()), (real.to_bits(), imaginary.to_bits(), scale.to_bits()), "{slug}");
             assert!(MAX_ITERATIONS_RANGE.contains(&point.location.max_iterations));
             let appearance = point.appearance.as_ref().expect("the default appearance is written out");
             assert_eq!((appearance.coloring, format!("{:?}", appearance.color_channels.unwrap())), (Some(Coloring::Bernstein), String::from("RGB")), "the default appearance of the application");
         }
         let names: Vec<&str> = report.points.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Frost on the Shoreline", "Frozen Constellation", "Harbor of Moons", "The Narrow Pass", "Coral Atoll", "Seahorse Embers", "Lone Comet", "Comet's Crown", "The Whirlpool", "Sunlit Reef"]);
+        assert_eq!(names, ["Comet's Crown", "Coral Atoll", "Frost on the Shoreline", "Frozen Constellation", "Harbor of Moons", "Lone Comet", "Seahorse Embers", "Sunlit Reef", "The Narrow Pass", "The Whirlpool"], "listed by name");
     }
 }
