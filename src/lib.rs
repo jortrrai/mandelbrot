@@ -27,28 +27,20 @@
 )]
 
 use std::error::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use coloring::ColorChannelMapping;
 pub use config::Config;
-use mandelbrot_set::MandelbrotSet;
-use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::coloring::TrueColor;
-use crate::complex_plane::{ComplexPlane, View};
-use crate::key_bindings::KeyBindings;
-use crate::pixel_buffer::PixelBuffer;
-use crate::pixel_buffer::pixel_plane::PixelPlane;
-use crate::user_input::{ask, pick_option};
+use crate::complex_plane::View;
 
 pub mod complex_plane;
 pub mod complex;
 pub mod pixel_buffer;
 pub mod mandelbrot_set;
 pub mod rendering;
-pub mod key_bindings;
 pub mod coloring;
-pub mod user_input;
+pub mod gui;
 pub mod config;
 
 //Coloring function
@@ -123,135 +115,6 @@ impl Default for InteractionVariables{
     }
 }
 
-// Handle any key events
-fn handle_key_events(window: &Window, c: &mut ComplexPlane, p: &mut PixelBuffer, m: &mut MandelbrotSet, vars: &mut InteractionVariables, k: &KeyBindings, supersampling_amount: &mut u8, image_supersampling_amount: &mut u8,coloring_function: &mut ColoringFunction, config: &Config) {
-    if let Some(key) = window.get_keys_pressed(minifb::KeyRepeat::No).first() {
-        print!("\nKey pressed: ");
-        k.print_key(key);
-        match key {
-            Key::Up => rendering::translate_and_render_efficiently(c, p, m, vars.translation_amount.into(), 0, *supersampling_amount, *coloring_function),
-            Key::Down => rendering::translate_and_render_efficiently(c, p, m, -i16::from(vars.translation_amount), 0, *supersampling_amount, *coloring_function),
-            Key::Left => rendering::translate_and_render_efficiently(c, p, m, 0, -i16::from(vars.translation_amount), *supersampling_amount, *coloring_function),
-            Key::Right => rendering::translate_and_render_efficiently(c, p, m, 0, vars.translation_amount.into(), *supersampling_amount, *coloring_function),
-            Key::R => c.reset(),
-            Key::NumPadPlus => vars.increment_translation_amount(),
-            Key::NumPadMinus => vars.decrement_translation_amount(),
-            Key::NumPadAsterisk => vars.increment_scale_numerator(),
-            Key::NumPadSlash => vars.decrement_scale_numerator(),
-            Key::LeftBracket => c.scale(vars.scaling_factor()),
-            Key::RightBracket => c.scale(vars.inverse_scaling_factor()),
-            Key::V => println!("Center: {:?}, scale: {:?}", c.center(), c.get_scale()),
-            Key::Key1 => c.set_view(&VIEW_1),
-            Key::Key2 => c.set_view(&VIEW_2),
-            Key::Key3 => c.set_view(&VIEW_3),
-            Key::Key4 => c.set_view(&VIEW_4),
-            Key::Key5 => c.set_view(&VIEW_5),
-            Key::Key6 => c.set_view(&VIEW_6),
-            Key::Key7 => c.set_view(&VIEW_7),
-            Key::Key8 => c.set_view(&VIEW_8),
-            Key::Key9 => c.set_view(&VIEW_9),
-            Key::Key0 => c.set_view(&VIEW_0),
-            Key::K => k.print(),
-            Key::S => {
-                let time_stamp = chrono::Utc::now().to_string();
-                if config.window_scale == 1.0 {
-                    p.save_as_png(&time_stamp, &c.get_view(), m, *image_supersampling_amount);
-                } else {
-                    let mut image_p: PixelBuffer = PixelBuffer::new(PixelPlane::new(config.image_width, config.image_height));
-                    let mut image_c: ComplexPlane = ComplexPlane::new(config.image_width, config.image_height);
-                    image_p.color_channel_mapping = p.color_channel_mapping;
-                    image_c.set_view(&c.get_view());
-                    rendering::render_complex_plane_into_buffer(&mut image_p, &image_c, m, *image_supersampling_amount, *coloring_function);
-                    image_p.save_as_png(&time_stamp, &c.get_view(), m, *image_supersampling_amount);
-                }
-            }
-            Key::I => c.set_view(&View::new(ask("x"), ask("y"), ask("scale"))),
-            Key::A => *coloring_function = pick_option(&[("HSV", TrueColor::new_from_hsv_colors), ("Bernstein polynomials", TrueColor::new_from_bernstein_polynomials)]),
-            Key::M => m.max_iterations = ask("max_iterations"),
-            Key::O => p.color_channel_mapping = ask("color_channel_mapping"),
-            Key::Q => {*supersampling_amount = ask::<u8>("supersampling_amount").clamp(1, 64); *image_supersampling_amount = *supersampling_amount;},
-            Key::X => *image_supersampling_amount = ask::<u8>("image_supersampling_amount").clamp(1, 64),
-            Key::C => println!("{:?}", config),
-            _ => (),
-        }
-        match key {
-            Key::NumPadPlus | Key::NumPadMinus => println!("translation_amount: {}", vars.translation_amount),
-            Key::NumPadSlash | Key::NumPadAsterisk => println!("scale factor: {}/{}",vars.scale_numerator,vars.scale_denominator),
-            Key::Up | Key::Down | Key::Left | Key::Right => c.print(),
-            Key::R | Key::Key1 | Key::Key2 | Key::Key3 | Key::Key4 | Key::Key5 | Key::Key6 | Key::Key7 | Key::Key8 | Key::Key9 | Key::Key0 | Key::LeftBracket | Key::RightBracket | Key::I | Key::A | Key::M | Key::O | Key::Q => {
-                rendering::render_complex_plane_into_buffer(p, c, m, *supersampling_amount, *coloring_function);
-                c.print();
-            },
-            _ => (),
-        }
-    }
-}
-
-fn was_clicked(current: bool, previous: bool) -> bool {
-    current && !previous
-}
-
-fn handle_left_mouse_clicked(x: f32, y: f32, c: &ComplexPlane) {
-    println!("\nMouseButton::Left -> Info at ({x}, {y})");
-    //let iterations = p.iterations_at_point(x as usize, y as usize, m.max_iterations); //TODO: fix this
-    let complex = c.complex_from_pixel_plane(x.into(), y.into());
-    println!("Complex: {:?}", complex);
-    //println!("iterations: {}", iterations);
-    println!();
-}
-
-fn handle_right_mouse_clicked(x: f32, y: f32, c: &mut ComplexPlane, p: &mut PixelBuffer, m: &MandelbrotSet, supersampling_amount: u8, coloring_function: ColoringFunction) {
-    println!("\nMouseButton::Right -> Move to ({x}, {y})");
-    let new_center = c.complex_from_pixel_plane(x.into(), y.into());
-    println!("c.center: {:?}", c.center());
-    println!("new_center: {:?}", new_center);
-
-    rendering::translate_to_center_and_render_efficiently(c, p, m, &new_center, supersampling_amount, coloring_function);
-    c.print();
-    println!();
-}
-
-/////Mouse click recorder with interior mutability to toggle mouse clicks; 
-/// without such a (static function) variable, clicking the screen once would result in multiple actions
-struct MouseClickRecorder {
-    mouse_button: MouseButton,
-    previous: AtomicBool
-}
-
-impl MouseClickRecorder {
-    pub const fn new(mouse_button: MouseButton) -> MouseClickRecorder {
-        MouseClickRecorder { mouse_button, previous: AtomicBool::new(false) }
-    }
-
-    ///Returns whether the `mouse_button` was clicked once
-    pub fn was_clicked(&self, window: &Window) -> bool {
-        let current = window.get_mouse_down(self.mouse_button);
-        let previous = self.previous.load(Ordering::Relaxed);
-        let result = was_clicked(current, previous);
-        if current != previous {self.previous.store(current, Ordering::Relaxed)}
-        result
-    }
-}
-
-fn handle_mouse_events(window: &Window, c: &mut ComplexPlane, p: &mut PixelBuffer, m: &MandelbrotSet, supersampling_amount: u8, coloring_function: ColoringFunction) {
-    static LEFT_MOUSE_RECORDER: MouseClickRecorder = MouseClickRecorder::new(MouseButton::Left); //Static variable with interior mutability to toggle mouse clicks; without such a variable, clicking the screen once would result in multiple actions
-    static RIGHT_MOUSE_RECORDER: MouseClickRecorder = MouseClickRecorder::new(MouseButton::Right); 
-
-    if let Some((x, y)) = window.get_mouse_pos(MouseMode::Discard) {
-
-        //Left mouse actions
-        if LEFT_MOUSE_RECORDER.was_clicked(window) {
-            handle_left_mouse_clicked(x, y, c);
-        }
-
-        //Right mouse actions
-        if RIGHT_MOUSE_RECORDER.was_clicked(window) {
-            handle_right_mouse_clicked(x, y, c, p, m, supersampling_amount, coloring_function);
-        }
-
-    }
-}
-
 ///Prints Mandelbrot ASCII art :) </br> 
 ///Prints the `application_banner`, `author_banner`, and `version`
 fn print_banner()
@@ -285,127 +148,21 @@ fn print_command_info() {
 
 ///Holds all the logic currently in the main function that isn't involved with setting up configuration or handling errors, to make `main` concise and
 ///easy to verify by inspection
-/// # Panics
-/// Will panic if minifb cannot open a Window
 /// # Errors
-/// Currently does not return any Errors
-/// Creates the window. minifb's Wayland backend does not draw window decorations itself and only asks the compositor for server-side ones,
-/// which GNOME (mutter) does not provide, so on such sessions the window has no title bar and cannot be moved, minimized or maximized.
-/// On Linux, when an X11 display (e.g. XWayland) is available, hide the Wayland display while creating the window so minifb falls back
-/// to its X11 backend, where the window manager adds decorations. If that fails, restore the Wayland display and use the Wayland backend.
-/// Set `MANDELBROT_FORCE_WAYLAND` to skip the X11 fallback.
-fn create_window(width: usize, height: usize) -> minifb::Result<Window> {
-    const TITLE: &str = "Mandelbrot set viewer";
-    let wayland_display = std::env::var_os("WAYLAND_DISPLAY");
-    let prefer_x11 = cfg!(target_os = "linux")
-        && wayland_display.is_some()
-        && std::env::var_os("DISPLAY").is_some()
-        && std::env::var_os("MANDELBROT_FORCE_WAYLAND").is_none();
-    if prefer_x11 {
-        std::env::remove_var("WAYLAND_DISPLAY"); //Called before any threads are spawned
-        let window = Window::new(TITLE, width, height, WindowOptions::default());
-        if let Some(display) = &wayland_display {
-            std::env::set_var("WAYLAND_DISPLAY", display);
-        }
-        if let Ok(window) = window {
-            return Ok(window);
-        }
-    }
-    Window::new(TITLE, width, height, WindowOptions::default())
-}
-
+/// Returns an Error if the GUI window cannot be created or the GUI event loop fails
 pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
-    // Complex plane dimensions and increments
-    let mut c = ComplexPlane::new(config.window_width, config.window_height);
-    // Pixel plane and buffer
-    let mut p = PixelBuffer::new(PixelPlane::new(config.window_width, config.window_height));
-    // User interaction variables
-    let mut vars = InteractionVariables::default();
-    // Multithreading variables
-    let amount_of_threads = num_cpus::get(); //Amount of CPU threads to use, TODO: use this value in rendering functions
-    // Mandelbrot set iterator
-    let mut m: MandelbrotSet = MandelbrotSet::new(config.max_iterations, config.orbit_radius);
-    //Coloring function
-    let mut coloring_function = COLORING_FUNCTION;
-    //Color channel mapping
-    p.color_channel_mapping = COLOR_CHANNEL_MAPPING;
-    //SSAA multiplier
-    let mut supersampling_amount = config.supersampling_amount;
-    //Image SSAA multiplier
-    let mut image_supersampling_amount = supersampling_amount;
-    // Create a new window
-    let mut window = create_window(config.window_width, config.window_height)
-    .unwrap_or_else(|e| {
-        match &e {
-            minifb::Error::WindowCreate(s)  | minifb::Error::MenuExists(s) | minifb::Error::UpdateFailed(s) => eprintln!("Failed to create window: {}", s.to_string()),
-            minifb::Error::MenusNotSupported  => todo!(),
-        }
-        panic!("Error creating minifb::Window: {}", e);
-    });
     //Print the banner
     print_banner();
     //Print command info
     print_command_info();
-    //Initialize keybindings TODO: I want to have a vector of structs containing functions with different signatures, this is not easily possible. All functionality should be placed here, in the future, when 
-    //I've figured out how to have closures with different signatures in the same struct field
-    //For now, use empty_closure, to have a closure that does nothing as action
-    let mut key_bindings: KeyBindings = KeyBindings::new(Vec::new());
-    let empty_closure = || ();
-    key_bindings.add(Key::Up, "Move up translation_amount pixels", empty_closure);
-    key_bindings.add(Key::Down, "Move down translation_amount pixels", empty_closure);
-    key_bindings.add(Key::Left, "Move left translation_amount pixels", empty_closure);
-    key_bindings.add(Key::Right, "Move right translation_amount pixels", empty_closure);
-    key_bindings.add(Key::R, "Reset the Mandelbrot set view to the starting view", empty_closure);
-    key_bindings.add(Key::NumPadPlus, "Increment translation_amount", empty_closure);
-    key_bindings.add(Key::NumPadMinus, "Decrement translation amount", empty_closure);
-    key_bindings.add(Key::NumPadAsterisk, "Increment scale_numerator", empty_closure);
-    key_bindings.add(Key::NumPadSlash, "Decrement scale_numerator", empty_closure);
-    key_bindings.add(Key::LeftBracket, "Scale the view by scaling_factor, effectively zooming in",empty_closure);
-    key_bindings.add(Key::RightBracket, "Scale the view by inverse_scaling_factor, effectively zooming out", empty_closure);
-    key_bindings.add(Key::V, "Prints the current Mandelbrot set view; the center and scale", empty_closure);
-    key_bindings.add(Key::Key1, "Renders VIEW_1", empty_closure);
-    key_bindings.add(Key::Key2, "Renders VIEW_2", empty_closure);
-    key_bindings.add(Key::Key3, "Renders VIEW_3", empty_closure);
-    key_bindings.add(Key::Key4, "Renders VIEW_4", empty_closure);
-    key_bindings.add(Key::Key5, "Renders VIEW_5", empty_closure);
-    key_bindings.add(Key::Key6, "Renders VIEW_6", empty_closure);
-    key_bindings.add(Key::Key7, "Renders VIEW_7", empty_closure);
-    key_bindings.add(Key::Key8, "Renders VIEW_8", empty_closure);
-    key_bindings.add(Key::Key9, "Renders VIEW_9", empty_closure);
-    key_bindings.add(Key::Key0, "Renders VIEW_0", empty_closure);
-    key_bindings.add(Key::K, "Prints the keybindings", empty_closure);
-    key_bindings.add(Key::S, "Saves the current Mandelbrot set view as an image in the saved folder", empty_closure);
-    key_bindings.add(Key::I, "Manually input a Mandelbrot set view", empty_closure);
-    key_bindings.add(Key::A, "Pick an algorithm to color the Mandelbrot set view", empty_closure);
-    key_bindings.add(Key::M, "Change the Mandelbrot set view max_iterations", empty_closure);
-    key_bindings.add(Key::O, "Change the Mandelbrot set view color channel mapping, xyz -> RGB, where x,y,z ∈ {{'R','G','B'}} (case-insensitive)", empty_closure);
-    key_bindings.add(Key::Q, "Change the window and image quality of the Mandelbrot set rendering by setting the SSAA multiplier, clamped from 1x to 64x", empty_closure);
-    key_bindings.add(Key::X, "Change the image quality of the Mandelbrot set rendering by setting the SSAA multiplier, clamped from 1x to 64x", empty_closure);
-    key_bindings.add(Key::C, "Prints the configuration variables", empty_closure);
-    key_bindings.print();
 
-    p.pixel_plane.print();
-    c.print();
-    println!("Mandelbrot set parameters: max. iterations is {} and orbit radius is {}", config.max_iterations, config.orbit_radius);
-    println!("Amount of CPU threads that will be used for rendering: {}", amount_of_threads);
-    println!("Supersampling amount used for rendering: {}x", supersampling_amount);
-    println!();
-
-    println!("Rendering Mandelbrot set default view");
-    rendering::render_complex_plane_into_buffer(&mut p, &c, &m, supersampling_amount, coloring_function);
-
-    // Main loop
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        
-        // Update the window with the new buffer
-        window.update_with_buffer(&p.pixels, config.window_width, config.window_height).unwrap();
-
-        // Handle any window events
-        handle_key_events(&window, &mut c, &mut p, &mut m, &mut vars, &key_bindings, &mut supersampling_amount, &mut image_supersampling_amount, &mut coloring_function, config);
-
-        //Handle any mouse events
-        handle_mouse_events(&window, &mut c, &mut p, &m, supersampling_amount, coloring_function);
-    }
-
+    let app = gui::MandelbrotApp::new(config);
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("Mandelbrot set viewer")
+            .with_inner_size([config.window_width as f32 + gui::SIDE_PANEL_WIDTH, (config.window_height as f32).max(gui::MIN_WINDOW_HEIGHT)]),
+        ..Default::default()
+    };
+    eframe::run_native("Mandelbrot set viewer", options, Box::new(|_creation_context| Ok(Box::new(app))))?;
     Ok(())
 }
