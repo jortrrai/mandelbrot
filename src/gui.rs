@@ -157,22 +157,6 @@ impl MandelbrotApp {
         }
     }
 
-    /// Runs `job` on a clone of the complex plane and pixel buffer on a background thread, so the window stays responsive.
-    /// When the job finishes, the results replace the current plane and buffer, and `message` and the current view are logged.
-    fn start_job(&mut self, message: String, job: impl FnOnce(&mut ComplexPlane, &mut PixelBuffer, &MandelbrotSet, u8, ColoringFunction) + Send + 'static) {
-        let (sender, receiver) = mpsc::channel();
-        let (mut c, mut p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
-        let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
-        std::thread::spawn(move || {
-            let started = Instant::now();
-            job(&mut c, &mut p, &m, supersampling_amount, coloring_function);
-            let _ = sender.send(JobMessage::Done { c, p, message, elapsed: started.elapsed(), completed: true }); //The receiver is gone if the window was closed
-        });
-        self.job = Some(receiver);
-        self.bars = None; //The bars would show an older render
-        self.log("Rendering...");
-    }
-
     /// Takes the messages of the background job: intermediate images and the final result
     fn poll_job(&mut self) {
         while let Ok(notice) = self.notices.try_recv() {
@@ -252,16 +236,10 @@ impl MandelbrotApp {
     }
 
     fn translate(&mut self, name: &str, rows_up: i16, columns_right: i16) {
-        let message = format!("Moved {name} {} pixels", self.vars.translation_amount);
-        if self.progress.is_some() {
-            //The buffer only holds a partially refined image, so it cannot be reused: move the view and start over
-            rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
-            self.render(&message);
-            return;
-        }
-        self.start_job(message, move |c, p, m, supersampling_amount, coloring_function| {
-            rendering::translate_and_render_efficiently(c, p, m, rows_up, columns_right, supersampling_amount, coloring_function);
-        });
+        //Move the view and render it progressively, so every supersampling layer is shown as soon as it is computed.
+        //This also starts over a running render, whose buffer would only be partially refined.
+        rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
+        self.render(&format!("Moved {name} {} pixels", self.vars.translation_amount));
     }
 
     /// Saves the current view as an image on its own background thread. This does not interrupt a running render;
@@ -303,18 +281,10 @@ impl MandelbrotApp {
 
     /// Handles a click on the fractal at `(x, y)` in pixel buffer coordinates
     fn handle_image_click(&mut self, x: f32, y: f32, centering: bool) {
-        if self.job.is_some() && self.progress.is_none() {
-            return; //The view is being moved, clicks would map to a stale image
-        }
         let complex = self.c.complex_from_pixel_plane(x.into(), y.into());
-        if centering && self.progress.is_some() {
+        if centering {
             self.c.set_center(&complex);
             self.render(&format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y));
-        } else if centering {
-            let message = format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y);
-            self.start_job(message, move |c, p, m, supersampling_amount, coloring_function| {
-                rendering::translate_to_center_and_render_efficiently(c, p, m, &complex, supersampling_amount, coloring_function);
-            });
         } else {
             self.log(format!("Clicked pixel ({}, {}) = complex point ({:.10}, {:.10})", x as usize, y as usize, complex.x, complex.y));
         }
@@ -642,9 +612,28 @@ mod tests {
         assert!(total >= bars.layer_times.iter().sum(), "the total includes all layers");
         assert!(app.log.last().unwrap().contains(" s: "), "the log should mention the render time: {:?}", app.log.last());
 
-        //A move only redraws a strip, so the bars of the full render are removed
+        //Moving renders the moved view progressively too, with its own bar
         app.translate("up", 10, 0);
-        assert!(app.bars.is_none(), "the bars of the previous render should be removed when only a strip is rendered");
+        assert!(app.progress.is_some());
+        assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 0, "the move starts a new bar");
         wait_for_job(&mut app);
+        assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 3, "every layer of the move is rendered and timed");
+        assert!(app.log.last().unwrap().starts_with("Moved up 10 pixels in"));
+    }
+
+    #[test]
+    fn centering_the_view_renders_every_layer_progressively() {
+        let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        let old_center = app.c.center();
+
+        app.handle_image_click(10.0, 10.0, true); //Like a right-click on the fractal
+        assert!(app.progress.is_some(), "centering should start a progressive render");
+        wait_for_job(&mut app);
+
+        assert_ne!(app.c.center().x, old_center.x, "the view should have moved");
+        assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 3, "every layer should be rendered and timed");
+        assert!(app.log.last().unwrap().starts_with("Centered the view on"));
     }
 }
