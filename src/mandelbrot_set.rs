@@ -18,7 +18,8 @@ pub const LANES: usize = 4;
 const SMOOTH_BAILOUT_SQUARED: f64 = 65536.0;
 const SMOOTH_MAX_EXTRA_STEPS: u32 = 32;
 
-/// The orbits of the `LANES` points of `iterate_lanes_core`: the iteration counts, and for the points that escaped (when smooth) the value of z at the escape
+/// The result of `iterate_lanes_generic`: the iteration counts, and (when smooth) for the points that escaped the value of z at the end of the block of `CHECK_INTERVAL` steps
+/// in which they escaped, see `MandelbrotSet::block_end`
 struct LaneResult {
     iterations: [u32; LANES],
     escaped: [bool; LANES],
@@ -74,18 +75,28 @@ impl MandelbrotSet {
         for _ in 0..self.max_iterations {
             z = z.squared().add(c);
             if (z.x * z.x + z.y * z.y) > orbit_radius_squared {
-                return self.smooth_position(iterations, (z.x, z.y), c);
+                //Continue to the end of the block of CHECK_INTERVAL steps, like the lockstep loop does for its points, so both paths start the smooth position from the same z
+                let end = self.block_end(iterations + 1);
+                for _ in (iterations + 1)..end {
+                    z = z.squared().add(c);
+                }
+                return self.smooth_position(end, (z.x, z.y), c);
             }
             iterations += 1;
         }
         f64::from(self.max_iterations)
     }
 
-    /// The smooth position of a point that escaped: `iterations` is the count of `iterate`, `z` the first value of its orbit outside the orbit radius.
+    /// The number of steps at the end of the block of `CHECK_INTERVAL` steps of the lockstep loop that contains step `step` (1-based), or `max_iterations` for the last block
+    fn block_end(&self, step: u32) -> u32 {
+        (step.div_ceil(CHECK_INTERVAL) * CHECK_INTERVAL).min(self.max_iterations)
+    }
+
+    /// The smooth position of a point that escaped: `steps` is the index of `z` in the orbit (the count of steps taken), `z` a value of the orbit outside the orbit radius.
     /// The orbit is continued to radius 256 (at most `SMOOTH_MAX_EXTRA_STEPS` steps), where the formula is accurate and independent of the orbit radius.
-    fn smooth_position(&self, iterations: u32, z: (f64, f64), c: &Complex) -> f64 {
+    fn smooth_position(&self, steps: u32, z: (f64, f64), c: &Complex) -> f64 {
         let (mut zx, mut zy) = z;
-        let mut steps = iterations + 1;
+        let mut steps = steps;
         for _ in 0..SMOOTH_MAX_EXTRA_STEPS {
             if zx * zx + zy * zy >= SMOOTH_BAILOUT_SQUARED {
                 break;
@@ -95,7 +106,7 @@ impl MandelbrotSet {
         }
         let modulus_squared = zx * zx + zy * zy;
         if modulus_squared <= 1.0 {
-            return f64::from(iterations); //The formula needs |z| > 1; only possible with an orbit radius below 1.5 that was left again
+            return f64::from(steps - 1).min(f64::from(self.max_iterations.saturating_sub(1))); //The formula needs |z| > 1; only possible with an orbit radius below 1.5 that was left again
         }
         let log_modulus = 0.5 * modulus_squared.ln();
         let position = f64::from(steps - 1) - log_modulus.ln() / std::f64::consts::LN_2;
@@ -129,40 +140,28 @@ impl MandelbrotSet {
     /// The points are iterated in lockstep, with the same arithmetic in the same order, so the compiler can use vector instructions.
     /// A point that has escaped, or is known to be inside the set, stops counting, but the other points continue until none is left.
     pub fn iterate_lanes(&self, points: &[Complex; LANES]) -> [u32; LANES] {
-        self.iterate_lanes_dispatch::<false>(points).iterations
+        self.iterate_lanes_plain(points)
     }
 
-    /// Like `iterate_lanes`, but returns the smooth color position of every point, see `iterate_smooth`; identical to it for every point
-    pub fn iterate_lanes_smooth(&self, points: &[Complex; LANES]) -> [f64; LANES] {
-        let result = self.iterate_lanes_dispatch::<true>(points);
-        std::array::from_fn(|lane| {
-            if result.escaped[lane] {
-                self.smooth_position(result.iterations[lane], (result.escape_x[lane], result.escape_y[lane]), &points[lane])
-            } else {
-                f64::from(result.iterations[lane])
-            }
-        })
-    }
-
-    fn iterate_lanes_dispatch<const SMOOTH: bool>(&self, points: &[Complex; LANES]) -> LaneResult {
+    fn iterate_lanes_plain(&self, points: &[Complex; LANES]) -> [u32; LANES] {
         #[cfg(target_arch = "x86_64")]
         {
             if std::arch::is_x86_feature_detected!("avx2") {
                 //SAFETY: the CPU supports AVX2, which was just detected
-                return unsafe { self.iterate_lanes_avx2::<SMOOTH>(points) };
+                return unsafe { self.iterate_lanes_plain_avx2(points) };
             }
         }
-        self.iterate_lanes_generic::<SMOOTH>(points)
+        self.iterate_lanes_plain_generic(points)
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
-    unsafe fn iterate_lanes_avx2<const SMOOTH: bool>(&self, points: &[Complex; LANES]) -> LaneResult {
-        self.iterate_lanes_generic::<SMOOTH>(points)
+    unsafe fn iterate_lanes_plain_avx2(&self, points: &[Complex; LANES]) -> [u32; LANES] {
+        self.iterate_lanes_plain_generic(points)
     }
 
     #[inline(always)]
-    fn iterate_lanes_generic<const SMOOTH: bool>(&self, points: &[Complex; LANES]) -> LaneResult {
+    fn iterate_lanes_plain_generic(&self, points: &[Complex; LANES]) -> [u32; LANES] {
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
         let mut iterations = [0_u32; LANES];
         let mut active = [true; LANES];
@@ -175,7 +174,6 @@ impl MandelbrotSet {
             }
         }
         let (mut zx, mut zy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
-        let (mut escaped_lane, mut escape_x, mut escape_y) = ([false; LANES], [0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut saved_x, mut saved_y) = ([0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut blocks_since_saved, mut blocks_until_save) = (0_u32, 1_u32);
         let mut step = 0;
@@ -191,13 +189,6 @@ impl MandelbrotSet {
                     let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
                     (zx[lane], zy[lane]) = (new_x, new_y);
                     let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
-                    if SMOOTH {
-                        //Remember z at the step where the point escapes, for the smooth position
-                        let first_escape = escaped & active[lane];
-                        escape_x[lane] = if first_escape { new_x } else { escape_x[lane] };
-                        escape_y[lane] = if first_escape { new_y } else { escape_y[lane] };
-                        escaped_lane[lane] |= first_escape;
-                    }
                     active[lane] &= !escaped;
                     iterations[lane] += u32::from(active[lane]);
                 }
@@ -218,7 +209,104 @@ impl MandelbrotSet {
                 blocks_until_save = blocks_until_save.saturating_mul(2);
             }
         }
-        LaneResult { iterations, escaped: escaped_lane, escape_x, escape_y }
+        iterations
+    }
+
+    /// Like `iterate_lanes`, but returns the smooth color position of every point, see `iterate_smooth`; identical to it for every point
+    pub fn iterate_lanes_smooth(&self, points: &[Complex; LANES]) -> [f64; LANES] {
+        let result = self.iterate_lanes_smooth_dispatch(points);
+        std::array::from_fn(|lane| {
+            if result.escaped[lane] {
+                self.smooth_position(self.block_end(result.iterations[lane] + 1), (result.escape_x[lane], result.escape_y[lane]), &points[lane])
+            } else {
+                f64::from(result.iterations[lane])
+            }
+        })
+    }
+
+
+    fn iterate_lanes_smooth_dispatch(&self, points: &[Complex; LANES]) -> LaneResult {
+        let mut out = LaneResult { iterations: [0; LANES], escaped: [false; LANES], escape_x: [0.0; LANES], escape_y: [0.0; LANES] };
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                //SAFETY: the CPU supports AVX2, which was just detected
+                unsafe { self.iterate_lanes_smooth_avx2(points, &mut out) };
+                return out;
+            }
+        }
+        self.iterate_lanes_smooth_generic(points, &mut out);
+        out
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn iterate_lanes_smooth_avx2(&self, points: &[Complex; LANES], out: &mut LaneResult) {
+        self.iterate_lanes_smooth_generic(points, out);
+    }
+
+    #[inline(always)]
+    fn iterate_lanes_smooth_generic(&self, points: &[Complex; LANES], out: &mut LaneResult) {
+        let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
+        let mut iterations = [0_u32; LANES];
+        let mut active = [true; LANES];
+        let (mut cx, mut cy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
+        for lane in 0..LANES {
+            (cx[lane], cy[lane]) = (points[lane].x, points[lane].y);
+            if self.is_known_interior(&points[lane]) {
+                active[lane] = false;
+                iterations[lane] = self.max_iterations;
+            }
+        }
+        let (mut zx, mut zy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
+        let (mut captured, mut escape_x, mut escape_y) = ([false; LANES], [0.0_f64; LANES], [0.0_f64; LANES]);
+        let (mut saved_x, mut saved_y) = ([0.0_f64; LANES], [0.0_f64; LANES]);
+        let (mut blocks_since_saved, mut blocks_until_save) = (0_u32, 1_u32);
+        let mut step = 0;
+        while step < self.max_iterations {
+            if !active.iter().any(|lane_active| *lane_active) {
+                break;
+            }
+            //Only check whether any point is left every few steps; points that already stopped do not count anymore
+            for _ in 0..CHECK_INTERVAL.min(self.max_iterations - step) {
+                for lane in 0..LANES {
+                    //Same arithmetic as z = z.squared().add(c)
+                    let new_x = zx[lane] * zx[lane] - zy[lane] * zy[lane] + cx[lane];
+                    let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
+                    (zx[lane], zy[lane]) = (new_x, new_y);
+                    let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
+                    active[lane] &= !escaped;
+                    iterations[lane] += u32::from(active[lane]);
+                }
+            }
+            let (block_start, block_end) = (step, (step + CHECK_INTERVAL).min(self.max_iterations));
+            step += CHECK_INTERVAL;
+            //A point that stopped in this block: keep z at the end of the block (the lanes keep iterating, so this is z at the block end) for the smooth position, without branches
+            for lane in 0..LANES {
+                //Escaped in this block: the point stopped counting after `step_before` and before the end of the block
+                let stopped_now = iterations[lane] >= block_start && iterations[lane] < block_end;
+                escape_x[lane] = if stopped_now { zx[lane] } else { escape_x[lane] };
+                escape_y[lane] = if stopped_now { zy[lane] } else { escape_y[lane] };
+                captured[lane] |= stopped_now;
+            }
+            //Brent's cycle detection, once per block of steps: if a point is exactly where it was at an earlier block, its orbit repeats forever,
+            //and every point of it was inside the orbit radius, so the original loop would count every step: max_iterations
+            for lane in 0..LANES {
+                if active[lane] && zx[lane] == saved_x[lane] && zy[lane] == saved_y[lane] {
+                    active[lane] = false;
+                    iterations[lane] = self.max_iterations;
+                }
+            }
+            blocks_since_saved += 1;
+            if blocks_since_saved == blocks_until_save {
+                (saved_x, saved_y) = (zx, zy);
+                blocks_since_saved = 0;
+                blocks_until_save = blocks_until_save.saturating_mul(2);
+            }
+        }
+        //Points that escaped have iterations < max_iterations (and a captured z); the others stopped inside the set or ran to the limit
+        let escaped = std::array::from_fn(|lane| captured[lane] && iterations[lane] < self.max_iterations);
+        *out = LaneResult { iterations, escaped, escape_x, escape_y };
     }
 
     /// Returns true only if `c` is certainly inside the main cardioid or the period-two bulb, so `c` never escapes.
@@ -423,7 +511,7 @@ mod tests {
             for group in points.chunks_exact(LANES) {
                 let group: [Complex; LANES] = std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y));
                 let lanes = m.iterate_lanes_smooth(&group);
-                let generic = m.iterate_lanes_generic::<true>(&group);
+                let generic = m.iterate_lanes_smooth_dispatch(&group);
                 for lane in 0..LANES {
                     assert_eq!(lanes[lane].to_bits(), m.iterate_smooth(&group[lane]).to_bits(), "{:?}", group[lane]);
                     assert_eq!(generic.iterations[lane], m.iterate(&group[lane]));
