@@ -8,16 +8,30 @@ pub struct MandelbrotSet {
     ///When set (automatic iteration limit), the palette is scaled to this many iterations instead of `max_iterations`, so raising the limit does not recolor the image,
     ///see `MandelbrotSet::color`
     pub palette_scale: Option<u32>,
+    ///Whether colors use the smooth (fractional) iteration position of `iterate_smooth` instead of the integer iteration count, see `MandelbrotSet::position`
+    pub smooth_coloring: bool,
 }
 
 /// The amount of points `MandelbrotSet::iterate_lanes` iterates at the same time
 pub const LANES: usize = 4;
+/// Smooth coloring continues an escaped orbit until |z|^2 reaches this (radius 256), or for at most `SMOOTH_MAX_EXTRA_STEPS` steps
+const SMOOTH_BAILOUT_SQUARED: f64 = 65536.0;
+const SMOOTH_MAX_EXTRA_STEPS: u32 = 32;
+
+/// The orbits of the `LANES` points of `iterate_lanes_core`: the iteration counts, and for the points that escaped (when smooth) the value of z at the escape
+struct LaneResult {
+    iterations: [u32; LANES],
+    escaped: [bool; LANES],
+    escape_x: [f64; LANES],
+    escape_y: [f64; LANES],
+}
+
 /// `iterate_lanes` checks whether every point has stopped after this many steps
 const CHECK_INTERVAL: u32 = 4;
 
 impl MandelbrotSet {
     pub fn new(max_iterations: u32, orbit_radius: f64) -> MandelbrotSet {
-        MandelbrotSet { max_iterations, orbit_radius, palette_scale: None }
+        MandelbrotSet { max_iterations, orbit_radius, palette_scale: None, smooth_coloring: true }
     }
 
     /// The color of a point with the given iteration count. Without a `palette_scale` this is exactly `coloring_function(iterations, max_iterations)`.
@@ -36,6 +50,72 @@ impl MandelbrotSet {
         self.is_known_interior(c)
     }
 
+    /// The position in the color table of a point: `iterate` as a number, or with `smooth_coloring` the smooth position of `iterate_smooth`
+    pub fn position(&self, c: &Complex) -> f64 {
+        if self.smooth_coloring { self.iterate_smooth(c) } else { f64::from(self.iterate(c)) }
+    }
+
+    /// Like `position`, for `LANES` points at the same time
+    pub fn position_lanes(&self, points: &[Complex; LANES]) -> [f64; LANES] {
+        if self.smooth_coloring { self.iterate_lanes_smooth(points) } else { self.iterate_lanes(points).map(f64::from) }
+    }
+
+    /// The continuous escape time of a point (normalized iteration count): the iteration count of `iterate` plus a fraction in about [-0.85, 0.53) that depends on how far
+    /// beyond the orbit radius the orbit landed, so neighboring points in different integer bands get neighboring positions. Points that do not escape get `max_iterations`.
+    /// The integer count and the interior classification are exactly those of `iterate`; only the escaped points do a few extra steps and two logarithms.
+    /// Formula: nu = n - log2(ln|z_n|) for a large |z_n|, see <https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set#Continuous_(smooth)_coloring>
+    pub fn iterate_smooth(&self, c: &Complex) -> f64 {
+        if self.is_known_interior(c) {
+            return f64::from(self.max_iterations);
+        }
+        let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
+        let mut z = Complex::new(0.0, 0.0);
+        let mut iterations: u32 = 0;
+        for _ in 0..self.max_iterations {
+            z = z.squared().add(c);
+            if (z.x * z.x + z.y * z.y) > orbit_radius_squared {
+                return self.smooth_position(iterations, (z.x, z.y), c);
+            }
+            iterations += 1;
+        }
+        f64::from(self.max_iterations)
+    }
+
+    /// The smooth position of a point that escaped: `iterations` is the count of `iterate`, `z` the first value of its orbit outside the orbit radius.
+    /// The orbit is continued to radius 256 (at most `SMOOTH_MAX_EXTRA_STEPS` steps), where the formula is accurate and independent of the orbit radius.
+    fn smooth_position(&self, iterations: u32, z: (f64, f64), c: &Complex) -> f64 {
+        let (mut zx, mut zy) = z;
+        let mut steps = iterations + 1;
+        for _ in 0..SMOOTH_MAX_EXTRA_STEPS {
+            if zx * zx + zy * zy >= SMOOTH_BAILOUT_SQUARED {
+                break;
+            }
+            (zx, zy) = (zx * zx - zy * zy + c.x, 2.0 * zx * zy + c.y);
+            steps += 1;
+        }
+        let modulus_squared = zx * zx + zy * zy;
+        if modulus_squared <= 1.0 {
+            return f64::from(iterations); //The formula needs |z| > 1; only possible with an orbit radius below 1.5 that was left again
+        }
+        let log_modulus = 0.5 * modulus_squared.ln();
+        let position = f64::from(steps - 1) - log_modulus.ln() / std::f64::consts::LN_2;
+        position.clamp(0.0, f64::from(self.max_iterations.saturating_sub(1)))
+    }
+
+    /// The color at a (fractional) table position: the colors of the two nearest integer iteration counts, mixed by the fraction in 1/256 steps (integer arithmetic).
+    /// `lookup` gives the color of an integer iteration count. A whole position gives exactly `lookup(position)`, which is what coloring by integer counts did.
+    pub fn interpolated_color(&self, position: f64, lookup: impl Fn(u32) -> crate::coloring::TrueColor) -> crate::coloring::TrueColor {
+        let index = position as u32;
+        let weight = ((position - f64::from(index)) * 256.0) as u32;
+        let first = lookup(index);
+        if weight == 0 || index >= self.max_iterations {
+            return first;
+        }
+        let second = lookup(index + 1);
+        let mix = |a: u8, b: u8| ((u32::from(a) * (256 - weight) + u32::from(b) * weight + 128) >> 8) as u8;
+        crate::coloring::TrueColor::new(mix(first.red, second.red), mix(first.green, second.green), mix(first.blue, second.blue))
+    }
+
     /// Run the Mandelbrot set algorithm for a single Complex number
     /// Returns the amount of iterations needed before Zn escapes to infinity
     pub fn iterate(&self, c: &Complex) -> u32 {
@@ -49,24 +129,40 @@ impl MandelbrotSet {
     /// The points are iterated in lockstep, with the same arithmetic in the same order, so the compiler can use vector instructions.
     /// A point that has escaped, or is known to be inside the set, stops counting, but the other points continue until none is left.
     pub fn iterate_lanes(&self, points: &[Complex; LANES]) -> [u32; LANES] {
+        self.iterate_lanes_dispatch::<false>(points).iterations
+    }
+
+    /// Like `iterate_lanes`, but returns the smooth color position of every point, see `iterate_smooth`; identical to it for every point
+    pub fn iterate_lanes_smooth(&self, points: &[Complex; LANES]) -> [f64; LANES] {
+        let result = self.iterate_lanes_dispatch::<true>(points);
+        std::array::from_fn(|lane| {
+            if result.escaped[lane] {
+                self.smooth_position(result.iterations[lane], (result.escape_x[lane], result.escape_y[lane]), &points[lane])
+            } else {
+                f64::from(result.iterations[lane])
+            }
+        })
+    }
+
+    fn iterate_lanes_dispatch<const SMOOTH: bool>(&self, points: &[Complex; LANES]) -> LaneResult {
         #[cfg(target_arch = "x86_64")]
         {
             if std::arch::is_x86_feature_detected!("avx2") {
                 //SAFETY: the CPU supports AVX2, which was just detected
-                return unsafe { self.iterate_lanes_avx2(points) };
+                return unsafe { self.iterate_lanes_avx2::<SMOOTH>(points) };
             }
         }
-        self.iterate_lanes_generic(points)
+        self.iterate_lanes_generic::<SMOOTH>(points)
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
-    unsafe fn iterate_lanes_avx2(&self, points: &[Complex; LANES]) -> [u32; LANES] {
-        self.iterate_lanes_generic(points)
+    unsafe fn iterate_lanes_avx2<const SMOOTH: bool>(&self, points: &[Complex; LANES]) -> LaneResult {
+        self.iterate_lanes_generic::<SMOOTH>(points)
     }
 
     #[inline(always)]
-    fn iterate_lanes_generic(&self, points: &[Complex; LANES]) -> [u32; LANES] {
+    fn iterate_lanes_generic<const SMOOTH: bool>(&self, points: &[Complex; LANES]) -> LaneResult {
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
         let mut iterations = [0_u32; LANES];
         let mut active = [true; LANES];
@@ -79,6 +175,7 @@ impl MandelbrotSet {
             }
         }
         let (mut zx, mut zy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
+        let (mut escaped_lane, mut escape_x, mut escape_y) = ([false; LANES], [0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut saved_x, mut saved_y) = ([0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut blocks_since_saved, mut blocks_until_save) = (0_u32, 1_u32);
         let mut step = 0;
@@ -94,6 +191,13 @@ impl MandelbrotSet {
                     let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
                     (zx[lane], zy[lane]) = (new_x, new_y);
                     let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
+                    if SMOOTH {
+                        //Remember z at the step where the point escapes, for the smooth position
+                        let first_escape = escaped & active[lane];
+                        escape_x[lane] = if first_escape { new_x } else { escape_x[lane] };
+                        escape_y[lane] = if first_escape { new_y } else { escape_y[lane] };
+                        escaped_lane[lane] |= first_escape;
+                    }
                     active[lane] &= !escaped;
                     iterations[lane] += u32::from(active[lane]);
                 }
@@ -114,7 +218,7 @@ impl MandelbrotSet {
                 blocks_until_save = blocks_until_save.saturating_mul(2);
             }
         }
-        iterations
+        LaneResult { iterations, escaped: escaped_lane, escape_x, escape_y }
     }
 
     /// Returns true only if `c` is certainly inside the main cardioid or the period-two bulb, so `c` never escapes.
@@ -280,5 +384,76 @@ mod tests {
         let center = Complex::new(-0.12256116687665362, 0.7448617666197442);
         let points: [Complex; LANES] = std::array::from_fn(|_| Complex::new(center.x, center.y));
         assert_eq!(m.iterate_lanes(&points), [3000; LANES]);
+    }
+
+    fn test_points() -> Vec<Complex> {
+        let mut points = Vec::new();
+        for (min_x, max_x, min_y, max_y) in [(-2.5, 1.0, -1.0, 1.0), (-0.80, -0.70, 0.05, 0.15), (-1.30, -1.20, -0.05, 0.05), (0.20, 0.30, -0.05, 0.05)] {
+            for i in 0..60 {
+                for j in 0..60 {
+                    points.push(Complex::new(min_x + (max_x - min_x) * f64::from(i) / 60.0, min_y + (max_y - min_y) * f64::from(j) / 60.0));
+                }
+            }
+        }
+        points
+    }
+
+    #[test]
+    fn smooth_position_keeps_the_integer_count_and_the_interior_classification() {
+        for max_iterations in [1, 10, 300] {
+            for orbit_radius in ORBIT_RADII {
+                let m = MandelbrotSet::new(max_iterations, orbit_radius);
+                for c in test_points() {
+                    let (count, position) = (m.iterate(&c), m.iterate_smooth(&c));
+                    if count == max_iterations {
+                        assert_eq!(position, f64::from(max_iterations), "points that do not escape stay at the limit: {c:?}");
+                    } else {
+                        assert!(position >= 0.0 && position <= f64::from(max_iterations - 1) && position >= f64::from(count) - 2.0, "{c:?}: count {count}, position {position}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smooth_positions_of_the_simd_and_scalar_paths_are_identical() {
+        let points = test_points();
+        for max_iterations in [1, 7, 300] {
+            let m = MandelbrotSet::new(max_iterations, 2.0);
+            for group in points.chunks_exact(LANES) {
+                let group: [Complex; LANES] = std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y));
+                let lanes = m.iterate_lanes_smooth(&group);
+                let generic = m.iterate_lanes_generic::<true>(&group);
+                for lane in 0..LANES {
+                    assert_eq!(lanes[lane].to_bits(), m.iterate_smooth(&group[lane]).to_bits(), "{:?}", group[lane]);
+                    assert_eq!(generic.iterations[lane], m.iterate(&group[lane]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smooth_position_is_continuous_where_the_integer_count_jumps() {
+        let m = MandelbrotSet::new(1000, 2.0);
+        let positions: Vec<(u32, f64)> = (0..4000).map(|i| { let c = Complex::new(-0.5 + f64::from(i) * 1.25e-4, 0.9); (m.iterate(&c), m.iterate_smooth(&c)) }).collect();
+        //Only where the bands are wide enough to be sampled well, i.e. not right at the boundary of the set
+        let pairs: Vec<_> = positions.windows(2).filter(|w| w[0].0 <= 8 && w[1].0 <= 8).collect();
+        let jumps = pairs.iter().filter(|w| w[0].0 != w[1].0).count();
+        let largest_step = pairs.iter().map(|w| (w[1].1 - w[0].1).abs()).fold(0.0, f64::max);
+        assert!(jumps >= 5, "the line crosses several integer bands: {jumps}");
+        assert!(largest_step < 0.2, "the smooth position changes gradually across the bands: {largest_step}");
+    }
+
+    #[test]
+    fn interpolated_color_mixes_neighbors_and_keeps_whole_positions() {
+        use crate::coloring::TrueColor;
+        let m = MandelbrotSet::new(10, 2.0);
+        let lookup = |i: u32| TrueColor::new((i * 10) as u8, 200, (255 - i * 10) as u8);
+        let whole = m.interpolated_color(3.0, lookup);
+        assert_eq!((whole.red, whole.green, whole.blue), (30, 200, 225));
+        let half = m.interpolated_color(3.5, lookup);
+        assert_eq!((half.red, half.green, half.blue), (35, 200, 220));
+        let inside = m.interpolated_color(10.0, lookup);
+        assert_eq!((inside.red, inside.green, inside.blue), (100, 200, 155), "the limit itself is never mixed with a color beyond it");
     }
 }
