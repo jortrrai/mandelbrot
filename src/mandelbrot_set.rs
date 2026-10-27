@@ -5,6 +5,9 @@ pub struct MandelbrotSet {
     pub max_iterations: u32,
     ///If z remains within the orbit_radius in max_iterations, we assume c does not tend to infinity
     pub orbit_radius: f64,    
+    ///When set (automatic iteration limit), the palette is scaled to this many iterations instead of `max_iterations`, so raising the limit does not recolor the image,
+    ///see `MandelbrotSet::color`
+    pub palette_scale: Option<u32>,
 }
 
 /// The amount of points `MandelbrotSet::iterate_lanes` iterates at the same time
@@ -14,7 +17,23 @@ const CHECK_INTERVAL: u32 = 4;
 
 impl MandelbrotSet {
     pub fn new(max_iterations: u32, orbit_radius: f64) -> MandelbrotSet {
-        MandelbrotSet { max_iterations, orbit_radius }
+        MandelbrotSet { max_iterations, orbit_radius, palette_scale: None }
+    }
+
+    /// The color of a point with the given iteration count. Without a `palette_scale` this is exactly `coloring_function(iterations, max_iterations)`.
+    /// With one, points inside the set (`iterations == max_iterations`) get the color the palette gives to its last iteration, and escaped points repeat the palette every `palette_scale` iterations,
+    /// so a point that escaped keeps its color when the limit is raised.
+    pub fn color(&self, coloring_function: fn(u32, u32) -> crate::coloring::TrueColor, iterations: u32) -> crate::coloring::TrueColor {
+        match self.palette_scale {
+            None => coloring_function(iterations, self.max_iterations),
+            Some(scale) if iterations >= self.max_iterations => coloring_function(scale, scale),
+            Some(scale) => coloring_function(iterations % scale, scale),
+        }
+    }
+
+    /// Whether `c` is certified to be inside the set by the cardioid and period-two bulb test, see `is_known_interior`
+    pub fn is_certified_interior(&self, c: &Complex) -> bool {
+        self.is_known_interior(c)
     }
 
     /// Run the Mandelbrot set algorithm for a single Complex number
@@ -140,6 +159,24 @@ impl std::fmt::Debug for MandelbrotSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_palette_scale_keeps_the_color_of_escaped_points_when_the_limit_changes() {
+        let f = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+        let manual = MandelbrotSet::new(1000, 2.0);
+        for i in [0, 1, 17, 500, 999, 1000] {
+            let (a, b) = (manual.color(f, i), f(i, 1000));
+            assert_eq!((a.red, a.green, a.blue), (b.red, b.green, b.blue), "manual mode colors as before");
+        }
+        let (mut low, mut high) = (MandelbrotSet::new(400, 2.0), MandelbrotSet::new(9000, 2.0));
+        (low.palette_scale, high.palette_scale) = (Some(400), Some(400));
+        for i in [0, 1, 17, 200, 399] {
+            let (a, b) = (low.color(f, i), high.color(f, i));
+            assert_eq!((a.red, a.green, a.blue), (b.red, b.green, b.blue), "iteration {i} keeps its color");
+        }
+        let (a, b) = (low.color(f, 400), high.color(f, 9000));
+        assert_eq!((a.red, a.green, a.blue), (b.red, b.green, b.blue), "inside the set has the same color at any limit");
+    }
 
     const ORBIT_RADII: [f64; 3] = [2.0, 4.0, 1.0];
 
