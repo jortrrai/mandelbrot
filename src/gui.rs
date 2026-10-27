@@ -1,6 +1,8 @@
 //! The graphical user interface: the fractal on the left, the controls in the top right and a scrollable status log in the bottom right.
 //! The terminal is only used for developer output.
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -28,11 +30,19 @@ const VIEWS: [(&str, &View); 10] = [
     ("View 6", &VIEW_6), ("View 7", &VIEW_7), ("View 8", &VIEW_8), ("View 9", &VIEW_9), ("View 10", &VIEW_0),
 ];
 
-/// The result of a rendering job that ran on a background thread
-struct JobResult {
-    c: ComplexPlane,
-    p: PixelBuffer,
-    message: String,
+/// A message from a rendering job that runs on a background thread
+enum JobMessage {
+    /// An intermediate image: the running average of the first `pass` of `total` supersampling layers
+    Pass { colors: Vec<TrueColor>, pixels: Vec<u32>, pass: u8, total: u8 },
+    /// The job has finished (or was cancelled), this is its final result
+    Done { c: ComplexPlane, p: PixelBuffer, message: String },
+}
+
+/// A progressive render that is currently running: how far it is and how to cancel it
+struct Progress {
+    pass: u8,
+    total: u8,
+    cancel: Arc<AtomicBool>,
 }
 
 pub struct MandelbrotApp {
@@ -56,7 +66,12 @@ pub struct MandelbrotApp {
     texture: Option<TextureHandle>,
     texture_outdated: bool,
     /// The receiving end of the running background rendering job, if any. While a job runs, the controls are disabled.
-    job: Option<Receiver<JobResult>>,
+    job: Option<Receiver<JobMessage>>,
+    /// Set while a progressive render runs
+    progress: Option<Progress>,
+    /// Messages from background tasks that do not change the view, e.g. saving an image
+    notices: Receiver<String>,
+    notice_sender: Sender<String>,
 }
 
 impl MandelbrotApp {
@@ -65,6 +80,7 @@ impl MandelbrotApp {
         let mut p = PixelBuffer::new(PixelPlane::new(config.window_width, config.window_height));
         p.color_channel_mapping = COLOR_CHANNEL_MAPPING;
         let m = MandelbrotSet::new(config.max_iterations, config.orbit_radius);
+        let (notice_sender, notices) = mpsc::channel();
         let mut app = MandelbrotApp {
             c,
             p,
@@ -82,6 +98,9 @@ impl MandelbrotApp {
             texture: None,
             texture_outdated: true,
             job: None,
+            progress: None,
+            notices,
+            notice_sender,
         };
         app.log(format!("Window: {}x{} pixels, {} CPU threads used for rendering", config.window_width, config.window_height, num_cpus::get()));
         app.log(format!("Max. iterations: {}, orbit radius: {}, supersampling: {}x", config.max_iterations, config.orbit_radius, config.supersampling_amount));
@@ -105,6 +124,20 @@ impl MandelbrotApp {
         self.job.is_some()
     }
 
+    /// Whether the controls can be used: not while a move runs, but always while a progressive render runs, since using a control interrupts it
+    fn controls_enabled(&self) -> bool {
+        self.job.is_none() || self.progress.is_some()
+    }
+
+    /// Cancels the running progressive render, if any, and ignores everything it still reports.
+    /// The image of the last completed layer stays on screen until the next render shows its first layer.
+    fn interrupt_progressive_render(&mut self) {
+        if let Some(progress) = self.progress.take() {
+            progress.cancel.store(true, Ordering::Relaxed);
+            self.job = None;
+        }
+    }
+
     /// Runs `job` on a clone of the complex plane and pixel buffer on a background thread, so the window stays responsive.
     /// When the job finishes, the results replace the current plane and buffer, and `message` and the current view are logged.
     fn start_job(&mut self, message: String, job: impl FnOnce(&mut ComplexPlane, &mut PixelBuffer, &MandelbrotSet, u8, ColoringFunction) + Send + 'static) {
@@ -113,63 +146,111 @@ impl MandelbrotApp {
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         std::thread::spawn(move || {
             job(&mut c, &mut p, &m, supersampling_amount, coloring_function);
-            let _ = sender.send(JobResult { c, p, message }); //The receiver is gone if the window was closed
+            let _ = sender.send(JobMessage::Done { c, p, message }); //The receiver is gone if the window was closed
         });
         self.job = Some(receiver);
         self.log("Rendering...");
     }
 
-    /// Takes the results of the background job if it has finished
+    /// Takes the messages of the background job: intermediate images and the final result
     fn poll_job(&mut self) {
-        let Some(receiver) = &self.job else { return };
-        match receiver.try_recv() {
-            Ok(result) => {
-                self.job = None;
-                self.c = result.c;
-                self.p = result.p;
-                self.texture_outdated = true;
-                let description = self.view_description();
-                self.log(format!("{}: {description}", result.message));
-            }
-            Err(TryRecvError::Empty) => (),
-            Err(TryRecvError::Disconnected) => {
-                self.job = None;
-                self.log("Rendering failed, see the terminal for details");
+        while let Ok(notice) = self.notices.try_recv() {
+            self.log(notice);
+        }
+        loop {
+            let Some(receiver) = &self.job else { return };
+            match receiver.try_recv() {
+                Ok(JobMessage::Pass { colors, pixels, pass, total }) => {
+                    self.p.colors = colors;
+                    self.p.pixels = pixels;
+                    self.texture_outdated = true;
+                    if let Some(progress) = &mut self.progress {
+                        progress.pass = pass;
+                        progress.total = total;
+                    }
+                }
+                Ok(JobMessage::Done { c, p, message }) => {
+                    self.job = None;
+                    self.progress = None;
+                    self.c = c;
+                    self.p = p;
+                    self.texture_outdated = true;
+                    let description = self.view_description();
+                    self.log(format!("{message}: {description}"));
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.job = None;
+                    self.progress = None;
+                    self.log("Rendering failed, see the terminal for details");
+                }
             }
         }
     }
 
     /// Renders the complete view in the background, then logs `message` and the current view
+    /// Every supersampling layer is shown as soon as it is computed, see `rendering::render_progressively`
     fn render(&mut self, message: &str) {
-        self.start_job(message.to_string(), |c, p, m, supersampling_amount, coloring_function| {
-            rendering::render_complex_plane_into_buffer(p, c, m, supersampling_amount, coloring_function);
+        self.interrupt_progressive_render();
+        let (sender, receiver) = mpsc::channel();
+        let (c, mut p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
+        let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let thread_cancel = Arc::clone(&cancel);
+        let message = message.to_string();
+        std::thread::spawn(move || {
+            let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
+            let completed = rendering::render_progressively(&c, &m, width, height, supersampling_amount, coloring_function, &thread_cancel, |colors, pass| {
+                p.colors.copy_from_slice(colors);
+                p.update_pixels();
+                println!("Rendered supersampling layer {pass} of {supersampling_amount}");
+                let _ = sender.send(JobMessage::Pass { colors: p.colors.clone(), pixels: p.pixels.clone(), pass, total: supersampling_amount });
+            });
+            let message = if completed { message } else { String::from("Cancelled the rendering, showing the layers that were completed") };
+            let _ = sender.send(JobMessage::Done { c, p, message }); //The receiver is gone if the window was closed
         });
+        self.job = Some(receiver);
+        self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel });
+        self.log("Rendering...");
     }
 
     fn translate(&mut self, name: &str, rows_up: i16, columns_right: i16) {
         let message = format!("Moved {name} {} pixels", self.vars.translation_amount);
+        if self.progress.is_some() {
+            //The buffer only holds a partially refined image, so it cannot be reused: move the view and start over
+            rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
+            self.render(&message);
+            return;
+        }
         self.start_job(message, move |c, p, m, supersampling_amount, coloring_function| {
             rendering::translate_and_render_efficiently(c, p, m, rows_up, columns_right, supersampling_amount, coloring_function);
         });
     }
 
+    /// Saves the current view as an image on its own background thread. This does not interrupt a running render;
+    /// while one runs, the buffer only holds a partially refined image, so the image is rendered again for saving.
     fn save_image(&mut self) {
         let time_stamp = chrono::Utc::now().to_string();
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
-        let (config, image_supersampling_amount) = (self.config.clone(), self.image_supersampling_amount);
-        self.start_job(format!("Saved the image to saved/{file_name}.png"), move |c, p, m, _, coloring_function| {
+        let (c, p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
+        let (config, image_supersampling_amount, coloring_function) = (self.config.clone(), self.image_supersampling_amount, self.coloring_function);
+        let buffer_is_complete = self.progress.is_none();
+        let sender = self.notice_sender.clone();
+        std::thread::spawn(move || {
             let view = c.get_view();
-            if config.window_scale == 1.0 {
-                p.save_as_png(&time_stamp, &view, m, image_supersampling_amount);
+            if config.window_scale == 1.0 && buffer_is_complete {
+                p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount);
             } else {
                 let mut image_p = PixelBuffer::new(PixelPlane::new(config.image_width, config.image_height));
                 let mut image_c = ComplexPlane::new(config.image_width, config.image_height);
                 image_p.color_channel_mapping = p.color_channel_mapping;
                 image_c.set_view(&view);
-                rendering::render_complex_plane_into_buffer(&mut image_p, &image_c, m, image_supersampling_amount, coloring_function);
-                image_p.save_as_png(&time_stamp, &view, m, image_supersampling_amount);
+                rendering::render_complex_plane_into_buffer(&mut image_p, &image_c, &m, image_supersampling_amount, coloring_function);
+                image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount);
             }
+            let _ = sender.send(format!("Saved the image to saved/{file_name}.png"));
         });
+        self.log("Saving the image...");
     }
 
     fn go_to_view(&mut self) {
@@ -185,11 +266,14 @@ impl MandelbrotApp {
 
     /// Handles a click on the fractal at `(x, y)` in pixel buffer coordinates
     fn handle_image_click(&mut self, x: f32, y: f32, centering: bool) {
-        if self.is_busy() {
-            return; //The view is being rendered, clicks would map to a stale image
+        if self.job.is_some() && self.progress.is_none() {
+            return; //The view is being moved, clicks would map to a stale image
         }
         let complex = self.c.complex_from_pixel_plane(x.into(), y.into());
-        if centering {
+        if centering && self.progress.is_some() {
+            self.c.set_center(&complex);
+            self.render(&format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y));
+        } else if centering {
             let message = format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y);
             self.start_job(message, move |c, p, m, supersampling_amount, coloring_function| {
                 rendering::translate_to_center_and_render_efficiently(c, p, m, &complex, supersampling_amount, coloring_function);
@@ -326,9 +410,13 @@ impl MandelbrotApp {
                     if ui.selectable_label(name == current, name).clicked() && name != current {
                         if let Ok(mapping) = ColorChannelMapping::new(name) {
                             self.p.color_channel_mapping = mapping;
-                            self.p.update_pixels();
-                            self.texture_outdated = true;
-                            self.log(format!("Set the color channel mapping to {name}"));
+                            if self.progress.is_some() {
+                                self.render(&format!("Set the color channel mapping to {name}")); //The running render still uses the old mapping
+                            } else {
+                                self.p.update_pixels();
+                                self.texture_outdated = true;
+                                self.log(format!("Set the color channel mapping to {name}"));
+                            }
                         }
                     }
                 }
@@ -347,7 +435,17 @@ impl MandelbrotApp {
             ui.heading("Status");
             if self.is_busy() {
                 ui.spinner();
-                ui.label("Rendering...");
+                match &self.progress {
+                    Some(progress) => {
+                        ui.label(format!("Rendering layer {} of {}...", (progress.pass + 1).min(progress.total), progress.total));
+                        if ui.button("Cancel").clicked() {
+                            progress.cancel.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    None => {
+                        ui.label("Rendering...");
+                    }
+                }
             }
         });
         egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
@@ -371,7 +469,7 @@ impl eframe::App for MandelbrotApp {
             egui::Panel::bottom("status_panel").resizable(true).default_size(220.0).min_size(80.0).show(ui, |ui| self.log_ui(ui));
             egui::CentralPanel::default().show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    let enabled = !self.is_busy();
+                    let enabled = self.controls_enabled();
                     ui.add_enabled_ui(enabled, |ui| self.controls_ui(ui));
                 });
             });
@@ -425,5 +523,27 @@ mod tests {
         assert!(app.is_busy());
         wait_for_job(&mut app);
         assert_ne!(before, app.p.pixels, "zooming should change the image");
+    }
+
+    #[test]
+    fn a_new_action_interrupts_a_progressive_render_and_starts_over() {
+        let config = Config::build(["mandelbrot", "64", "48", "50", "8"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        assert!(app.progress.is_some());
+        let first_cancel = Arc::clone(&app.progress.as_ref().unwrap().cancel);
+
+        //Moving while the first render is still running interrupts it, and renders the moved view from scratch
+        app.translate("up", 10, 0);
+        assert!(first_cancel.load(Ordering::Relaxed), "the first render should have been cancelled");
+        assert!(app.progress.is_some(), "a new progressive render should be running");
+        let moved_center = app.c.center();
+        wait_for_job(&mut app);
+
+        assert!(app.progress.is_none());
+        assert_eq!(app.p.pixels.len(), 64 * 48);
+        assert!(app.p.pixels.iter().any(|pixel| *pixel != 0));
+        assert_eq!(app.c.center().y, moved_center.y, "the moved view should be kept");
+        assert!(!app.log.iter().any(|message| message.starts_with("Cancelled")), "interrupting is not reported as a cancelled render");
+        assert!(app.log.last().unwrap().starts_with("Moved up 10 pixels"));
     }
 }
