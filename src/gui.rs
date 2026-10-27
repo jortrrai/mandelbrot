@@ -548,10 +548,6 @@ impl MandelbrotApp {
                 self.render(&format!("Set the supersampling to {}x", self.supersampling_amount));
             }
         });
-        ui.horizontal(|ui| {
-            ui.label("Saved image quality:");
-            ui.add(egui::DragValue::new(&mut self.image_supersampling_amount).range(1..=64).suffix("x"));
-        });
 
         ui.separator();
         ui.horizontal(|ui| {
@@ -588,9 +584,15 @@ impl MandelbrotApp {
         });
 
         ui.separator();
+        ui.heading("Save Image");
+        ui.horizontal(|ui| {
+            ui.label("Saved image quality:");
+            ui.add(egui::DragValue::new(&mut self.image_supersampling_amount).range(1..=64).suffix("x"));
+        });
         if ui.button("Save image").clicked() {
             self.save_image();
         }
+        ui.separator();
         ui.label("Click the fractal to see a point's coordinates, right-click to center the view on it.");
     }
 
@@ -952,5 +954,31 @@ mod tests {
         assert_eq!(app.m.palette_scale, Some(balanced_initial));
         assert_eq!(app.m.max_iterations, balanced, "the same view and preset give the same limit as before, not the Performance one");
         assert!(!app.limit_pending);
+    }
+
+    /// The texts that `controls_ui` draws, in drawing order
+    fn controls_texts(app: &mut MandelbrotApp) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.controls_ui(ui));
+        let texts = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+            _ => None,
+        }).collect();
+        output.drop_without_applying_deltas();
+        texts
+    }
+
+    #[test]
+    fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering_controls() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        let texts = controls_texts(&mut app);
+        let position = |needle: &str| texts.iter().position(|t| t.starts_with(needle)).unwrap_or_else(|| panic!("{needle:?} is not drawn: {texts:?}"));
+        let (quality, coloring, channels) = (position("Quality (supersampling"), position("Coloring:"), position("Color channels"));
+        let (heading, saved_quality, save) = (position("Save Image"), position("Saved image quality:"), position("Save image"));
+        assert!(quality < coloring && coloring < channels, "the rendering quality is with the rendering controls");
+        assert!(channels < heading && heading < saved_quality && saved_quality < save, "the saved image quality and the Save button are together in the Save Image section, after the rendering controls");
+        assert_eq!(texts.iter().filter(|t| t.starts_with("Saved image quality")).count(), 1);
     }
 }
