@@ -34,7 +34,7 @@ const VIEWS: [(&str, &View); 10] = [
 /// A message from a rendering job that runs on a background thread
 enum JobMessage {
     /// An intermediate image: the running average of the first `pass` of `total` supersampling layers
-    Pass { colors: Vec<TrueColor>, pixels: Vec<u32>, pass: u8, total: u8, layer_time: Duration },
+    Pass { colors: Vec<TrueColor>, pass: u8, total: u8, layer_time: Duration },
     /// The job has finished (or was cancelled), this is its final result
     Done { c: ComplexPlane, p: PixelBuffer, message: String, elapsed: Duration, completed: bool },
 }
@@ -60,6 +60,19 @@ struct Progress {
     pass: u8,
     total: u8,
     cancel: Arc<AtomicBool>,
+}
+
+/// Converts colors to RGB bytes for a texture, applying the color channel mapping while converting; the same colors as `PixelBuffer::colors_to_pixels`
+fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: &ColorChannelMapping) -> Vec<u8> {
+    let (red, green, blue) = mapping.get_r_g_b_mapping();
+    let channel_index = |channel: char| match channel { 'R' => 0, 'G' => 1, _ => 2 };
+    let (red, green, blue) = (channel_index(red), channel_index(green), channel_index(blue));
+    let mut rgb: Vec<u8> = Vec::with_capacity(colors.len() * 3);
+    for color in colors {
+        let channels = [color.red, color.green, color.blue];
+        rgb.extend_from_slice(&[channels[red], channels[green], channels[blue]]);
+    }
+    rgb
 }
 
 pub struct MandelbrotApp {
@@ -169,9 +182,8 @@ impl MandelbrotApp {
         loop {
             let Some(receiver) = &self.job else { return };
             match receiver.try_recv() {
-                Ok(JobMessage::Pass { colors, pixels, pass, total, layer_time }) => {
+                Ok(JobMessage::Pass { colors, pass, total, layer_time }) => {
                     self.p.colors = colors;
-                    self.p.pixels = pixels;
                     self.texture_outdated = true;
                     if let Some(progress) = &mut self.progress {
                         progress.pass = pass;
@@ -247,13 +259,14 @@ impl MandelbrotApp {
             let base = p.colors.clone();
             let mut layer_started = started;
             let completed = rendering::render_region_progressively(&c, &m, width, height, &region, &base, supersampling_amount, coloring_function, &thread_cancel, &thread_pixels_done, |colors, pass| {
+                //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 p.colors.copy_from_slice(colors);
-                p.update_pixels();
                 let layer_time = layer_started.elapsed();
                 println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
-                let _ = sender.send(JobMessage::Pass { colors: p.colors.clone(), pixels: p.pixels.clone(), pass, total: supersampling_amount, layer_time });
+                let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), pass, total: supersampling_amount, layer_time });
                 layer_started = Instant::now();
             });
+            p.update_pixels(); //The pixels of the last completed layer
             let message = if completed { message } else { String::from("Cancelled the rendering, showing the layers that were completed") };
             let _ = sender.send(JobMessage::Done { c, p, message, elapsed: started.elapsed(), completed }); //The receiver is gone if the window was closed
         });
@@ -322,10 +335,7 @@ impl MandelbrotApp {
         if !self.texture_outdated && self.texture.is_some() {
             return;
         }
-        let mut rgb: Vec<u8> = Vec::with_capacity(self.p.pixels.len() * 3);
-        for pixel in &self.p.pixels {
-            rgb.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8]);
-        }
+        let rgb = colors_to_rgb_bytes(&self.p.colors, &self.p.color_channel_mapping);
         let image = ColorImage::from_rgb([self.p.pixel_plane.width, self.p.pixel_plane.height], &rgb);
         match &mut self.texture {
             Some(texture) => texture.set(image, TextureOptions::NEAREST),
@@ -678,5 +688,16 @@ mod tests {
         assert_eq!(app.bars.as_ref().unwrap().pixels_total, 64 * 48, "a partially refined buffer cannot be reused");
         wait_for_job(&mut app);
         assert!(app.buffer_is_complete);
+    }
+
+    #[test]
+    fn texture_bytes_equal_the_converted_pixels_for_all_mappings() {
+        let colors: Vec<TrueColor> = (0..=255u8).map(|i| TrueColor::new(i, 255 - i, i / 3)).collect();
+        for name in COLOR_CHANNEL_MAPPINGS {
+            let mapping = ColorChannelMapping::new(name).unwrap();
+            let pixels = PixelBuffer::colors_to_pixels(&colors, &mapping);
+            let expected: Vec<u8> = pixels.iter().flat_map(|pixel| [(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8]).collect();
+            assert_eq!(colors_to_rgb_bytes(&colors, &mapping), expected, "{name}");
+        }
     }
 }

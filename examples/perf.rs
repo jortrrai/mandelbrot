@@ -28,6 +28,10 @@ fn workloads() -> Vec<Workload> {
         Workload { name: "default-view-4x", view: View::new(-0.75, 0.0, 1.0), max_iterations: 1000, supersampling_amount: 4 },
         Workload { name: "detail", view: View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002), max_iterations: 5000, supersampling_amount: 1 },
         Workload { name: "exterior", view: View::new(0.9, 0.9, 0.3), max_iterations: 1000, supersampling_amount: 1 },
+        //Almost no iterating: measures the cost of everything around the iteration loop (jitter, coordinates, colors, sums, threads)
+        Workload { name: "overhead", view: View::new(-0.75, 0.0, 1.0), max_iterations: 1, supersampling_amount: 1 },
+        //Inside the period-3 bulb: interior points that are not in the main cardioid or period-2 bulb, so they iterate until the limit
+        Workload { name: "interior-bulb", view: View::new(-0.12256116687665362, 0.7448617666197442, 0.03), max_iterations: 1000, supersampling_amount: 1 },
     ]
 }
 
@@ -85,6 +89,45 @@ fn main() {
             summarize(&label, times);
             println!("{:<44} checksum {checksum:016x}", "");
         }
+    }
+
+    //What the window does after every layer of a progressive render (on the render thread): copy the layer into the buffer, convert it to pixels, and copy both to send them to the window
+    if filter.as_ref().map_or(true, |f| "gui-layers".contains(f.as_str())) {
+        let workload = &workloads()[1]; //default view, 4 layers
+        let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+        c.set_view(&workload.view);
+        let m = MandelbrotSet::new(workload.max_iterations, 2.0);
+        let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
+        let mut sent = (Vec::new(), Vec::new());
+        summarize("4x render, empty layer callback", time_runs(runs, || {
+            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |_, _| {});
+        }));
+        summarize("4x render, window layer callback", time_runs(runs, || {
+            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+                buffer.colors.copy_from_slice(colors);
+                buffer.update_pixels();
+                sent = std::hint::black_box((buffer.colors.clone(), buffer.pixels.clone()));
+            });
+        }));
+        summarize("4x render, colors-only layer callback", time_runs(runs, || {
+            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+                sent.0 = std::hint::black_box(colors.to_vec());
+            });
+        }));
+    }
+
+    //Shifting the pixel buffer, which is what a move does before rendering the exposed strip
+    if filter.as_ref().map_or(true, |f| "shift".contains(f.as_str())) {
+        let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
+        buffer.colors = render(&workloads()[0], TrueColor::new_from_bernstein_polynomials);
+        buffer.update_pixels();
+        buffer.translate_buffer(10, -20);
+        let checksum = checksum(&buffer.colors) ^ buffer.pixels.iter().fold(0u64, |hash, pixel| hash.rotate_left(5) ^ u64::from(*pixel));
+        summarize("translate_buffer (shift by 10 rows, 20 columns)", time_runs(runs * 3, || {
+            buffer.translate_buffer(10, -20);
+            buffer.translate_buffer(-10, 20);
+        }));
+        println!("{:<44} checksum {checksum:016x}  (time is for two shifts)", "");
     }
 
     //Color conversion of a whole buffer, including resolving the channel mapping

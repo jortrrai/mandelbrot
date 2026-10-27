@@ -245,7 +245,8 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
     let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| (0..=m.max_iterations).map(|iterations| coloring_function(iterations, m.max_iterations)).collect());
     for sample in 0..supersampling_amount {
         pixels_done.store(0, Ordering::Relaxed);
-        let rows = Mutex::new(sums.chunks_mut(width).enumerate());
+        let divisor = u32::from(sample) + 1;
+        let rows = Mutex::new(sums.chunks_mut(width).zip(colors.chunks_mut(width)).enumerate());
         thread::scope(|scope| {
             for _ in 0..amount_of_threads {
                 scope.spawn(|| loop {
@@ -253,7 +254,7 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
                         return;
                     }
                     let next_row = rows.lock().unwrap().next();
-                    let Some((y, row)) = next_row else { return };
+                    let Some((y, (row, color_row))) = next_row else { return };
                     let xs: Vec<usize> = (0..width).filter(|x| region.contains(*x, y)).collect();
                     let sample_point = |x: usize| {
                         let (jitter_x, jitter_y) = sample_jitter(x, y, sample);
@@ -278,6 +279,11 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
                     for x in groups.remainder() {
                         add_color(*x, m.iterate(&sample_point(*x)));
                     }
+                    //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
+                    for x in &xs {
+                        let sum = row[*x];
+                        color_row[*x] = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
+                    }
                     let done = xs.len();
                     pixels_done.fetch_add(done, Ordering::Relaxed);
                 });
@@ -285,12 +291,6 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
         });
         if cancel.load(Ordering::Relaxed) {
             return false;
-        }
-        let divisor = u32::from(sample) + 1;
-        for (index, (sum, color)) in sums.iter().zip(colors.iter_mut()).enumerate() {
-            if region.contains(index % width, index / width) {
-                *color = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
-            }
         }
         on_pass(&colors, sample + 1);
     }

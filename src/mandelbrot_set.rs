@@ -10,7 +10,7 @@ pub struct MandelbrotSet {
 /// The amount of points `MandelbrotSet::iterate_lanes` iterates at the same time
 pub const LANES: usize = 4;
 /// `iterate_lanes` checks whether every point has stopped after this many steps
-const CHECK_INTERVAL: u32 = 8;
+const CHECK_INTERVAL: u32 = 4;
 
 impl MandelbrotSet {
     pub fn new(max_iterations: u32, orbit_radius: f64) -> MandelbrotSet {
@@ -60,6 +60,8 @@ impl MandelbrotSet {
             }
         }
         let (mut zx, mut zy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
+        let (mut saved_x, mut saved_y) = ([0.0_f64; LANES], [0.0_f64; LANES]);
+        let (mut blocks_since_saved, mut blocks_until_save) = (0_u32, 1_u32);
         let mut step = 0;
         while step < self.max_iterations {
             if !active.iter().any(|lane_active| *lane_active) {
@@ -78,6 +80,20 @@ impl MandelbrotSet {
                 }
             }
             step += CHECK_INTERVAL;
+            //Brent's cycle detection, once per block of steps: if a point is exactly where it was at an earlier block, its orbit repeats forever,
+            //and every point of it was inside the orbit radius, so the original loop would count every step: max_iterations
+            for lane in 0..LANES {
+                if active[lane] && zx[lane] == saved_x[lane] && zy[lane] == saved_y[lane] {
+                    active[lane] = false;
+                    iterations[lane] = self.max_iterations;
+                }
+            }
+            blocks_since_saved += 1;
+            if blocks_since_saved == blocks_until_save {
+                (saved_x, saved_y) = (zx, zy);
+                blocks_since_saved = 0;
+                blocks_until_save = blocks_until_save.saturating_mul(2);
+            }
         }
         iterations
     }
@@ -201,5 +217,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Points inside bulbs other than the main cardioid and the period-2 bulb never escape, and their orbits are found to repeat: the result must still be `max_iterations`
+    #[test]
+    fn iterate_lanes_matches_iterate_inside_other_bulbs_and_deep_in_the_set() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        //Centers of the period-3 bulbs and a period-4 bulb, and a minibrot; the points are scattered around them
+        let centers = [(-0.12256116687665362, 0.7448617666197442), (-0.12256116687665362, -0.7448617666197442), (-0.5043401, 0.5627655), (-1.7548776662466927, 0.0), (-1.3107, 0.0)];
+        for max_iterations in [50, 1000, 4000] {
+            let m = MandelbrotSet::new(max_iterations, 2.0);
+            for (x, y) in centers {
+                for half in [0.002, 0.02, 0.1] {
+                    for _ in 0..300 {
+                        let points: [Complex; LANES] = std::array::from_fn(|_| Complex::new(x + (rng.gen::<f64>() - 0.5) * 2.0 * half, y + (rng.gen::<f64>() - 0.5) * 2.0 * half));
+                        let expected: Vec<u32> = points.iter().map(|point| m.iterate(point)).collect();
+                        assert_eq!(m.iterate_lanes(&points).to_vec(), expected, "max_iterations = {max_iterations}, points = {:?}", points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
+                    }
+                }
+            }
+        }
+        //The center of the period-3 bulb is found to repeat, and iterates to the limit
+        let m = MandelbrotSet::new(3000, 2.0);
+        let center = Complex::new(-0.12256116687665362, 0.7448617666197442);
+        let points: [Complex; LANES] = std::array::from_fn(|_| Complex::new(center.x, center.y));
+        assert_eq!(m.iterate_lanes(&points), [3000; LANES]);
     }
 }
