@@ -43,6 +43,7 @@ pub mod coloring;
 pub mod gui;
 pub mod config;
 pub mod points_of_interest;
+pub mod thumbnails;
 
 //Coloring function
 type ColoringFunction = fn(iterations: u32, max_iterations: u32) -> TrueColor;
