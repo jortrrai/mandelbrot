@@ -38,6 +38,7 @@ pub mod complex;
 pub mod pixel_buffer;
 pub mod mandelbrot_set;
 pub mod rendering;
+pub mod auto_iterations;
 pub mod coloring;
 pub mod gui;
 pub mod config;
