@@ -109,7 +109,12 @@ impl TrueColor {
     /// The upper 8-bits are ignored, the next 8-bits are for the red channel, the next 8-bits
     /// afterwards for the green channel, and the lower 8-bits for the blue channel.
     pub fn to_32_bit(&self, mapping: &ColorChannelMapping) -> u32 {
-        let (r_map, g_map, b_map) = mapping.get_r_g_b_mapping();
+        self.to_32_bit_resolved(mapping.get_r_g_b_mapping())
+    }
+
+    /// Same as `to_32_bit`, but takes an already resolved `ColorChannelMapping::get_r_g_b_mapping()`,
+    /// so a conversion of many colors only has to resolve the mapping once.
+    pub(crate) fn to_32_bit_resolved(&self, (r_map, g_map, b_map): (char, char, char)) -> u32 {
         let (r, g, b) = (u32::from(self.get_color(r_map)), u32::from(self.get_color(g_map)), u32::from(self.get_color(b_map)));
         (r << 16) | (g << 8) | b
     }
@@ -189,4 +194,40 @@ fn normalized_to_byte(t: f64) -> u8 {
     let t = t.abs().min(1.0);
     let byte = (t * 255.0) as i16;
     byte.unsigned_abs() as u8 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_MAPPINGS: [&str; 27] = [
+        "BBB", "BBG", "BBR", "BGB", "BGG", "BGR", "BRB", "BRG", "BRR", "GBB", "GBG", "GBR", "GGB", "GGG",
+        "GGR", "GRB", "GRG", "GRR", "RBB", "RBG", "RBR", "RGG", "RGR", "RRB", "RRG", "RRR", "RGB",
+    ];
+
+    #[test]
+    fn to_32_bit_matches_reference_for_all_mappings() {
+        let colors = [(0, 0, 0), (255, 255, 255), (1, 2, 3), (255, 0, 128), (17, 200, 99)];
+        for name in ALL_MAPPINGS {
+            let mapping = ColorChannelMapping::new(name).unwrap();
+            for (r, g, b) in colors {
+                let color = TrueColor::new(r, g, b);
+                let channel = |c: char| u32::from(match c { 'R' => r, 'G' => g, _ => b });
+                let n: Vec<char> = name.chars().collect();
+                let expected = (channel(n[0]) << 16) | (channel(n[1]) << 8) | channel(n[2]);
+                assert_eq!(color.to_32_bit(&mapping), expected, "{name} {r},{g},{b}");
+                assert_eq!(color.to_32_bit_resolved(mapping.get_r_g_b_mapping()), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn colors_to_pixels_matches_per_pixel_conversion() {
+        let colors: Vec<TrueColor> = (0..=255u8).map(|i| TrueColor::new(i, 255 - i, i / 2)).collect();
+        for name in ALL_MAPPINGS {
+            let mapping = ColorChannelMapping::new(name).unwrap();
+            let expected: Vec<u32> = colors.iter().map(|c| c.to_32_bit(&mapping)).collect();
+            assert_eq!(crate::pixel_buffer::PixelBuffer::colors_to_pixels(&colors, &mapping), expected, "{name}");
+        }
+    }
 }

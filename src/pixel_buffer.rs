@@ -36,7 +36,8 @@ impl PixelBuffer {
 
     ///Converts a `TrueColor` vector to minifb compatible u32 pixel values
     pub fn colors_to_pixels(colors: &[TrueColor], color_channel_mapping: &ColorChannelMapping) -> Vec<u32> {
-        colors.iter().map(|x| x.to_32_bit(color_channel_mapping)).collect()
+        let mapping = color_channel_mapping.get_r_g_b_mapping(); //Resolve the mapping once for the whole conversion, not once per pixel
+        colors.iter().map(|x| x.to_32_bit_resolved(mapping)).collect()
     }
 
     ///Updates pixels from colors
