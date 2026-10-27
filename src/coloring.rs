@@ -4,7 +4,7 @@ use angular_units::Deg;
 use num::traits::Pow;
 use prisma::{Hsv, Rgb, FromColor};
 
-#[derive(Debug,Clone,Copy)]
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
 ///A mapping from ColorChannelMapping -> RGB, the first character denotes the new red channel, the second character the new green channel,
 /// the third character the new blue channel. </br>
 /// E.g: Ok(ColorChannelMapping::BGR) means that red will get the value of blue, green the value of green, and blue the value of red:

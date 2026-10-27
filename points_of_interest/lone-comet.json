@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "name": "Lone Comet",
+  "description": "A small copy of the set trailing a long thin filament across a dark sky.",
+  "formerly": "View 7 (VIEW_7)",
+  "order": 7,
+  "location": {
+    "center": { "real": -1.7862712000000047, "imaginary": 0.000052399999999991516 },
+    "scale": 0.00001677721600000001,
+    "max_iterations": 5000
+  },
+  "appearance": {
+    "coloring": "bernstein",
+    "color_channels": "RGB"
+  }
+}
