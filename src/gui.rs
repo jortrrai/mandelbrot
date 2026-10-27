@@ -1040,7 +1040,8 @@ mod tests {
         let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
         let mut app = MandelbrotApp::new(&config);
         wait_for_job(&mut app);
-        let folder = std::env::temp_dir().join(format!("mandelbrot-gui-poi-{}-{}", std::process::id(), files.len()));
+        static NEXT_FOLDER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let folder = std::env::temp_dir().join(format!("mandelbrot-gui-poi-{}-{}", std::process::id(), NEXT_FOLDER.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(&folder).unwrap();
         for (name, text) in files {
@@ -1059,8 +1060,8 @@ mod tests {
         let mut app = MandelbrotApp::new(&config);
         wait_for_job(&mut app);
         assert_eq!(app.points.len(), 10, "the ten former views are found without a list of file names in the code");
-        assert!(app.points.iter().any(|point| point.name == "Sunlit Reef"), "the former View 10 (VIEW_0)");
-        assert!(app.points.windows(2).all(|pair| pair[0].name.to_lowercase() <= pair[1].name.to_lowercase()), "listed by name");
+        assert_eq!((app.points[0].name.as_str(), app.points[9].name.as_str()), ("Frost on the Shoreline", "Sunlit Reef"), "the former View 1 first and View 10 (VIEW_0) last");
+        assert!(app.points.windows(2).all(|pair| pair[0].file_name.to_lowercase() <= pair[1].file_name.to_lowercase()), "listed by file name");
         assert!(app.log.iter().any(|message| message.starts_with("Points of interest: 10 loaded from")));
         assert!(!app.restore_appearance);
     }
