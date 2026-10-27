@@ -12,9 +12,9 @@ categories = ["mathematics", "rendering", "visualization"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 angular-units = "0.2.4"
 chrono = "0.4.26"
-minifb =  {version = "0.25.0", default-features = false, features = ["wayland", "x11"]}
 num = "0.4.0"
 num_cpus = "1.15.0"
 png = "0.17.9"
