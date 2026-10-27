@@ -1,7 +1,10 @@
 //Temporary file to group together all rendering functionality
 use std::{time::Instant, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering}}, io::{self, Write}};
 
-use crate::{pixel_buffer::PixelBuffer, complex_plane::ComplexPlane, mandelbrot_set::MandelbrotSet, complex::Complex, coloring::TrueColor};
+use crate::{pixel_buffer::PixelBuffer, complex_plane::ComplexPlane, mandelbrot_set::{MandelbrotSet, LANES}, complex::Complex, coloring::TrueColor};
+
+/// The largest `max_iterations` for which `render_region_progressively` precomputes the color of every iteration count
+const MAX_COLOR_TABLE_ITERATIONS: u32 = 200_000;
 
 /// SplitMix64 finalizer, a well-mixed 64-bit hash: <https://prng.di.unimi.it/splitmix64.c>
 fn splitmix64(mut z: u64) -> u64 {
@@ -238,6 +241,8 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
     let amount_of_threads = render_thread_count();
     let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
     let mut colors: Vec<TrueColor> = base.to_vec();
+    //The color of a pixel only depends on its iteration count, which is at most `max_iterations`, so compute every color once
+    let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| (0..=m.max_iterations).map(|iterations| coloring_function(iterations, m.max_iterations)).collect());
     for sample in 0..supersampling_amount {
         pixels_done.store(0, Ordering::Relaxed);
         let rows = Mutex::new(sums.chunks_mut(width).enumerate());
@@ -249,19 +254,31 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
                     }
                     let next_row = rows.lock().unwrap().next();
                     let Some((y, row)) = next_row else { return };
-                    let mut done = 0;
-                    for (x, sum) in row.iter_mut().enumerate() {
-                        if !region.contains(x, y) {
-                            continue;
-                        }
+                    let xs: Vec<usize> = (0..width).filter(|x| region.contains(*x, y)).collect();
+                    let sample_point = |x: usize| {
                         let (jitter_x, jitter_y) = sample_jitter(x, y, sample);
-                        let complex = c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y);
-                        let color = coloring_function(m.iterate(&complex), m.max_iterations);
+                        c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y)
+                    };
+                    let mut add_color = |x: usize, iterations: u32| {
+                        let color = color_table.as_ref().map_or_else(|| coloring_function(iterations, m.max_iterations), |table| table[iterations as usize]);
+                        let sum = &mut row[x];
                         sum[0] += u32::from(color.red);
                         sum[1] += u32::from(color.green);
                         sum[2] += u32::from(color.blue);
-                        done += 1;
+                    };
+                    //Iterate LANES pixels at the same time, the remaining pixels one by one
+                    let mut groups = xs.chunks_exact(LANES);
+                    for group in &mut groups {
+                        let points: [Complex; LANES] = std::array::from_fn(|lane| sample_point(group[lane]));
+                        let iterations = m.iterate_lanes(&points);
+                        for (lane, x) in group.iter().enumerate() {
+                            add_color(*x, iterations[lane]);
+                        }
                     }
+                    for x in groups.remainder() {
+                        add_color(*x, m.iterate(&sample_point(*x)));
+                    }
+                    let done = xs.len();
                     pixels_done.fetch_add(done, Ordering::Relaxed);
                 });
             }
