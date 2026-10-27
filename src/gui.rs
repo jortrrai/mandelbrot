@@ -9,6 +9,7 @@ use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 
 use crate::auto_iterations::{self, AutoIterationSettings, AutoPreset};
 use crate::coloring::{ColorChannelMapping, TrueColor};
+use crate::complex::Complex;
 use crate::complex_plane::{ComplexPlane, View};
 use crate::mandelbrot_set::MandelbrotSet;
 use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
@@ -72,6 +73,32 @@ fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: &ColorChannelMapping) -> V
         rgb.extend_from_slice(&[channels[red], channels[green], channels[blue]]);
     }
     rgb
+}
+
+/// The texts of the current view: the center and the zoom, formatted for reading, without losing the precision of the numbers
+#[derive(Debug, PartialEq, Eq)]
+pub struct CurrentView {
+    /// The real part of the center, all digits (the shortest text that reads back as the same number)
+    pub real: String,
+    /// The imaginary part of the center, all digits
+    pub imaginary: String,
+    /// The zoom: the magnification relative to the starting view, `1 / scale`, e.g. "x15.6" or "x1.56e4 (2^13.9)". At scale 1, the view is 2.5 units wide on the real axis.
+    pub zoom: String,
+    /// The scale of the renderer (all digits) and the width of the view on the real axis, `2.5 * scale`
+    pub scale: String,
+    pub width: String,
+}
+
+impl CurrentView {
+    pub fn new(center: &Complex, scale: f64) -> CurrentView {
+        let magnification = 1.0 / scale;
+        let zoom = if magnification < 1000.0 {
+            format!("\u{d7}{magnification:.2}")
+        } else {
+            format!("\u{d7}{magnification:.2e} (2^{:.1})", magnification.log2())
+        };
+        CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), zoom, scale: format!("{scale:e}"), width: format!("{:e}", 2.5 * scale) }
+    }
 }
 
 pub struct MandelbrotApp {
@@ -690,6 +717,50 @@ impl MandelbrotApp {
         }
     }
 
+    /// The right side of the window: the controls on top, below them the current view, and at the bottom the status
+    fn side_panel_ui(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("status_panel").resizable(true).default_size(220.0).min_size(80.0).show(ui, |ui| self.log_ui(ui));
+        //Added after the status panel, so it sits above it
+        egui::Panel::bottom("current_view_panel").resizable(false).show(ui, |ui| self.current_view_ui(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let enabled = self.controls_enabled();
+                ui.add_enabled_ui(enabled, |ui| self.controls_ui(ui));
+            });
+        });
+    }
+
+    /// The center and zoom of the view that is shown, read from the complex plane every frame, so it follows every move, zoom and jump at once
+    fn current_view_ui(&self, ui: &mut egui::Ui) {
+        let view = CurrentView::new(&self.c.center(), self.c.get_scale());
+        ui.horizontal(|ui| {
+            ui.heading("Current view");
+            if ui.button("Copy").on_hover_text("Copies the center and the scale with all their digits").clicked() {
+                ui.ctx().copy_text(self.view_description());
+            }
+        });
+        egui::Grid::new("current_view_grid").num_columns(2).show(ui, |ui| {
+            let value = |ui: &mut egui::Ui, text: &str| {
+                ui.add(egui::Label::new(egui::RichText::new(text).monospace()).selectable(true));
+            };
+            ui.label("Real:");
+            value(ui, &view.real);
+            ui.end_row();
+            ui.label("Imaginary:");
+            value(ui, &view.imaginary);
+            ui.end_row();
+            ui.label("Zoom:").on_hover_text("The magnification relative to the starting view: 1 / scale. At scale 1 the view is 2.5 units wide on the real axis.");
+            value(ui, &view.zoom);
+            ui.end_row();
+            ui.label("Scale:");
+            value(ui, &view.scale);
+            ui.end_row();
+            ui.label("Width:").on_hover_text("The width of the view on the real axis: 2.5 * scale");
+            value(ui, &view.width);
+            ui.end_row();
+        });
+    }
+
     fn log_ui(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Status");
@@ -729,15 +800,7 @@ impl eframe::App for MandelbrotApp {
         }
         self.update_texture(&ctx);
 
-        egui::Panel::right("side_panel").default_size(SIDE_PANEL_WIDTH).min_size(280.0).show(ui, |ui| {
-            egui::Panel::bottom("status_panel").resizable(true).default_size(220.0).min_size(80.0).show(ui, |ui| self.log_ui(ui));
-            egui::CentralPanel::default().show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    let enabled = self.controls_enabled();
-                    ui.add_enabled_ui(enabled, |ui| self.controls_ui(ui));
-                });
-            });
-        });
+        egui::Panel::right("side_panel").default_size(SIDE_PANEL_WIDTH).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
             let Some(texture) = self.texture.clone() else { return };
@@ -1114,5 +1177,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
         app.load_points_of_interest(folder);
         assert!(app.points.is_empty() && app.log.iter().any(|message| message.contains("Cannot read the points of interest folder")));
+    }
+
+    /// The texts that the side panel draws, with their vertical position, in drawing order
+    fn side_panel_positions(app: &mut MandelbrotApp) -> Vec<(String, f32)> {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 1000.0))), ..Default::default() }, |ui| app.side_panel_ui(ui));
+        let texts = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => Some((text.galley.text().to_string(), text.pos.y)),
+            _ => None,
+        }).collect();
+        output.drop_without_applying_deltas();
+        texts
+    }
+
+    fn side_panel_texts(app: &mut MandelbrotApp) -> Vec<String> {
+        side_panel_positions(app).into_iter().map(|(text, _)| text).collect()
+    }
+
+    #[test]
+    fn the_current_view_texts_keep_all_digits_and_define_the_zoom() {
+        let view = CurrentView::new(&Complex::new(-0.7498100000000001, -0.020300000000000054), 0.00006400000000000002);
+        assert_eq!(view.real, "-0.7498100000000001");
+        assert_eq!(view.imaginary, "-0.020300000000000054");
+        assert_eq!(view.real.parse::<f64>().unwrap().to_bits(), (-0.7498100000000001_f64).to_bits(), "the text reads back as the same number");
+        assert_eq!(view.imaginary.parse::<f64>().unwrap().to_bits(), (-0.020300000000000054_f64).to_bits());
+        assert_eq!(view.zoom, "\u{d7}1.56e4 (2^13.9)");
+        assert_eq!(view.scale.parse::<f64>().unwrap().to_bits(), 0.00006400000000000002_f64.to_bits());
+        assert_eq!(view.width.parse::<f64>().unwrap().to_bits(), (2.5 * 0.00006400000000000002_f64).to_bits());
+        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 1.0).zoom, "\u{d7}1.00", "the starting view is x1");
+        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 0.1).zoom, "\u{d7}10.00");
+        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 2.0).zoom, "\u{d7}0.50", "zoomed out");
+        assert_eq!(CurrentView::new(&Complex::new(0.0, 0.0), 4e-6).zoom, "\u{d7}2.50e5 (2^17.9)");
+    }
+
+    #[test]
+    fn the_current_view_section_is_above_the_status_and_follows_the_navigation() {
+        let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        let positions = side_panel_positions(&mut app);
+        let height = |needle: &str| positions.iter().find(|(text, _)| text.starts_with(needle)).unwrap_or_else(|| panic!("{needle:?} is not drawn: {positions:?}")).1;
+        let (controls, current, status) = (height("Controls"), height("Current view"), height("Status"));
+        assert!(controls < current && current < status, "the current view is between the controls and the status: {controls} {current} {status}");
+        let texts = side_panel_texts(&mut app);
+        let before = app.c.center();
+        assert!(texts.iter().any(|t| *t == format!("{}", before.x)) && texts.iter().any(|t| *t == format!("{}", before.y)), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "\u{d7}1.00"), "{texts:?}");
+
+        //A move, a zoom and a jump change the texts at once, before any render has finished
+        app.translate("up", 10, 0);
+        let moved = app.c.center();
+        assert_ne!(moved.y, before.y);
+        assert!(side_panel_texts(&mut app).iter().any(|t| *t == format!("{}", moved.y)));
+        wait_for_job(&mut app);
+        app.c.scale(0.1);
+        app.render("Zoomed in");
+        assert!(side_panel_texts(&mut app).iter().any(|t| t == "\u{d7}10.00"));
+        wait_for_job(&mut app);
+        app.c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002));
+        app.render("Moved to a view");
+        let texts = side_panel_texts(&mut app);
+        assert!(texts.iter().any(|t| t == "\u{d7}1.56e4 (2^13.9)") && texts.iter().any(|t| t.starts_with("-0.74981000000000")), "{texts:?}");
+        wait_for_job(&mut app);
     }
 }
