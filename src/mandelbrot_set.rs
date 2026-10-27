@@ -10,7 +10,7 @@ pub struct MandelbrotSet {
 /// The amount of points `MandelbrotSet::iterate_lanes` iterates at the same time
 pub const LANES: usize = 4;
 /// `iterate_lanes` checks whether every point has stopped after this many steps
-const CHECK_INTERVAL: u32 = 8;
+const CHECK_INTERVAL: u32 = 4;
 
 impl MandelbrotSet {
     pub fn new(max_iterations: u32, orbit_radius: f64) -> MandelbrotSet {
