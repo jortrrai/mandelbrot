@@ -289,6 +289,31 @@ fn print_command_info() {
 /// Will panic if minifb cannot open a Window
 /// # Errors
 /// Currently does not return any Errors
+/// Creates the window. minifb's Wayland backend does not draw window decorations itself and only asks the compositor for server-side ones,
+/// which GNOME (mutter) does not provide, so on such sessions the window has no title bar and cannot be moved, minimized or maximized.
+/// On Linux, when an X11 display (e.g. XWayland) is available, hide the Wayland display while creating the window so minifb falls back
+/// to its X11 backend, where the window manager adds decorations. If that fails, restore the Wayland display and use the Wayland backend.
+/// Set `MANDELBROT_FORCE_WAYLAND` to skip the X11 fallback.
+fn create_window(width: usize, height: usize) -> minifb::Result<Window> {
+    const TITLE: &str = "Mandelbrot set viewer";
+    let wayland_display = std::env::var_os("WAYLAND_DISPLAY");
+    let prefer_x11 = cfg!(target_os = "linux")
+        && wayland_display.is_some()
+        && std::env::var_os("DISPLAY").is_some()
+        && std::env::var_os("MANDELBROT_FORCE_WAYLAND").is_none();
+    if prefer_x11 {
+        std::env::remove_var("WAYLAND_DISPLAY"); //Called before any threads are spawned
+        let window = Window::new(TITLE, width, height, WindowOptions::default());
+        if let Some(display) = &wayland_display {
+            std::env::set_var("WAYLAND_DISPLAY", display);
+        }
+        if let Ok(window) = window {
+            return Ok(window);
+        }
+    }
+    Window::new(TITLE, width, height, WindowOptions::default())
+}
+
 pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     // Complex plane dimensions and increments
     let mut c = ComplexPlane::new(config.window_width, config.window_height);
@@ -309,12 +334,7 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     //Image SSAA multiplier
     let mut image_supersampling_amount = supersampling_amount;
     // Create a new window
-    let mut window = Window::new(
-        "Mandelbrot set viewer",
-        config.window_width,
-        config.window_height,
-        WindowOptions::default(),
-    )
+    let mut window = create_window(config.window_width, config.window_height)
     .unwrap_or_else(|e| {
         match &e {
             minifb::Error::WindowCreate(s)  | minifb::Error::MenuExists(s) | minifb::Error::UpdateFailed(s) => eprintln!("Failed to create window: {}", s.to_string()),
