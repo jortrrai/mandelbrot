@@ -28,6 +28,11 @@ pub(super) struct PointFlight {
 }
 
 
+/// The zoom of a point of interest as the list shows it, like the zoom of the current view (see `status::format_zoom`)
+pub(super) fn point_zoom_text(point: &PointOfInterest) -> String {
+    format!("Zoom {}", super::status::format_zoom(1.0 / point.location.scale))
+}
+
 /// The thumbnail that is being rendered on a background thread
 pub(super) struct ThumbnailJob {
     pub(super) id: u64,
@@ -152,6 +157,8 @@ impl MandelbrotApp {
                     }
                 }
                 painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 2.0), egui::Align2::LEFT_TOP, &point.name, egui::FontId::proportional(14.0), ui.visuals().strong_text_color());
+                //The zoom of the place, before it is clicked: a deep place can take long to render
+                painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 22.0), egui::Align2::LEFT_TOP, point_zoom_text(point), egui::FontId::proportional(12.0), ui.visuals().weak_text_color());
                 let response = if point.description.is_empty() { response } else { response.on_hover_text(&point.description) };
                 if response.clicked() {
                     frame.chosen = Some(index);
