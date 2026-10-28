@@ -22,6 +22,17 @@ fn wait_for_job(app: &mut MandelbrotApp) {
     }
 }
 
+/// An app that has rendered the default view with manual iterations and uniform supersampling, the two switched off (they are on by default)
+fn manual_app(config: &Config) -> MandelbrotApp {
+    let mut app = MandelbrotApp::new(config);
+    wait_for_job(&mut app);
+    app.auto_iterations = false;
+    app.adaptive_supersampling = false;
+    app.render("Rendered the default view");
+    wait_for_job(&mut app);
+    app
+}
+
 #[test]
 fn rendering_runs_in_the_background_and_updates_the_buffer() {
     let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
@@ -129,8 +140,7 @@ fn texture_bytes_equal_the_converted_pixels_for_all_mappings() {
 #[test]
 fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
     let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
-    let mut app = MandelbrotApp::new(&config);
-    wait_for_job(&mut app);
+    let mut app = manual_app(&config);
     assert_eq!(app.m.max_iterations, 50);
     assert_eq!(app.m.palette_scale, None, "manual mode colors exactly as before");
     let manual_pixels = app.p.pixels.clone();
@@ -187,7 +197,11 @@ fn presets_and_adaptive_supersampling_toggle_independently_of_auto_iterations() 
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     assert_eq!(app.auto_preset, AutoPreset::Balanced, "Balanced is the default");
-    assert!(!app.auto_iterations && !app.adaptive_supersampling);
+    assert!(app.auto_iterations && app.adaptive_supersampling, "both are on by default");
+    app.auto_iterations = false;
+    app.adaptive_supersampling = false;
+    app.render("manual and uniform");
+    wait_for_job(&mut app);
     let uniform = app.p.pixels.clone();
 
     //Adaptive supersampling works in manual mode, and switching it off gives the uniform image again
@@ -289,8 +303,7 @@ fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering
 fn app_with_points(files: &[(&str, &str)]) -> (MandelbrotApp, std::path::PathBuf) {
     static NEXT_FOLDER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
-    let mut app = MandelbrotApp::new(&config);
-    wait_for_job(&mut app);
+    let mut app = manual_app(&config);
     let folder = std::env::temp_dir().join(format!("mandelbrot-gui-poi-{}-{}", std::process::id(), NEXT_FOLDER.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::create_dir_all(&folder).unwrap();
@@ -661,8 +674,7 @@ fn the_render_size_follows_the_window_and_keeps_the_view() {
     let ctx = egui::Context::default();
     let config = Config::build(["mandelbrot"].map(String::from).into_iter()).unwrap();
     assert!(config.fit_window);
-    let mut app = MandelbrotApp::new(&config);
-    wait_for_job(&mut app);
+    let mut app = manual_app(&config);
     assert_eq!(app.view_resolution(), Resolution::new(1200, 800), "the first render has the size of the command line");
     app.c.set_view(&View::new(-0.7498, 0.0203, 0.064));
     app.render("Went to a view");
@@ -717,8 +729,7 @@ fn a_size_on_the_command_line_is_kept_until_the_window_is_followed_on_request() 
 #[test]
 fn back_and_forward_return_to_the_views_that_were_visited() {
     let config = Config::build(["mandelbrot", "120", "80"].map(String::from).into_iter()).unwrap();
-    let mut app = MandelbrotApp::new(&config);
-    wait_for_job(&mut app);
+    let mut app = manual_app(&config);
     assert!(!app.history.can_go_back(), "the start is the only view");
     let (start_center, start_scale) = (app.c.center(), app.c.get_scale());
     app.c.set_view(&View::new(-0.75, 0.1, 0.5));
