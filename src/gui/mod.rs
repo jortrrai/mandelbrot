@@ -6,6 +6,7 @@
 //! * `controls`: the controls on the right.
 //! * `fit`: the render size that follows the size of the window.
 //! * `history`: the views that were visited, for Back and Forward.
+//! * `pointer`: the mouse on the image: clicks, the wheel and dragging.
 //! * `points`: the points of interest with their thumbnails.
 //! * `save_size`: the size of the saved image: the presets and the custom size.
 //! * `status`: the current view, the status log and the progress bar.
@@ -14,6 +15,7 @@ mod actions;
 mod controls;
 mod fit;
 mod history;
+mod pointer;
 mod points;
 mod render_job;
 mod save_size;
@@ -79,6 +81,10 @@ pub struct MandelbrotApp {
     coloring_index: usize,
     supersampling_amount: u8,
     image_supersampling_amount: u8,
+    /// Whether the wheel is zooming or the mouse is dragging the view, see `pointer`: the status log then does not get a line for every render
+    gesture_active: bool,
+    /// The fractions of pixels (columns, rows) of a drag that were not used yet
+    drag_remainder: (f32, f32),
     /// The views that were visited, see `history`
     history: ViewHistory,
     /// Whether the render size follows the size of the window, see `fit`
@@ -158,6 +164,8 @@ impl MandelbrotApp {
             supersampling_amount: config.supersampling_amount,
             supersampling_input: config.supersampling_amount,
             image_supersampling_amount: config.supersampling_amount,
+            gesture_active: false,
+            drag_remainder: (0.0, 0.0),
             history: ViewHistory::default(),
             fit: Fit::new(config.fit_window),
             save_size,
@@ -227,6 +235,20 @@ impl MandelbrotApp {
     }
 }
 
+impl MandelbrotApp {
+    /// Draws the image as large as fits in the area of `ui` (keeping its aspect ratio) and handles the mouse on it. Returns the size of the area in points.
+    pub(super) fn image_ui(&mut self, ui: &mut egui::Ui) -> egui::Vec2 {
+        let available = ui.available_size();
+        let Some(texture) = self.texture.clone() else { return available };
+        let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
+        let scale = (available.x / width).min(available.y / height);
+        let size = egui::vec2(width * scale, height * scale);
+        let response = ui.add(egui::Image::new((texture.id(), size)).sense(egui::Sense::click_and_drag()));
+        self.handle_image_pointer(ui, &response, size);
+        available
+    }
+}
+
 impl eframe::App for MandelbrotApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -240,24 +262,7 @@ impl eframe::App for MandelbrotApp {
         egui::Panel::right("side_panel").default_size(SIDE_PANEL_WIDTH).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
 
         let mut fit_area = egui::Vec2::ZERO;
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
-            let available = ui.available_size();
-            fit_area = available;
-            let Some(texture) = self.texture.clone() else { return };
-            let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
-            let scale = (available.x / width).min(available.y / height);
-            let size = egui::vec2(width * scale, height * scale);
-            let response = ui.add(egui::Image::new((texture.id(), size)).sense(egui::Sense::click()));
-            if let Some(position) = response.interact_pointer_pos() {
-                let relative = (position - response.rect.min) / size;
-                let (x, y) = (relative.x * width, relative.y * height);
-                if response.clicked() {
-                    self.handle_image_click(x, y, false);
-                } else if response.secondary_clicked() {
-                    self.handle_image_click(x, y, true);
-                }
-            }
-        });
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| fit_area = self.image_ui(ui));
         self.fit_to_window(&ctx, fit_area);
     }
 }
