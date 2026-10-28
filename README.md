@@ -68,7 +68,7 @@ The fractal is on the left. On the right, from top to bottom, are the controls, 
 - **Quality (supersampling)**: samples per pixel, from 1x to 64x.
 - **Coloring** (Bernstein polynomials or HSV) and **Color channels** (any of the 27 mappings such as `RGB` or `BGR`).
 - **Save Image** with its own *Saved image quality* and *Saved image size*: the command line size (the default), the size of the view, one of ten presets (HD 720p to 8K UHD, squares, portrait), a preset of your own, or *Custom size...* (16 to 16,384 pixels per side, at most 100 megapixels). Give a custom size a name and *Save as preset* to keep it in `resolution_presets.json` in your configuration folder (`~/.config/mandelbrot` on Linux). The PNG goes to the `saved` folder, with the view, the settings and the application in its metadata.
-- Click the fractal to see the coordinates of a point in the status; right-click to center the view on it.
+- Click the fractal to see the coordinates of a point in the status; right-click to center the view on it. **Scroll** over it to zoom in and out around the cursor (a notch is about 10%; zooming in stops at the precision limit), and **drag** it with the left button to move the view.
 
 **Current view**: the center (real and imaginary, with all digits) and the zoom (the magnification relative to the starting view). *Copy* puts the center and the scale on the clipboard.
 

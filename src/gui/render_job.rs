@@ -98,8 +98,10 @@ impl MandelbrotApp {
                     self.c = c;
                     self.p = p;
                     self.texture_outdated = true;
-                    let description = self.view_description();
-                    self.log(format!("{message} in {:.2} s: {description}", elapsed.as_secs_f64()));
+                    if !self.gesture_active {
+                        let description = self.view_description();
+                        self.log(format!("{message} in {:.2} s: {description}", elapsed.as_secs_f64()));
+                    }
                 }
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
@@ -210,6 +212,8 @@ impl MandelbrotApp {
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
         self.job = Some(receiver);
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel });
-        self.log("Rendering...");
+        if !self.gesture_active {
+            self.log("Rendering...");
+        }
     }
 }
