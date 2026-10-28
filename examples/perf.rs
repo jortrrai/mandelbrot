@@ -216,8 +216,8 @@ fn main() {
                     summarize(&format!("{name} ({max_iterations} it), GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points).expect("the GPU")); }));
                     println!("{:<44} the same positions bit for bit: {same}", "");
                 }
-                //Whole renders: the CPU threads alone, and with the GPU joining every pass after 8 ms
-                let join = Some((&gpu, Duration::from_millis(8)));
+                //Whole renders: the CPU threads alone, and with the GPU joining the first pass after 3 ms, like the window (`GPU_JOIN_AFTER`)
+                let join = Some((&gpu, Duration::from_millis(3)));
                 for (name, view, max_iterations, samples, adaptive) in [
                     ("default view 1x", View::new(-0.75, 0.0, 1.0), 1000, 1, false),
                     ("seahorse 1x", View::new(-0.7498100000000001, -0.020300000000000054, 0.000064), 5000, 1, false),

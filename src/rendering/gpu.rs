@@ -19,16 +19,29 @@ use wgpu::util::DeviceExt;
 use crate::{complex::Complex, complex_plane::{ComplexPlane, View}, mandelbrot_set::MandelbrotSet};
 
 /// The most points of one dispatch: short dispatches keep the GPU responsive for the window, and stay far below the limit of 65,535 workgroups of 64
-const BATCH: usize = 1 << 18;
+pub(crate) const BATCH: usize = 1 << 18;
 
 /// The outcome of the loop for one point, as the shader writes it
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Outcome {
+pub(crate) struct Outcome {
     zx: f64,
     zy: f64,
     iterations: u32,
     escaped: u32,
+}
+
+impl Outcome {
+    /// The position of the point `c` with this outcome: exactly `m.position(c)` (see the module)
+    pub(crate) fn position(&self, m: &MandelbrotSet, c: &Complex) -> f64 {
+        m.position_after_loop(self.iterations, self.escaped != 0, (self.zx, self.zy), c)
+    }
+}
+
+/// A dispatch that runs on the GPU, see `GpuIterator::submit`
+pub(crate) struct Submitted {
+    read: wgpu::Buffer,
+    index: wgpu::SubmissionIndex,
 }
 
 /// A GPU that iterates points exactly like the CPU, see the module
@@ -86,14 +99,14 @@ impl GpuIterator {
     pub fn positions(&self, m: &MandelbrotSet, points: &[Complex]) -> Result<Vec<f64>, String> {
         let mut positions = vec![0.0; points.len()];
         for (batch, out) in points.chunks(BATCH).zip(positions.chunks_mut(BATCH)) {
-            let outcomes = self.run(m, batch)?;
+            let outcomes = self.finish(self.submit(m, batch)?)?;
             //The positions (two logarithms for every escaped point with smooth coloring) on all render threads
             let chunk = batch.len().div_ceil(super::render_thread_count()).max(1);
             std::thread::scope(|scope| {
                 for ((points, outcomes), out) in batch.chunks(chunk).zip(outcomes.chunks(chunk)).zip(out.chunks_mut(chunk)) {
                     scope.spawn(move || {
                         for ((c, outcome), position) in points.iter().zip(outcomes).zip(out) {
-                            *position = m.position_after_loop(outcome.iterations, outcome.escaped != 0, (outcome.zx, outcome.zy), c);
+                            *position = outcome.position(m, c);
                         }
                     });
                 }
@@ -102,8 +115,9 @@ impl GpuIterator {
         Ok(positions)
     }
 
-    /// One dispatch of the shader over `points`
-    fn run(&self, m: &MandelbrotSet, points: &[Complex]) -> Result<Vec<Outcome>, String> {
+    /// Starts one dispatch of the shader over `points` (at most `BATCH`) and returns at once: the GPU runs it while the caller prepares the next one, see `finish`
+    pub(crate) fn submit(&self, m: &MandelbrotSet, points: &[Complex]) -> Result<Submitted, String> {
+        debug_assert!(points.len() <= BATCH);
         let count = u32::try_from(points.len()).map_err(|_| String::from("too many points"))?;
         let mut params = Vec::with_capacity(24);
         params.extend((m.orbit_radius * m.orbit_radius).to_le_bytes());
@@ -129,11 +143,15 @@ impl GpuIterator {
             pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
         }
         encoder.copy_buffer_to_buffer(&outcomes, 0, &read, 0, size);
-        self.queue.submit([encoder.finish()]);
-        let slice = read.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|err| format!("{}: {err}", self.name))?;
-        let view = slice.get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
+        let index = self.queue.submit([encoder.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        Ok(Submitted { read, index })
+    }
+
+    /// Waits for a dispatch of `submit` and returns the outcome of every point, in the order of its points
+    pub(crate) fn finish(&self, submitted: Submitted) -> Result<Vec<Outcome>, String> {
+        self.device.poll(wgpu::PollType::Wait { submission_index: Some(submitted.index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
+        let view = submitted.read.slice(..).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
         Ok(bytemuck::cast_slice(&view).to_vec())
     }
 
