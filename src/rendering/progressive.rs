@@ -138,7 +138,8 @@ impl<'a> Render<'a> {
         //Only a resumed state is kept after the render, so only then does every pixel need its count of samples updated
         let track = state.is_some();
         //How many pixels kept their samples; without them, the colors so far are the base and every pixel of the render is still empty
-        let kept = state.as_mut().map_or(0, |state| state.prepare(c, width, height, SampleKey::new(m, coloring_function)));
+        //Whether every pixel is still empty: a new state, or one that started over
+        let empty = state.as_mut().is_none_or(|state| state.prepare(c, width, height, SampleKey::new(m, coloring_function)));
         let mut own_state = None;
         let state: &mut SampleState = state.unwrap_or_else(|| own_state.insert(SampleState::for_one_render(width, height, region, base, adaptive.is_some())));
         //Where the samples are placed: the view where the samples of the state started, or this view
@@ -146,15 +147,10 @@ impl<'a> Render<'a> {
         let mut colors: Vec<TrueColor> = base.map_or_else(|| vec![TrueColor::new(0, 0, 0); width * height], <[TrueColor]>::to_vec);
         //How many pixels of the render have each amount of samples, to know how many pixels a pass computes
         let mut pending = [0_usize; 66];
-        if kept == 0 {
+        if empty {
             pending[0] = region.map_or(width * height, |region| region.pixel_count(width, height));
         } else {
-            for (index, count) in state.counts.iter().enumerate().filter(|(_, count)| **count != FOREIGN) {
-                pending[usize::from(*count).min(65)] += 1;
-                if *count > 0 {
-                    colors[index] = average(state.sums[index], *count);
-                }
-            }
+            pending = colors_of_kept_samples(state, &mut colors);
         }
         let total: usize = pending.iter().sum();
         //The color of a pixel only depends on its iteration count, which is at most `max_iterations`, so compute every color once
@@ -239,9 +235,14 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                     positions(c, m, y, &xs, sample, origin, |x, position| {
                         let color = color_of(position);
                         let sum = &mut row[x];
-                        sum[0] += u32::from(color.red);
-                        sum[1] += u32::from(color.green);
-                        sum[2] += u32::from(color.blue);
+                        if sample == 0 {
+                            //The first sample replaces the sum, so a state that starts over does not have to clear its sums
+                            *sum = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
+                        } else {
+                            sum[0] += u32::from(color.red);
+                            sum[1] += u32::from(color.green);
+                            sum[2] += u32::from(color.blue);
+                        }
                     });
                     //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
                     for x in &xs {
@@ -274,6 +275,35 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
 /// The color of the sum of one sample
 fn sum_color(sum: [u32; 3]) -> TrueColor {
     TrueColor::new(sum[0] as u8, sum[1] as u8, sum[2] as u8)
+}
+
+/// Gives every pixel of `state` that has samples the average of its samples in `colors`, on all threads, and returns how many pixels of the render have each amount of samples
+fn colors_of_kept_samples(state: &SampleState, colors: &mut [TrueColor]) -> [usize; 66] {
+    let rows_per_chunk = state.height.div_ceil(render_thread_count()).max(1) * state.width;
+    let pending = Mutex::new([0_usize; 66]);
+    thread::scope(|scope| {
+        for (chunk, colors) in colors.chunks_mut(rows_per_chunk).enumerate() {
+            let pending = &pending;
+            scope.spawn(move || {
+                let start = chunk * rows_per_chunk;
+                let mut counted = [0_usize; 66];
+                for (offset, color) in colors.iter_mut().enumerate() {
+                    let count = state.counts[start + offset];
+                    if count != FOREIGN {
+                        counted[usize::from(count).min(65)] += 1;
+                        if count > 0 {
+                            *color = average(state.sums[start + offset], count);
+                        }
+                    }
+                }
+                let mut pending = pending.lock().unwrap();
+                for (total, count) in pending.iter_mut().zip(counted) {
+                    *total += count;
+                }
+            });
+        }
+    });
+    pending.into_inner().unwrap()
 }
 
 /// The rows of a `width` x `height` grid, or `height` empty rows if the grid is not kept (empty)
