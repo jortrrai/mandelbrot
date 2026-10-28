@@ -1255,3 +1255,28 @@ fn the_markers_of_the_points_of_interest_are_at_their_locations_and_only_inside_
     assert_eq!(super::points::marker_positions(&app.points, &app.c, rect).len(), 0);
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn the_current_view_can_be_saved_as_a_point_of_interest() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.c.set_view(&View::new(-0.1, 0.65, 0.002));
+    app.render("Somewhere");
+    wait_for_job(&mut app);
+    //Without a name nothing is saved and the form stays open
+    app.new_point = Some((String::from("   "), String::from("ignored")));
+    app.save_new_point();
+    assert_eq!(app.points.len(), 1);
+    assert!(app.new_point.is_some());
+    //With a name: a new file, listed last, at exactly this view
+    app.new_point = Some((String::from(" My Place "), String::new()));
+    app.save_new_point();
+    assert!(app.new_point.is_none(), "the form closes");
+    assert!(app.log.iter().any(|message| message == "Saved the view as the point of interest My Place (00-my-place.json)"), "{:?}", app.log);
+    assert_eq!(app.points.len(), 2);
+    let saved = app.points.iter().find(|point| point.name == "My Place").unwrap();
+    let center = app.c.center();
+    assert_eq!((saved.location.real.to_bits(), saved.location.imaginary.to_bits(), saved.location.scale.to_bits()), (center.x.to_bits(), center.y.to_bits(), app.c.get_scale().to_bits()));
+    assert_eq!((saved.location.max_iterations, saved.description.as_str()), (app.m.max_iterations, ""));
+    assert!(folder.join("00-my-place.json").exists());
+    let _ = std::fs::remove_dir_all(folder);
+}

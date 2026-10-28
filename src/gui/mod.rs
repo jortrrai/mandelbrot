@@ -137,6 +137,8 @@ pub struct MandelbrotApp {
     restore_appearance: bool,
     /// Whether the saved points of interest are marked on the view at their locations, with their names (off by default)
     show_points: bool,
+    /// The name and the description being typed to save the current view as a point of interest, while that form is open
+    new_point: Option<(String, String)>,
     /// How a flight to a point of interest goes (the shortest route by default) and how fast (fast by default), and the flight that is under way, see `flight`
     route: flight::Route,
     pace: flight::Pace,
@@ -228,6 +230,7 @@ impl MandelbrotApp {
             points_folder: std::path::PathBuf::new(),
             restore_appearance: false,
             show_points: false,
+            new_point: None,
             route: flight::Route::Shortest,
             pace: flight::Pace::Fast,
             flight: None,
