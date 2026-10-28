@@ -82,11 +82,13 @@ pub enum FlightRendering {
     LowRes,
     /// The camera waits for a full-resolution frame (the first layer): sharp all the way, slow where the view is expensive
     MaxQuality,
+    /// Every frame is rendered with all its supersampling layers, and the camera waits until the last one is done: the finished image of every view on the way, the slowest
+    SuperSampled,
 }
 
 impl FlightRendering {
     /// Every mode, in the order of the drop-down
-    pub const ALL: [FlightRendering; 3] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::MaxQuality];
+    pub const ALL: [FlightRendering; 4] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::MaxQuality, FlightRendering::SuperSampled];
 
     /// The name in the drop-down
     pub const fn name(self) -> &'static str {
@@ -94,6 +96,7 @@ impl FlightRendering {
             FlightRendering::BestEffort => "Best effort",
             FlightRendering::LowRes => "Low res",
             FlightRendering::MaxQuality => "Max quality",
+            FlightRendering::SuperSampled => "Super sampled",
         }
     }
 }

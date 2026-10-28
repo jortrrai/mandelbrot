@@ -1119,6 +1119,20 @@ fn a_frame_is_only_shown_when_it_is_complete_enough() {
     assert_eq!(show(&mut app, 0, true, 4), (false, false));
     assert_eq!(show(&mut app, 1, true, 5), (true, true));
     app.job = None;
+    //Super sampled waits for the last layer: a full layer before it is not shown either
+    app.flight_rendering = super::flight::FlightRendering::SuperSampled;
+    app.go_to_point_of_interest(0);
+    let show_layer = |app: &mut MandelbrotApp, pass: u8, value: u8| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.job = Some(receiver);
+        app.frame_ready = false;
+        sender.send(JobMessage::Pass { colors: vec![TrueColor::new(value, value, value); 64 * 48], plane: app.c.clone(), pass, total: 3, layer_time: Duration::ZERO, whole: true }).unwrap();
+        app.poll_job();
+        (app.p.colors[0].red == value, app.frame_ready)
+    };
+    assert_eq!(show_layer(&mut app, 2, 6), (false, false), "layer 2 of 3");
+    assert_eq!(show_layer(&mut app, 3, 7), (true, true), "the finished frame");
+    app.job = None;
     let _ = std::fs::remove_dir_all(folder);
 }
 
@@ -1142,6 +1156,29 @@ fn a_flight_that_waits_for_its_frames_stands_still_until_the_frame_is_there() {
     app.fly_at(start + Duration::from_secs(3));
     assert_eq!(app.flight.as_ref().unwrap().elapsed, Duration::from_millis(16 + 33));
     assert_ne!(format!("{:?}", app.c.get_view()), format!("{first:?}"));
+    app.cancel_flight();
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_super_sampled_flight_renders_every_layer_of_every_frame() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::SuperSampled;
+    app.go_to_point_of_interest(0);
+    let start = app.flight.as_ref().unwrap().last_frame;
+    app.fly_at(start + Duration::from_millis(16));
+    assert_eq!(app.bars.as_ref().unwrap().total_layers, app.supersampling_amount, "a frame on the way gets all its layers");
+    let first = app.c.get_view();
+    app.fly_at(start + Duration::from_secs(1));
+    if app.is_busy() {
+        assert_eq!(format!("{:?}", app.c.get_view()), format!("{first:?}"), "the camera waits while the frame is not finished");
+    }
+    wait_for_job(&mut app);
+    assert!(app.frame_ready, "the finished frame is there");
+    assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), usize::from(app.supersampling_amount), "with every layer");
+    app.fly_at(start + Duration::from_secs(2));
+    assert_ne!(format!("{:?}", app.c.get_view()), format!("{first:?}"), "and moves on when it is");
     app.cancel_flight();
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);

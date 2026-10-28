@@ -80,17 +80,17 @@ impl MandelbrotApp {
                     let preview_block = if pass == 0 && whole { rendering::PREVIEW_BLOCKS.get(self.previews_received).copied().unwrap_or(1) } else { 1 };
                     self.previews_received += usize::from(pass == 0);
                     //A frame that is not complete enough is not shown: the screen keeps the last one that was (immersion, flight rendering)
-                    let readiness = if pass > 0 { Readiness::FullResolution } else if whole { Readiness::Complete } else { Readiness::Any };
-                    if readiness < self.required_readiness() {
-                        continue;
+                    let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::FullResolution } else if whole { Readiness::Complete } else { Readiness::Any };
+                    //(a layer that is held back still counts for the progress bar below)
+                    if readiness >= self.required_readiness() {
+                        self.frame_ready = true;
+                        self.frame_accepted = true;
+                        self.p.colors = colors;
+                        self.shown_plane = plane;
+                        self.texture_outdated = true;
+                        self.layer_shown = pass > 0;
+                        self.preview_block = preview_block;
                     }
-                    self.frame_ready = true;
-                    self.frame_accepted = true;
-                    self.p.colors = colors;
-                    self.shown_plane = plane;
-                    self.texture_outdated = true;
-                    self.layer_shown = pass > 0;
-                    self.preview_block = preview_block;
                     if pass == 0 {
                         continue; //A preview is not a layer: the progress and the layer times are not changed
                     }
@@ -172,14 +172,14 @@ impl MandelbrotApp {
             return;
         }
         if let Some((message, _, moved)) = self.settle.take() {
-            self.start_render_as(&message, moved, false);
+            self.start_render_as(&message, moved, false, true);
         }
     }
 
     /// Starts a render of the view on a background thread and logs `message` when it is done; `moved` is whether the view was only moved, see `render_moved`.
     /// A render that is running is interrupted first. During a drag or a wheel zoom the render is quick, see `start_render_as`.
     pub(super) fn start_render(&mut self, message: &str, moved: bool) {
-        self.start_render_as(message, moved, self.gesture_active);
+        self.start_render_as(message, moved, self.gesture_active, !self.gesture_active);
     }
 
     /// Starts a render like `start_render`. With `during_gesture` it is a quick render for a view that is about to change again: previews and the first layer only, with
@@ -187,7 +187,8 @@ impl MandelbrotApp {
     ///
     /// Every render continues the samples of the render before it (`SampleState`): the job waits for the state of the job it interrupts, which keeps everything that
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
-    pub(super) fn start_render_as(&mut self, message: &str, moved: bool, during_gesture: bool) {
+    /// With `all_layers` it renders every supersampling layer even during a gesture (a flight that shows only finished frames, see `flight::FlightRendering::SuperSampled`).
+    pub(super) fn start_render_as(&mut self, message: &str, moved: bool, during_gesture: bool, all_layers: bool) {
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();
         (self.frame_ready, self.frame_accepted) = (false, false);
@@ -226,7 +227,7 @@ impl MandelbrotApp {
             self.m.palette_scale = None;
         }
         let mut m = self.m.clone();
-        let supersampling_amount = if during_gesture { 1 } else { self.supersampling_amount };
+        let supersampling_amount = if all_layers { self.supersampling_amount } else { 1 };
         let coloring_function = self.coloring_function;
         let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
         let pixels_total = width * height;

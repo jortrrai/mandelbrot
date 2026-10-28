@@ -230,7 +230,8 @@ impl MandelbrotApp {
             return;
         }
         self.c.set_view(&flight.flight.camera_at(elapsed).view());
-        self.start_render_as(&format!("Flying to {}", flight.point.name), false, true);
+        let all_layers = self.flight_rendering == super::flight::FlightRendering::SuperSampled;
+        self.start_render_as(&format!("Flying to {}", flight.point.name), false, true, all_layers);
         self.flight = Some(flight);
     }
 

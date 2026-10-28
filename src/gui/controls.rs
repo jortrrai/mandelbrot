@@ -136,6 +136,7 @@ impl MandelbrotApp {
                         FlightRendering::BestEffort => "The camera follows the clock; the picture fills in as the render goes",
                         FlightRendering::LowRes => "The camera waits for a complete low-resolution frame of every view on the way",
                         FlightRendering::MaxQuality => "The camera waits for a full-resolution frame of every view on the way: sharp, but it can crawl where the view is slow",
+                        FlightRendering::SuperSampled => "Every view on the way is rendered with all its supersampling layers, and the camera waits for the finished frame: the best picture, the slowest crawl",
                     });
                 }
             }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");

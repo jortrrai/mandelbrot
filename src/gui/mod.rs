@@ -328,6 +328,8 @@ pub(super) enum Readiness {
     Complete,
     /// A full-resolution frame: a full layer
     FullResolution,
+    /// The finished frame: every supersampling layer
+    SuperSampled,
 }
 
 impl MandelbrotApp {
@@ -343,6 +345,7 @@ impl MandelbrotApp {
             flight::FlightRendering::BestEffort => Readiness::Any,
             flight::FlightRendering::LowRes => Readiness::Complete,
             flight::FlightRendering::MaxQuality => Readiness::FullResolution,
+            flight::FlightRendering::SuperSampled => Readiness::SuperSampled,
         };
         mode.max(if self.immersion { Readiness::Complete } else { Readiness::Any })
     }
