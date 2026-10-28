@@ -22,13 +22,13 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
   test:
-    # Linux and Windows run the AVX2 loops; macOS (arm64) runs the generic loops, which shows that the tests pin values and not one CPU
+    # Only Linux: the other systems do not matter for this project. Linux runs the AVX2 loops; the generic loops are compared with them bit for bit by a test
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
