@@ -3,6 +3,7 @@
 
 use eframe::egui::{self};
 
+use super::flight::{Pace, Route};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
 use crate::resolution;
@@ -114,6 +115,22 @@ impl MandelbrotApp {
             self.go_to_point_of_interest(index);
         }
         ui.checkbox(&mut self.restore_appearance, "Restore the saved appearance (coloring, color channels)").on_hover_text("Off: going to a place keeps your current appearance. The supersampling is never part of a place.");
+        ui.horizontal(|ui| {
+            ui.label("Flight:");
+            egui::ComboBox::from_id_salt("flight_route").selected_text(self.route.name()).show_ui(ui, |ui| {
+                for route in Route::ALL {
+                    ui.selectable_value(&mut self.route, route, route.name()).on_hover_text(match route {
+                        Route::ViaReset => "First out to the whole set, then in to the place",
+                        Route::Shortest => "Straight to the place, zooming out only as far as the distance needs",
+                    });
+                }
+            }).response.on_hover_text("The way to a point of interest");
+            egui::ComboBox::from_id_salt("flight_pace").selected_text(self.pace.name()).show_ui(ui, |ui| {
+                for pace in Pace::ALL {
+                    ui.selectable_value(&mut self.pace, pace, pace.name());
+                }
+            }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest; using any control or the mouse stops a flight");
+        });
         ui.horizontal(|ui| {
             for (input, hint) in self.view_inputs.iter_mut().zip(["x", "y", "scale"]) {
                 ui.add(egui::TextEdit::singleline(input).hint_text(hint).desired_width(80.0));

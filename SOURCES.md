@@ -20,3 +20,4 @@
 - [Rust `is_x86_feature_detected!`](https://doc.rust-lang.org/std/arch/macro.is_x86_feature_detected.html) and [`#[target_feature]`](https://doc.rust-lang.org/reference/attributes/codegen.html#the-target_feature-attribute): choosing the AVX2 loops at run time
 - [egui](https://docs.rs/egui) and [eframe](https://docs.rs/eframe): the window and its controls
 - [Text to ASCII Art Generator (TAAG)](https://patorjk.com/software/taag/): the banner
+- [Smooth and efficient zooming and panning (van Wijk and Nuij, 2003)](https://www.win.tue.nl/~vanwijk/zoompan.pdf): the path of a flight to a point of interest

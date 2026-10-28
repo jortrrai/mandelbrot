@@ -14,6 +14,7 @@
 mod actions;
 mod controls;
 mod fit;
+mod flight;
 mod history;
 mod pointer;
 mod points;
@@ -134,6 +135,10 @@ pub struct MandelbrotApp {
     thumbs_visible: Vec<u64>,
     /// Whether going to a point of interest also restores the appearance saved in its file (the coloring and the color channels); off by default
     restore_appearance: bool,
+    /// How a flight to a point of interest goes (via the reset view by default) and how fast (cinematic by default), and the flight that is under way, see `flight`
+    route: flight::Route,
+    pace: flight::Pace,
+    flight: Option<points::PointFlight>,
     /// Edited text of the "go to view" fields
     view_inputs: [String; 3],
     /// Messages shown to the user in the status box
@@ -213,6 +218,9 @@ impl MandelbrotApp {
             thumbs_visible: Vec::new(),
             points_folder: std::path::PathBuf::new(),
             restore_appearance: false,
+            route: flight::Route::ViaReset,
+            pace: flight::Pace::Cinematic,
+            flight: None,
             view_inputs: [String::new(), String::new(), String::new()],
             log: Vec::new(),
             texture: None,
@@ -314,6 +322,7 @@ impl eframe::App for MandelbrotApp {
 
         let mut fit_area = egui::Vec2::ZERO;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| fit_area = self.image_ui(ui));
+        self.fly(&ctx);
         self.settle_gesture(&ctx);
         self.fit_to_window(&ctx, fit_area);
     }
