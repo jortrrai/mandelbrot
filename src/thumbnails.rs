@@ -10,13 +10,13 @@
 //! (the saved one when the window restores appearances, otherwise the current one). It is rendered with `THUMBNAIL_SAMPLES` samples per pixel, whatever the supersampling of the window is.
 //! Thumbnails are not stored on disk: ten of them take less than a tenth of a second to render (see `examples/thumbnails.rs`), and a stored image would go stale whenever the renderer changes.
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 
 use crate::coloring::{ColorChannelMapping, TrueColor};
 use crate::complex_plane::{ComplexPlane, View};
 use crate::mandelbrot_set::MandelbrotSet;
 use crate::points_of_interest::{Coloring, Location};
-use crate::rendering;
+use crate::rendering::Render;
 
 /// The most thumbnails that are kept at the same time
 pub const MAX_CACHED: usize = 64;
@@ -82,7 +82,7 @@ pub fn render_thumbnail(request: &ThumbnailRequest, orbit_radius: f64, cancel: &
         Coloring::Bernstein => TrueColor::new_from_bernstein_polynomials,
     };
     let mut last = None;
-    let completed = rendering::render_progressively(&plane, &set, request.width, request.height, THUMBNAIL_SAMPLES, coloring_function, cancel, &AtomicUsize::new(0), |colors, _| {
+    let completed = Render::new(&plane, &set, request.width, request.height, coloring_function).supersampling(THUMBNAIL_SAMPLES).cancel_with(cancel).run( |colors, _| {
         last = Some(colors.to_vec());
     });
     if completed { last } else { None }

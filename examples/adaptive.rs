@@ -1,11 +1,10 @@
 //! Adaptive versus uniform supersampling at matched settings, run with `cargo run --release --example adaptive [samples] [runs]`.
 //! Reports the share of pixels that get all samples, the sample count, the render time, the cost of the detection, and the difference of the image to the uniform render.
-use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Instant;
 use mandelbrot::coloring::TrueColor;
 use mandelbrot::complex_plane::{ComplexPlane, View};
 use mandelbrot::mandelbrot_set::MandelbrotSet;
-use mandelbrot::rendering::{adaptive_mask, render_region_adaptively, AdaptiveSampling, ExposedRegion};
+use mandelbrot::rendering::{adaptive_mask, AdaptiveSampling, ExposedRegion, Render};
 
 fn views() -> Vec<(&'static str, &'static str, View, u32)> {
     vec![
@@ -19,9 +18,9 @@ fn views() -> Vec<(&'static str, &'static str, View, u32)> {
 }
 
 fn render(c: &ComplexPlane, m: &MandelbrotSet, w: usize, h: usize, samples: u8, adaptive: Option<&AdaptiveSampling>) -> Vec<TrueColor> {
-    let base = vec![TrueColor::new(0, 0, 0); w * h];
+    let _base = vec![TrueColor::new(0, 0, 0); w * h];
     let mut last = Vec::new();
-    render_region_adaptively(c, m, w, h, &ExposedRegion::full(w, h), &base, samples, adaptive, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| { last.clear(); last.extend_from_slice(colors); });
+    Render::new(c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive.copied()).run( |colors, _| { last.clear(); last.extend_from_slice(colors); });
     last
 }
 

@@ -79,7 +79,7 @@ pub struct MandelbrotApp {
     auto_preset: AutoPreset,
     /// Whether the displayed auto limit is only the starting limit of the running render, because the probes that refine it have not finished
     limit_pending: bool,
-    /// Whether supersampling puts the extra samples on boundary and detail pixels only, see `rendering::render_region_adaptively`
+    /// Whether supersampling puts the extra samples on boundary and detail pixels only, see `rendering::Render::adaptive`
     adaptive_supersampling: bool,
     /// Edited value of the supersampling field, applied when editing ends
     supersampling_input: u8,
