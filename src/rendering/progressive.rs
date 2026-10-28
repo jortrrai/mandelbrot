@@ -8,7 +8,7 @@ use super::region::ExposedRegion;
 use super::render_thread_count;
 use super::gpu::{GpuIterator, Outcome, BATCH};
 use super::state::{SampleKey, SampleState, FOREIGN};
-use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, mandelbrot_set::{MandelbrotSet, LANES}};
+use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, mandelbrot_set::MandelbrotSet};
 
 /// The largest `max_iterations` for which `Render::run` precomputes the color of every iteration count
 const MAX_COLOR_TABLE_ITERATIONS: u32 = 200_000;
@@ -443,9 +443,10 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     processed.into_inner()
 }
 
-/// A pass is only given to the GPU when the pass before suggests it takes longer than this: starting the GPU worker for a short pass costs more than it saves
-/// (measured: the default view at 32x adaptive, with many passes of a few milliseconds, took 90.5 ms with the GPU in every pass instead of 86.5 ms)
-const GPU_WORTHWHILE: Duration = Duration::from_millis(12);
+/// A pass is only given to the GPU when the CPU threads alone would take longer than this for it: starting the GPU worker for a short pass costs more than it saves
+/// (measured with the refilling CPU loop: the default view at 32x adaptive took 60.6 ms with 12 ms here, 56.8 ms with 20 ms, and 56.2 ms without the GPU; 30 ms
+/// made the slow views slower)
+const GPU_WORTHWHILE: Duration = Duration::from_millis(20);
 
 /// The rows the GPU takes from the queue of a pass for its first batch, before its speed is known (about 38,000 pixels at 1200 x 800)
 const GPU_ROWS: usize = 32;
@@ -548,22 +549,13 @@ fn sample_point(anchor: &ComplexPlane, x: usize, y: usize, sample: u8, origin: (
 
 #[allow(clippy::too_many_arguments)] // The row, the sample and where to place it, and the cancel flag: the inner loop of every pass, kept as one function
 fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample: u8, origin: (isize, isize), cancel: Option<&AtomicBool>, mut sink: impl FnMut(usize, f64)) -> usize {
-    let sample_point = |x: usize| sample_point(anchor, x, y, sample, origin);
-    let (groups, remainder) = xs.as_chunks::<LANES>();
-    for (index, group) in groups.iter().enumerate() {
-        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
-            return index * LANES;
-        }
-        let points: [Complex; LANES] = std::array::from_fn(|lane| sample_point(group[lane]));
-        let positions = m.position_lanes(&points);
-        for (lane, x) in group.iter().enumerate() {
-            sink(*x, positions[lane]);
-        }
+    let points: Vec<Complex> = xs.iter().map(|x| sample_point(anchor, *x, y, sample, origin)).collect();
+    let mut out = vec![0.0; xs.len()];
+    let done = m.positions(&points, &mut out, cancel);
+    for (x, position) in xs[..done].iter().zip(&out) {
+        sink(*x, *position);
     }
-    for x in remainder {
-        sink(*x, m.position(&sample_point(*x)));
-    }
-    xs.len()
+    done
 }
 
 /// The previews of [`Render::preview`]: computes the first sample of the top-left pixel of every block of each level that has no samples yet into `state`, and reports
