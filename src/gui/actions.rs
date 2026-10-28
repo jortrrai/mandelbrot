@@ -45,6 +45,7 @@ impl MandelbrotApp {
         let (image_supersampling_amount, coloring_function) = (self.image_supersampling_amount, self.coloring_function);
         let buffer_is_complete = self.buffer_is_complete && self.progress.is_none() && !self.adaptive_supersampling; //An interrupted, cancelled or adaptively sampled buffer is not a full-quality image of the saved quality
         let sender = self.notice_sender.clone();
+        let gpu = self.gpu.clone().filter(|_| self.use_gpu);
         std::thread::spawn(move || {
             let view = c.get_view();
             let (view_width, view_height) = (p.pixel_plane.width, p.pixel_plane.height);
@@ -56,7 +57,7 @@ impl MandelbrotApp {
                 let mut image_c = ComplexPlane::new(resolution.width, resolution.height);
                 image_p.color_channel_mapping = p.color_channel_mapping;
                 image_c.set_view(&view);
-                rendering::render_complex_plane_into_buffer(&mut image_p, &image_c, &m, image_supersampling_amount, coloring_function);
+                rendering::render_complex_plane_into_buffer_with_gpu(&mut image_p, &image_c, &m, image_supersampling_amount, coloring_function, gpu.as_deref());
                 image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount)
             };
             let message = match saved {

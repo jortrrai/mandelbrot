@@ -624,3 +624,19 @@ fn a_render_with_the_gpu_is_bit_for_bit_the_render_without_it() {
     println!("The GPU computed {} samples", gpu_samples.load(Ordering::Relaxed));
     assert!(gpu_samples.load(Ordering::Relaxed) > 10_000, "the GPU did a good part of the work");
 }
+
+#[test]
+fn an_image_saved_with_the_gpu_has_the_pixels_of_one_saved_without_it() {
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let (c, m) = boundary_plane(200, 150);
+    let (mut without, mut with) = (PixelBuffer::new(PixelPlane::new(200, 150)), PixelBuffer::new(PixelPlane::new(200, 150)));
+    render_complex_plane_into_buffer(&mut without, &c, &m, 3, TrueColor::new_from_bernstein_polynomials);
+    render_complex_plane_into_buffer_with_gpu(&mut with, &c, &m, 3, TrueColor::new_from_bernstein_polynomials, Some(&gpu));
+    assert_eq!(with.pixels, without.pixels);
+}

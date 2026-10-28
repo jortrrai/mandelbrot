@@ -239,6 +239,18 @@ fn main() {
                     summarize(&format!("render {name}, CPU + GPU"), time_runs(runs, || { std::hint::black_box(render(join)); }));
                     println!("{:<44} the same image: {same}", "");
                 }
+                //Saving an image of 1920 x 1080 at 4x (the save path, with the GPU from the start of every pass)
+                let mut c = ComplexPlane::new(1920, 1080);
+                c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.000064));
+                let m = MandelbrotSet::new(5000, 2.0);
+                let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(1920, 1080));
+                let mut with_gpu = buffer.clone();
+                rendering::render_complex_plane_into_buffer(&mut buffer, &c, &m, 4, TrueColor::new_from_bernstein_polynomials);
+                rendering::render_complex_plane_into_buffer_with_gpu(&mut with_gpu, &c, &m, 4, TrueColor::new_from_bernstein_polynomials, Some(&gpu));
+                let same = buffer.pixels == with_gpu.pixels;
+                summarize("save seahorse 1920x1080 4x, CPU", time_runs(runs, || rendering::render_complex_plane_into_buffer(&mut buffer, &c, &m, 4, TrueColor::new_from_bernstein_polynomials)));
+                summarize("save seahorse 1920x1080 4x, CPU + GPU", time_runs(runs, || rendering::render_complex_plane_into_buffer_with_gpu(&mut with_gpu, &c, &m, 4, TrueColor::new_from_bernstein_polynomials, Some(&gpu))));
+                println!("{:<44} the same image: {same}", "");
             }
         }
     }
