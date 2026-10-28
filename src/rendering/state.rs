@@ -1,8 +1,10 @@
 //! What a render has computed for every pixel, kept between renders: an interrupted render, or a render of a moved view, continues from it instead of starting again.
 //!
 //! For every pixel the state holds the sum of its samples, how many samples it has, and the colors after its first and second sample (which adaptive supersampling
-//! compares). The samples of a pixel are taken at a jitter that is keyed by its position plus an `origin`; when the view moves by whole pixels the state is shifted
-//! with it and the origin follows, so a pixel keeps its key: the samples it already has are exactly the samples a fresh render with that origin would take.
+//! compares). When the view moves by whole pixels the state is shifted with it. The samples of a pixel are placed in the view where the samples started (the
+//! `anchor`), at its position there (its position now plus `origin`) and a jitter keyed by that position. So a pixel keeps exactly the same sample points however the
+//! view moves: a continued render computes bit for bit the samples that a render that was never interrupted or moved would have computed. (Placing them in the moved
+//! view instead would round its bounds differently, which changes the iteration count of an occasional point right at the edge of the set.)
 
 use super::region::{pixel_shift, ExposedRegion};
 use crate::{coloring::TrueColor, complex_plane::ComplexPlane, mandelbrot_set::MandelbrotSet};
@@ -34,10 +36,12 @@ impl SampleKey {
 pub struct SampleState {
     /// The view and the settings of the samples; `None` for an empty state
     plane: Option<ComplexPlane>,
+    /// The view where the samples started: pixel `(x, y)` of `plane` is pixel `(x + origin.0, y + origin.1)` of the anchor
+    pub(super) anchor: Option<ComplexPlane>,
     key: Option<SampleKey>,
     pub(super) width: usize,
     pub(super) height: usize,
-    /// Added to the position of a pixel to get the key of its jitter, see `jitter::sample_jitter`
+    /// Added to the position of a pixel to get its position in the anchor, which places its samples and keys their jitter (see `jitter::sample_jitter`)
     pub(super) origin: (isize, isize),
     /// The sum of the colors of the samples of every pixel
     pub(super) sums: Vec<[u32; 3]>,
@@ -54,12 +58,6 @@ impl SampleState {
         SampleState::default()
     }
 
-    /// An empty state whose samples will be keyed with `origin`, to compare a continued render with a fresh one in tests
-    #[cfg(test)]
-    pub(super) fn starting_at(origin: (isize, isize)) -> SampleState {
-        SampleState { origin, ..SampleState::default() }
-    }
-
     /// How many samples the pixel `(x, y)` has
     pub fn samples(&self, x: usize, y: usize) -> u8 {
         self.counts.get(y * self.width + x).copied().unwrap_or(0)
@@ -70,22 +68,32 @@ impl SampleState {
         self.plane.as_ref()
     }
 
+    /// Makes the state fit a render of `plane` (`width` x `height` pixels) of `m` colored by `coloring_function`, like `Render::resume` does when it starts,
+    /// and returns how many pixels kept samples. A render that resumes the state afterwards finds it prepared.
+    pub fn prepare_for(&mut self, plane: &ComplexPlane, width: usize, height: usize, m: &MandelbrotSet, coloring_function: fn(u32, u32) -> TrueColor) -> usize {
+        self.prepare(plane, width, height, SampleKey::new(m, coloring_function))
+    }
+
+    /// The shift that turns this state into the state of a render of `plane` with `key`, if that render keeps samples of it
+    fn kept_shift(&self, plane: &ComplexPlane, width: usize, height: usize, key: &SampleKey) -> Option<(isize, isize)> {
+        let same_render = self.width == width && self.height == height && self.key.as_ref() == Some(key);
+        let shift = self.plane.as_ref().filter(|_| same_render).and_then(|old| pixel_shift(old, plane))?;
+        let (rows_up, columns_right) = (isize::try_from(shift.0).ok()?, isize::try_from(shift.1).ok()?);
+        (rows_up.unsigned_abs() < height && columns_right.unsigned_abs() < width).then_some((rows_up, columns_right))
+    }
+
     /// Makes the state fit a render of `plane` (`width` x `height` pixels) with the settings `key`. Returns how many pixels kept their samples.
     ///
     /// If `plane` is the view of the state moved by whole pixels, with the same size and settings, the samples are shifted along and the pixels that became
     /// visible start empty; otherwise every pixel starts empty.
     pub(super) fn prepare(&mut self, plane: &ComplexPlane, width: usize, height: usize, key: SampleKey) -> usize {
-        let same_render = self.width == width && self.height == height && self.key.as_ref() == Some(&key);
-        let shift = self.plane.as_ref().filter(|_| same_render).and_then(|old| pixel_shift(old, plane));
-        let kept = match shift {
-            Some((rows_up, columns_right)) if rows_up.unsigned_abs() < height as u128 && columns_right.unsigned_abs() < width as u128 => {
-                self.shift(rows_up as isize, columns_right as isize);
+        let kept = match self.kept_shift(plane, width, height, &key) {
+            Some((rows_up, columns_right)) => {
+                self.shift(rows_up, columns_right);
                 self.counts.iter().filter(|count| **count > 0).count()
             }
-            _ => {
-                //A first render keeps the origin it was given (0 by default); anything else starts over at 0
-                let origin = if self.plane.is_none() { self.origin } else { (0, 0) };
-                *self = SampleState { origin, width, height, sums: vec![[0; 3]; width * height], counts: vec![0; width * height], first: vec![TrueColor::new(0, 0, 0); width * height], second: vec![TrueColor::new(0, 0, 0); width * height], ..SampleState::default() };
+            None => {
+                *self = SampleState { anchor: Some(plane.clone()), width, height, sums: vec![[0; 3]; width * height], counts: vec![0; width * height], first: vec![TrueColor::new(0, 0, 0); width * height], second: vec![TrueColor::new(0, 0, 0); width * height], ..SampleState::default() };
                 0
             }
         };
@@ -113,6 +121,9 @@ impl SampleState {
     /// Moves the content by `columns_right` and `rows_up` pixels like `PixelBuffer::translate_buffer`: the pixel at `(x, y)` goes to `(x + columns_right, y + rows_up)`.
     /// The origin follows, so every moved pixel keeps the key of its jitter.
     fn shift(&mut self, rows_up: isize, columns_right: isize) {
+        if (rows_up, columns_right) == (0, 0) {
+            return;
+        }
         let (width, height) = (self.width, self.height);
         shift_grid(&mut self.sums, width, height, rows_up, columns_right, [0; 3]);
         shift_grid(&mut self.counts, width, height, rows_up, columns_right, 0);

@@ -141,7 +141,8 @@ impl<'a> Render<'a> {
         let kept = state.as_mut().map_or(0, |state| state.prepare(c, width, height, SampleKey::new(m, coloring_function)));
         let mut own_state = None;
         let state: &mut SampleState = state.unwrap_or_else(|| own_state.insert(SampleState::for_one_render(width, height, region, base, adaptive.is_some())));
-        let origin = state.origin;
+        //Where the samples are placed: the view where the samples of the state started, or this view
+        let (anchor, origin) = (state.anchor.clone().unwrap_or_else(|| c.clone()), state.origin);
         let mut colors: Vec<TrueColor> = base.map_or_else(|| vec![TrueColor::new(0, 0, 0); width * height], <[TrueColor]>::to_vec);
         //How many pixels of the render have each amount of samples, to know how many pixels a pass computes
         let mut pending = [0_usize; 66];
@@ -162,7 +163,7 @@ impl<'a> Render<'a> {
         //The pixels whose first sample the previews computed, empty without previews
         let mut has_first: Vec<bool> = Vec::new();
         if let Some(worthwhile) = preview.filter(|_| pending[0] > 0) {
-            match render_previews(c, m, origin, worthwhile, cancel, &color_of, state, pending[0], &mut colors, &mut on_pass) {
+            match render_previews(&anchor, m, origin, worthwhile, cancel, &color_of, state, pending[0], &mut colors, &mut on_pass) {
                 Some((flags, count)) => {
                     has_first = flags;
                     pending[0] -= count;
@@ -192,7 +193,7 @@ impl<'a> Render<'a> {
             let eligible = if mask.is_some() { masked[index] } else { pending[index] };
             //The pixels that get no sample in this pass count as done
             pixels_done.store(total - eligible, Ordering::Relaxed);
-            let processed = if eligible > 0 { sample_pass(c, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done) } else { 0 };
+            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done) } else { 0 };
             if cancel.load(Ordering::Relaxed) {
                 return false;
             }
@@ -208,7 +209,7 @@ impl<'a> Render<'a> {
     }
 }
 
-/// Pass `sample` of `Render::run`: takes sample `sample` of every pixel that has `sample` samples (and is marked by `mask`, if any), updates `state` and `colors`
+/// Pass `sample` of `Render::run`: takes sample `sample` (placed in `anchor`, see `positions`) of every pixel that has `sample` samples (and is marked by `mask`, if any), updates `state` and `colors`
 /// row by row on all threads, and returns how many pixels it sampled. A cancelled pass stops after the rows it started; those rows are complete in `state`.
 /// Without `track` (a state that is not kept) every pixel of the render has `sample` samples except the ones the previews computed, so the counts are not updated.
 #[allow(clippy::too_many_arguments)] // The state of `Render::run` that a pass shares
@@ -287,12 +288,13 @@ fn average(sum: [u32; 3], count: u8) -> TrueColor {
 }
 
 /// Computes the position (smooth iteration count) of sample `sample` of the pixels `xs` of row `y` and gives each to `sink`: `LANES` pixels at the same time, the remaining pixels one by one.
-/// The jitter of a pixel is keyed by its position plus `origin`, see `SampleState`.
-fn positions(c: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample: u8, origin: (isize, isize), mut sink: impl FnMut(usize, f64)) {
-    let key_y = y.wrapping_add_signed(origin.1);
+/// A pixel is pixel `(x + origin.0, y + origin.1)` of `anchor`, which places its samples and keys their jitter, see `SampleState`.
+fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample: u8, origin: (isize, isize), mut sink: impl FnMut(usize, f64)) {
+    let anchor_y = y.cast_signed() + origin.1;
     let sample_point = |x: usize| {
-        let (jitter_x, jitter_y) = sample_jitter(x.wrapping_add_signed(origin.0), key_y, sample);
-        c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y)
+        let anchor_x = x.cast_signed() + origin.0;
+        let (jitter_x, jitter_y) = sample_jitter(anchor_x as usize, anchor_y as usize, sample);
+        anchor.complex_from_pixel_plane(anchor_x as f64 + jitter_x, anchor_y as f64 + jitter_y)
     };
     let (groups, remainder) = xs.as_chunks::<LANES>();
     for group in groups {

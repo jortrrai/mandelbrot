@@ -414,11 +414,25 @@ fn an_interrupted_render_continues_where_it_stopped_and_gives_the_same_image() {
     }
 }
 
+/// The colors after rendering `c` into a new state, interrupted after `interrupted_after` passes (or complete), then moving the view `rows_up` and `columns_right`
+/// and continuing to `samples` samples; and the moved plane with the state
+#[allow(clippy::too_many_arguments)] // A test helper: the settings of the two renders
+fn moved_render(c: &ComplexPlane, m: &MandelbrotSet, samples: u8, adaptive: Option<AdaptiveSampling>, interrupted_after: Option<u8>, rows_up: i16, columns_right: i16) -> (Vec<(u8, u8, u8)>, ComplexPlane, SampleState) {
+    let mut state = SampleState::new();
+    let _ = resumed(&mut state, c, m, samples, adaptive, interrupted_after, None);
+    let mut moved = c.clone();
+    translate_complex_plane_by_pixels(&mut moved, rows_up, columns_right);
+    let (colors, completed) = resumed(&mut state, &moved, m, samples, adaptive, None, None);
+    assert!(completed);
+    (colors, moved, state)
+}
+
 #[test]
 fn a_moved_view_keeps_the_samples_of_the_pixels_that_stay_visible() {
     let (w, h) = (61, 37);
     let (c, m) = boundary_plane(w, h);
-    for interrupted_after in [None, Some(2)] {
+    let (complete, _) = resumed(&mut SampleState::new(), &c, &m, 4, None, None, None);
+    for interrupted_after in [None, Some(1), Some(2)] {
         let mut state = SampleState::new();
         let _ = resumed(&mut state, &c, &m, 4, None, interrupted_after, None);
         let before = state.samples(10, 10);
@@ -430,35 +444,33 @@ fn a_moved_view_keeps_the_samples_of_the_pixels_that_stay_visible() {
         let _ = Render::new(&moved, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).resume(&mut state).cancel_with(&cancelled).run(|_, _| {});
         assert_eq!(state.samples(10 - 5, 10 + 3), before);
         let empty = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| state.samples(*x, *y) == 0).count();
-        let exposed = 5 * h + 3 * w - 5 * 3;
-        assert!(if interrupted_after.is_none() { empty == exposed } else { empty >= exposed }, "{empty} pixels without samples, {exposed} exposed");
+        assert_eq!(empty, 5 * h + 3 * w - 5 * 3, "only the exposed strips are empty");
 
-        //Continuing gives exactly a fresh render of the moved view whose jitter is keyed like the original view
-        let origin = state.origin;
+        //Continuing gives exactly the original complete image where the view overlaps, and exactly what a move after a complete render gives everywhere
         let (colors, completed) = resumed(&mut state, &moved, &m, 4, None, None, None);
         assert!(completed);
-        let (fresh, _) = resumed(&mut SampleState::starting_at(origin), &moved, &m, 4, None, None, None);
-        assert_eq!(colors, fresh, "interrupted after {interrupted_after:?}");
+        for y in 3..h {
+            for x in 0..w - 5 {
+                assert_eq!(colors[y * w + x], complete[(y - 3) * w + x + 5], "({x}, {y}), interrupted after {interrupted_after:?}");
+            }
+        }
+        assert_eq!(colors, moved_render(&c, &m, 4, None, None, 3, 5).0, "interrupted after {interrupted_after:?}");
     }
 }
 
 #[test]
-fn with_adaptive_supersampling_a_moved_view_matches_a_fresh_render_away_from_the_edges() {
+fn with_adaptive_supersampling_an_interrupted_and_moved_render_matches_away_from_the_edges() {
     let (w, h) = (61, 37);
     let (c, m) = boundary_plane(w, h);
     let adaptive = Some(AdaptiveSampling::default());
-    let mut state = SampleState::new();
-    let _ = resumed(&mut state, &c, &m, 8, adaptive, Some(4), None);
-    let mut moved = c.clone();
-    translate_complex_plane_by_pixels(&mut moved, -4, -6);
-    let (colors, _) = resumed(&mut state, &moved, &m, 8, adaptive, None, None);
-    let mut fresh_state = SampleState::starting_at(state.origin);
-    let (fresh, _) = resumed(&mut fresh_state, &moved, &m, 8, adaptive, None, None);
+    let (expected, _, expected_state) = moved_render(&c, &m, 8, adaptive, None, -4, -6);
+    let (colors, _, state) = moved_render(&c, &m, 8, adaptive, Some(4), -4, -6);
     for y in 0..h {
         for x in 0..w {
-            assert!(state.samples(x, y) >= fresh_state.samples(x, y), "never fewer samples than a fresh render, ({x}, {y})");
+            //The mask of a pixel at the edge can depend on a neighbor that moved out of the view (or was not there before the move); elsewhere the image is the same
             if x >= 2 && y >= 2 && x + 2 < w && y + 2 < h {
-                assert_eq!(colors[y * w + x], fresh[y * w + x], "({x}, {y})");
+                assert_eq!(colors[y * w + x], expected[y * w + x], "({x}, {y})");
+                assert_eq!(state.samples(x, y), expected_state.samples(x, y), "({x}, {y})");
             }
         }
     }
