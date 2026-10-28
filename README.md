@@ -59,7 +59,7 @@ The fractal is on the left. On the right, from top to bottom, are the controls, 
 
 **Controls**
 - **Move**: the arrow buttons move the view by the *Move step* in pixels; only the newly exposed strip is rendered.
-- **Zoom in / Zoom out / Reset view**, and the *Zoom speed*.
+- **Zoom in / Zoom out / Reset view**, and the *Zoom speed*. **Zoom in** is disabled when the 64-bit numbers of the renderer run out of precision (see the warning under *Current view*). **< Back / Forward >** walk through the views you visited (the last 200), like the history of a browser.
 - **Points of interest**: a list of named places with thumbnails (see below); *Reload* reads the folder again; *Restore the saved appearance* also applies the coloring and the color channels of a place.
 - **Go to view**: type the `x`, `y` and `scale` of a view.
 - **Max. iterations**: the most iterations of a point. **Auto iterations** chooses it for the zoom of every render; its drop-down offers the presets *Performance*, *Balanced* (the default) and *High Detail*, and the fields below it are the settings of the preset. It is a heuristic on a sparse grid, not a proof: very narrow detail can be missed.

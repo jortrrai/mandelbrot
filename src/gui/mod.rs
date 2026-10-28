@@ -5,6 +5,7 @@
 //! * `actions`: what the buttons and clicks do.
 //! * `controls`: the controls on the right.
 //! * `fit`: the render size that follows the size of the window.
+//! * `history`: the views that were visited, for Back and Forward.
 //! * `points`: the points of interest with their thumbnails.
 //! * `save_size`: the size of the saved image: the presets and the custom size.
 //! * `status`: the current view, the status log and the progress bar.
@@ -12,6 +13,7 @@
 mod actions;
 mod controls;
 mod fit;
+mod history;
 mod points;
 mod render_job;
 mod save_size;
@@ -22,6 +24,7 @@ mod tests;
 pub use status::{format_zoom, CurrentView};
 
 use self::fit::Fit;
+use self::history::ViewHistory;
 use self::points::{ThumbnailJob, ThumbnailMessage};
 use self::render_job::{JobMessage, Progress, RenderBars};
 use self::save_size::SaveSize;
@@ -76,6 +79,8 @@ pub struct MandelbrotApp {
     coloring_index: usize,
     supersampling_amount: u8,
     image_supersampling_amount: u8,
+    /// The views that were visited, see `history`
+    history: ViewHistory,
     /// Whether the render size follows the size of the window, see `fit`
     fit: Fit,
     /// The size of the saved image, see `save_size`
@@ -153,6 +158,7 @@ impl MandelbrotApp {
             supersampling_amount: config.supersampling_amount,
             supersampling_input: config.supersampling_amount,
             image_supersampling_amount: config.supersampling_amount,
+            history: ViewHistory::default(),
             fit: Fit::new(config.fit_window),
             save_size,
             points: Vec::new(),
