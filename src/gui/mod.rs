@@ -139,6 +139,13 @@ pub struct MandelbrotApp {
     route: flight::Route,
     pace: flight::Pace,
     flight: Option<points::PointFlight>,
+    /// How complete the frames of a flight have to be (best effort by default), see `flight::FlightRendering`
+    flight_rendering: flight::FlightRendering,
+    /// Immersion: the screen never shows black where nothing is rendered yet; the view only moves once the new view has at least a complete low-resolution frame
+    immersion: bool,
+    /// Whether the render of the current view has shown a frame that is complete enough (see `required_readiness`), and whether it has shown any frame
+    frame_ready: bool,
+    frame_accepted: bool,
     /// Edited text of the "go to view" fields
     view_inputs: [String; 3],
     /// Messages shown to the user in the status box
@@ -221,6 +228,10 @@ impl MandelbrotApp {
             route: flight::Route::ViaReset,
             pace: flight::Pace::Cinematic,
             flight: None,
+            flight_rendering: flight::FlightRendering::BestEffort,
+            immersion: false,
+            frame_ready: false,
+            frame_accepted: false,
             view_inputs: [String::new(), String::new(), String::new()],
             log: Vec::new(),
             texture: None,
@@ -300,11 +311,51 @@ impl MandelbrotApp {
         let scale = (available.x / width).min(available.y / height);
         let size = egui::vec2(width * scale, height * scale);
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-        //The image of the last render, at its place in the current view (the whole rectangle when they are the same view)
-        let target = transform::shown_rect(&self.shown_plane, &self.c, rect);
+        //The image of the last render, at its place in the current view (the whole rectangle when they are the same view, or when the view is held, see `drawn_fraction`)
+        let target = transform::rect_of(self.drawn_fraction(), rect);
         ui.painter_at(rect).image(texture.id(), target, self.texture_uv, Color32::WHITE);
         self.handle_image_pointer(ui, &response, size);
         available
+    }
+}
+
+/// How complete a frame of a render is, or has to be before the screen shows it
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Readiness {
+    /// Anything: a preview of only the pixels a move exposed, with gaps
+    Any,
+    /// A complete low-resolution frame: a preview of the whole view, or a full layer
+    Complete,
+    /// A full-resolution frame: a full layer
+    FullResolution,
+}
+
+impl MandelbrotApp {
+    /// How complete a frame has to be before the screen shows it: a complete frame with immersion, and what the flight rendering asks for during a flight
+    pub(super) fn required_readiness(&self) -> Readiness {
+        let flight = if self.flight.is_some() { self.flight_readiness() } else { Readiness::Any };
+        flight.max(if self.immersion { Readiness::Complete } else { Readiness::Any })
+    }
+
+    /// What the frames of a flight have to be, see `flight::FlightRendering`; immersion asks for at least a complete frame
+    pub(super) fn flight_readiness(&self) -> Readiness {
+        let mode = match self.flight_rendering {
+            flight::FlightRendering::BestEffort => Readiness::Any,
+            flight::FlightRendering::LowRes => Readiness::Complete,
+            flight::FlightRendering::MaxQuality => Readiness::FullResolution,
+        };
+        mode.max(if self.immersion { Readiness::Complete } else { Readiness::Any })
+    }
+
+    /// Where the image is drawn, as a fraction of the image area: moved and scaled to the current view (best effort), or held where it is, so the screen never shows
+    /// black where nothing is rendered: the view on the screen then is the view of the last frame that was complete enough, and it moves when the next one is
+    pub(super) fn drawn_fraction(&self) -> egui::Rect {
+        if self.required_readiness() == Readiness::Any { transform::shown_fraction(&self.shown_plane, &self.c) } else { FULL_TEXTURE }
+    }
+
+    /// The view that the screen shows: the current view, or with a held view (see `drawn_fraction`) the view of the frame on the screen
+    pub(super) fn displayed_plane(&self) -> &ComplexPlane {
+        if self.required_readiness() == Readiness::Any { &self.c } else { &self.shown_plane }
     }
 }
 

@@ -13,7 +13,10 @@ use crate::pixel_buffer::PixelBuffer;
 use crate::points_of_interest::{self, Coloring, PointOfInterest};
 use crate::thumbnails::{self, ThumbnailRequest};
 use super::flight::{Camera, Flight};
-use super::{MandelbrotApp, COLORING_FUNCTIONS};
+use super::{MandelbrotApp, Readiness, COLORING_FUNCTIONS};
+
+/// The most a flight that waits for its frames moves on after a frame, in flight time: two frames at 60 Hz
+const MAX_WAITING_STEP: Duration = Duration::from_millis(33);
 
 /// A flight to a point of interest that is under way: the path, how far along it the flight is, and the point to apply on arrival
 pub(super) struct PointFlight {
@@ -180,6 +183,7 @@ impl MandelbrotApp {
         let flight = Flight::new(from, to, self.route, self.pace, reset);
         self.log(format!("Flying to {} ({}, {}, {:.1} s)", point.name, self.route.name(), self.pace.name(), flight.duration().as_secs_f64()));
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point });
+        self.frame_ready = true; //The view on the screen is where the flight starts
     }
 
     /// Stops the flight where it is (the Cancel button): the view stays, gets a full-quality render, and the controls are free again
@@ -205,10 +209,21 @@ impl MandelbrotApp {
     }
 
     /// The frame of the flight at `now`: a quick render of the view on the way (like a frame of a gesture), or the point itself on arrival
+    ///
+    /// With a flight rendering that waits for frames (or immersion), the camera only moves on once the frame of its current view is complete enough, and then by at
+    /// most `MAX_WAITING_STEP`: the flight clock stands still while it waits, so a slow view makes a slow, smooth crawl instead of jumps.
     pub(super) fn fly_at(&mut self, now: Instant) {
         let Some(mut flight) = self.flight.take() else { return };
-        flight.elapsed += now.saturating_duration_since(flight.last_frame);
+        let since_last_frame = now.saturating_duration_since(flight.last_frame);
         flight.last_frame = now;
+        if self.flight_readiness() == Readiness::Any {
+            flight.elapsed += since_last_frame;
+        } else if self.frame_ready {
+            flight.elapsed += since_last_frame.min(MAX_WAITING_STEP);
+        } else {
+            self.flight = Some(flight); //Waits for the frame
+            return;
+        }
         let elapsed = flight.elapsed;
         if flight.flight.arrived(elapsed) {
             self.arrive_at(&flight.point);

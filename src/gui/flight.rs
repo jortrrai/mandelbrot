@@ -73,6 +73,31 @@ impl Pace {
     }
 }
 
+/// How complete the frames of a flight have to be before the camera moves on
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlightRendering {
+    /// The camera follows the clock, and the screen shows whatever the render has so far (the image moved and scaled, with black where nothing is rendered yet)
+    BestEffort,
+    /// The camera waits for a complete low-resolution frame (a preview of the whole view, or a full layer)
+    LowRes,
+    /// The camera waits for a full-resolution frame (the first layer): sharp all the way, slow where the view is expensive
+    MaxQuality,
+}
+
+impl FlightRendering {
+    /// Every mode, in the order of the drop-down
+    pub const ALL: [FlightRendering; 3] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::MaxQuality];
+
+    /// The name in the drop-down
+    pub const fn name(self) -> &'static str {
+        match self {
+            FlightRendering::BestEffort => "Best effort",
+            FlightRendering::LowRes => "Low res",
+            FlightRendering::MaxQuality => "Max quality",
+        }
+    }
+}
+
 /// A view as the path sees it: the center and the width (the scale of the view)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {

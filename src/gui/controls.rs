@@ -3,7 +3,7 @@
 
 use eframe::egui::{self};
 
-use super::flight::{Pace, Route};
+use super::flight::{FlightRendering, Pace, Route};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
 use crate::resolution;
@@ -130,6 +130,15 @@ impl MandelbrotApp {
                     ui.selectable_value(&mut self.pace, pace, pace.name());
                 }
             }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest; using any control or the mouse stops a flight");
+            egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
+                for mode in FlightRendering::ALL {
+                    ui.selectable_value(&mut self.flight_rendering, mode, mode.name()).on_hover_text(match mode {
+                        FlightRendering::BestEffort => "The camera follows the clock; the picture fills in as the render goes",
+                        FlightRendering::LowRes => "The camera waits for a complete low-resolution frame of every view on the way",
+                        FlightRendering::MaxQuality => "The camera waits for a full-resolution frame of every view on the way: sharp, but it can crawl where the view is slow",
+                    });
+                }
+            }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
         });
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
@@ -197,6 +206,7 @@ impl MandelbrotApp {
                 self.render(&format!("Turned auto iterations off, max. iterations {}", self.max_iterations_input));
             }
         }
+        ui.checkbox(&mut self.immersion, "Immersion").on_hover_text("Never shows black where nothing is rendered yet: while you move the view, and during flights, the view only moves once the new view has at least a complete low-resolution frame. Off: the view follows at once and fills in as the render goes (best effort).");
         if ui.checkbox(&mut self.adaptive_supersampling, "Adaptive supersampling").on_hover_text("Takes the first 2 samples of every pixel, and the remaining samples only for boundary and detail pixels (and their neighbors). Faster on smooth views; a heuristic that can differ from full supersampling. Saved images always use the full saved image quality.").changed() {
             let state = if self.adaptive_supersampling { "on" } else { "off" };
             self.render(&format!("Turned adaptive supersampling {state}"));

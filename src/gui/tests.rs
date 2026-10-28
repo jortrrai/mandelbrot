@@ -1063,3 +1063,86 @@ fn cancel_stops_a_flight_where_it_is_and_skip_goes_to_the_place_at_once() {
     assert!(app.log.last().unwrap().starts_with("Moved to Test Place in"), "{:?}", app.log.last());
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn immersion_holds_the_view_until_the_new_view_has_a_complete_frame() {
+    let config = Config::build(["mandelbrot", "64", "48", "50", "2"].map(String::from).into_iter()).unwrap();
+    let mut app = manual_app(&config);
+    let full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    //Best effort: the old image moves along at once, with black where the exposed strip is not rendered yet
+    app.translate("up", 10, 0);
+    assert_ne!(app.drawn_fraction(), full);
+    wait_for_job(&mut app);
+
+    //Immersion: the screen keeps the last complete frame, unmoved, until the new view has one
+    app.immersion = true;
+    let before = app.shown_plane.get_view();
+    app.translate("up", 10, 0);
+    assert_eq!(app.drawn_fraction(), full, "no black void");
+    assert_eq!(format!("{:?}", app.displayed_plane().get_view()), format!("{before:?}"), "the view on the screen has not moved yet");
+    wait_for_job(&mut app);
+    assert_eq!(format!("{:?}", app.shown_plane.get_view()), format!("{:?}", app.c.get_view()), "it moves when the frame is there");
+
+    //Right-clicking the center of the screen while the view is held centers on what the screen shows, not on the view that is still being rendered
+    let shown_center = app.shown_plane.center();
+    app.translate("up", 10, 0);
+    app.handle_image_click(32.0, 24.0, true);
+    let center = app.c.center();
+    assert!((center.x - shown_center.x).abs() <= app.c.increment_x && (center.y - shown_center.y).abs() <= app.c.increment_y, "{center:?} {shown_center:?}");
+    wait_for_job(&mut app);
+}
+
+#[test]
+fn a_frame_is_only_shown_when_it_is_complete_enough() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    let ctx = egui::Context::default();
+    let colors = |value: u8| vec![TrueColor::new(value, value, value); 64 * 48];
+    let show = |app: &mut MandelbrotApp, pass: u8, whole: bool, value: u8| {
+        //Stands in for the running render job
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.job = Some(receiver);
+        app.frame_ready = false;
+        sender.send(JobMessage::Pass { colors: colors(value), plane: app.c.clone(), pass, total: 1, layer_time: Duration::ZERO, whole }).unwrap();
+        app.poll_job();
+        app.update_texture(&ctx);
+        (app.p.colors[0].red == value, app.frame_ready)
+    };
+    //Best effort shows everything; immersion only complete frames (a preview of the whole view, or a layer)
+    assert_eq!(show(&mut app, 0, false, 1), (true, true));
+    app.immersion = true;
+    assert_eq!(show(&mut app, 0, false, 2), (false, false), "a preview of a strip has gaps");
+    assert_eq!(show(&mut app, 0, true, 3), (true, true), "a preview of the whole view is complete");
+    //A flight in max quality waits for a full-resolution frame
+    app.immersion = false;
+    app.flight_rendering = super::flight::FlightRendering::MaxQuality;
+    app.go_to_point_of_interest(0);
+    assert_eq!(show(&mut app, 0, true, 4), (false, false));
+    assert_eq!(show(&mut app, 1, true, 5), (true, true));
+    app.job = None;
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_flight_that_waits_for_its_frames_stands_still_until_the_frame_is_there() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::MaxQuality;
+    app.go_to_point_of_interest(0);
+    let start = app.flight.as_ref().unwrap().last_frame;
+    //The first frame: the view on the screen is complete, so the camera moves by a frame and renders the new view
+    app.fly_at(start + Duration::from_millis(16));
+    let first = app.c.get_view();
+    assert!(!app.frame_ready);
+    //A second later the frame is not there yet: the camera and the flight clock wait
+    app.fly_at(start + Duration::from_secs(1));
+    assert_eq!(format!("{:?}", app.c.get_view()), format!("{first:?}"));
+    assert_eq!(app.flight.as_ref().unwrap().elapsed, Duration::from_millis(16));
+    //Once the frame is there, the camera moves on by at most one step, however long the wait was
+    wait_for_job(&mut app);
+    assert!(app.frame_ready);
+    app.fly_at(start + Duration::from_secs(3));
+    assert_eq!(app.flight.as_ref().unwrap().elapsed, Duration::from_millis(16 + 33));
+    assert_ne!(format!("{:?}", app.c.get_view()), format!("{first:?}"));
+    app.cancel_flight();
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}

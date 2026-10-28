@@ -17,9 +17,8 @@ pub(super) fn shown_fraction(shown: &ComplexPlane, wanted: &ComplexPlane) -> egu
     egui::Rect::from_min_max(egui::pos2(x(shown.min_x), y(shown.min_y)), egui::pos2(x(shown.max_x), y(shown.max_y)))
 }
 
-/// The rectangle on the screen to draw the image of `shown` in, when the image of `wanted` fills `image_rect`
-pub(super) fn shown_rect(shown: &ComplexPlane, wanted: &ComplexPlane, image_rect: egui::Rect) -> egui::Rect {
-    let fraction = shown_fraction(shown, wanted);
+/// The rectangle on the screen of `fraction` (of the image, see `shown_fraction`) when the image fills `image_rect`
+pub(super) fn rect_of(fraction: egui::Rect, image_rect: egui::Rect) -> egui::Rect {
     egui::Rect::from_min_max(image_rect.lerp_inside(fraction.min.to_vec2()), image_rect.lerp_inside(fraction.max.to_vec2()))
 }
 
@@ -63,7 +62,7 @@ mod tests {
         let anchor = old.complex_from_pixel_plane(x, y);
         let mut new = old.clone();
         zoom_around(&mut new, &anchor, 0.5);
-        let rect = shown_rect(&old, &new, egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0)));
+        let rect = rect_of(shown_fraction(&old, &new), egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0)));
         assert!((rect.width() - 2400.0).abs() < 1e-2 && (rect.height() - 1600.0).abs() < 1e-2, "zooming in by 2 doubles the old image: {rect:?}");
         //The point under the cursor stays under the cursor
         let at = rect.lerp_inside(egui::vec2((x / 1200.0) as f32, (y / 800.0) as f32));
