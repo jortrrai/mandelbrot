@@ -1,6 +1,6 @@
 [package]
 name = "mandelbrot"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 repository = "https://github.com/jortrr/mandelbrot"
 readme = "README.md"
@@ -12,12 +12,19 @@ categories = ["mathematics", "rendering", "visualization"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "clipboard", "wayland", "x11"] }
 angular-units = "0.2.4"
 chrono = "0.4.26"
-minifb =  {version = "0.25.0", default-features = false, features = ["wayland"]}
 num = "0.4.0"
 num_cpus = "1.15.0"
 png = "0.17.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 prisma = "0.1.1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[dev-dependencies]
 rand = "0.8.5"
-xkbcommon = { version = "0.7", features = ["wayland"] }

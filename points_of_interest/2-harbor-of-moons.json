@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "name": "Harbor of Moons",
+  "description": "One large dome with small moons along a long diagonal edge.",
+  "location": {
+    "center": { "real": -0.4624999999999999, "imaginary": 0.55 },
+    "scale": 0.1,
+    "max_iterations": 1000
+  },
+  "appearance": {
+    "coloring": "bernstein",
+    "color_channels": "RGB"
+  }
+}

@@ -3,54 +3,46 @@ name: Rust
 on:
   push:
     branches: [ "main", "develop" ]
+  # Every pull request, also the ones that are stacked on another branch
   pull_request:
-    branches: [ "main", "develop" ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  clippy_check:
+  clippy:
+    name: Clippy (warnings are errors)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v1
-      - run: rustup component add clippy
-      - uses: actions-rs/clippy-check@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features
-    
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      checks: write
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    # Linux and Windows run the AVX2 loops; macOS (arm64) runs the generic loops, which shows that the tests pin values and not one CPU
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets --verbose
+      - run: cargo test --verbose
 
-    - name: Run tests
-      run: cargo test --verbose
-
-  benchmark:
-    needs: [clippy_check, build]
+  docs:
+    name: Documentation (warnings are errors)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - run: rustup toolchain update nightly && rustup default nightly
-    - name: Run benchmark
-      run: cargo +nightly bench --profile release | tee output.txt
-
-    - name: Store benchmark result
-      uses: benchmark-action/github-action-benchmark@v1
-      with:
-        tool: 'cargo'
-        output-file-path: output.txt
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        auto-push: true
-        # Show alert with commit comment on detecting possible performance regression
-        alert-threshold: '200%'
-        comment-on-alert: true
-        fail-on-alert: true
-        summary-always: true
-  
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
