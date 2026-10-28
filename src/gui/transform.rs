@@ -50,7 +50,7 @@ mod tests {
         let old = plane();
         let mut new = old.clone();
         //Move the view 120 columns to the right and 80 rows up: the content goes left and down
-        rendering::translate_complex_plane_by_pixels(&mut new, 80, 120);
+        rendering::move_complex_plane_by_pixels(&mut new, 80, 120);
         let (dx, dy) = (120.0 / 1200.0, 80.0 / 800.0);
         assert_close(shown_fraction(&old, &new), egui::Rect::from_min_max(egui::pos2(-dx, dy), egui::pos2(1.0 - dx, 1.0 + dy)));
     }
@@ -84,9 +84,9 @@ mod tests {
     fn several_moves_add_up_to_one_shift_of_the_buffer() {
         let old = plane();
         let mut new = old.clone();
-        rendering::translate_complex_plane_by_pixels(&mut new, 3, -7);
+        rendering::move_complex_plane_by_pixels(&mut new, 3, -7);
         assert_eq!(rendering::pixel_shift(&old, &new), Some((3, 7)), "the same shift that a drag gives `render_moved`");
-        rendering::translate_complex_plane_by_pixels(&mut new, -10, 25);
+        rendering::move_complex_plane_by_pixels(&mut new, -10, 25);
         assert_eq!(rendering::pixel_shift(&old, &new), Some((-7, -18)));
         assert_eq!(rendering::pixel_shift(&old, &old), Some((0, 0)));
         let mut zoomed = old.clone();

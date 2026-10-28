@@ -231,6 +231,17 @@ impl MandelbrotApp {
                 self.render(&format!("Turned auto iterations off, max. iterations {}", self.max_iterations_input));
             }
         }
+        match &self.gpu {
+            Some(gpu) => {
+                if ui.checkbox(&mut self.use_gpu, "Use the GPU").on_hover_text(format!("{} helps with the slow parts of a render. It computes bit for bit the same samples as the CPU (checked when the window opened), so the image is the same.", gpu.name())).changed() {
+                    self.log(format!("Turned the GPU {}", if self.use_gpu { "on" } else { "off" }));
+                }
+            }
+            None => {
+                let text = if self.gpu_opening.is_some() { "Opening the GPU..." } else { "No GPU (see the status log)" };
+                ui.add_enabled(false, egui::Checkbox::new(&mut false, text));
+            }
+        }
         ui.checkbox(&mut self.immersion, "Immersion").on_hover_text("Never shows black where nothing is rendered yet: while you move the view, and during flights, the view only moves once the new view has at least a complete low-resolution frame. Off: the view follows at once and fills in as the render goes (best effort).");
         if ui.checkbox(&mut self.adaptive_supersampling, "Adaptive supersampling").on_hover_text("Takes the first 2 samples of every pixel, and the remaining samples only for boundary and detail pixels (and their neighbors). Faster on smooth views; a heuristic that can differ from full supersampling. Saved images always use the full saved image quality.").changed() {
             let state = if self.adaptive_supersampling { "on" } else { "off" };

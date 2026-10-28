@@ -94,7 +94,7 @@ fn main() {
         let mut buffer = PixelBuffer::new(PixelPlane::new(WIDTH, HEIGHT));
         buffer.colors.copy_from_slice(&full);
         buffer.translate_buffer(rows_up, columns_right);
-        rendering::translate_complex_plane_by_pixels(&mut plane, rows_up as i16, -(columns_right as i16));
+        rendering::move_complex_plane_by_pixels(&mut plane, rows_up as i64, -(columns_right as i64));
         let region = ExposedRegion::from_shift(WIDTH, HEIGHT, rows_up, columns_right).expect("a small shift");
         let mut last = Vec::new();
         Render::new(&plane, &set, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(2).only(&region, &buffer.colors).run( |colors, _| {
@@ -104,11 +104,6 @@ fn main() {
         report(&format!("move {name}"), colors_checksum(&last));
     }
 
-    //Centering the view on a point
-    let mut centered = plane(seahorse, WIDTH, HEIGHT);
-    let shift = rendering::center_complex_plane_on(&mut centered, &mandelbrot::complex::Complex::new(-0.7498, -0.0204));
-    report("center_complex_plane_on shift", fnv(shift.0.to_le_bytes().into_iter().chain(shift.1.to_le_bytes())));
-    report("center_complex_plane_on view", fnv(format!("{:?}", centered.get_view()).bytes()));
 
     //The old non-progressive render path (used when saving at another scale), with its progress printed to the terminal
     let mut old_buffer = PixelBuffer::new(PixelPlane::new(64, 48));
