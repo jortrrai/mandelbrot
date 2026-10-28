@@ -346,7 +346,7 @@ impl MandelbrotApp {
         }
     }
 
-    /// The frame of the flight at `now`: a quick render of the view on the way (like a frame of a gesture), or the point itself on arrival
+    /// The frame of the flight at `now`: a render of the view on the way (with the steady limit of a gesture, towards the full quality until the next frame interrupts it), or the point itself on arrival
     ///
     /// With a flight rendering that waits for frames (or immersion), the camera only moves on once the frame of its current view is complete enough, and then by at
     /// most `MAX_WAITING_STEP`: the flight clock stands still while it waits, so a slow view makes a slow, smooth crawl instead of jumps.
@@ -385,8 +385,9 @@ impl MandelbrotApp {
             self.flight = Some(flight);
             return;
         }
-        let all_layers = self.flight_rendering == super::flight::FlightRendering::SuperSampled;
-        self.start_render_as(&format!("Flying to {}", flight.point.name), false, true, all_layers);
+        //Every frame renders towards the full quality: the next frame interrupts it when the camera moves on, so a frame gets as many layers as the time allows
+        //(super sampled waits for all of them before the camera moves, see `fly_at`)
+        self.start_render_as(&format!("Flying to {}", flight.point.name), super::render_job::RenderKind::FlightFrame);
         self.flight = Some(flight);
     }
 

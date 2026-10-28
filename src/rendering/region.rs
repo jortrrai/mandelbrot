@@ -1,6 +1,6 @@
 //! The part of an image that has to be rendered again after a move, and the moves of the complex plane by whole pixels.
 
-use crate::{complex::Complex, complex_plane::ComplexPlane};
+use crate::complex_plane::ComplexPlane;
 
 /// The pixels of a buffer that have to be rendered again after the buffer was shifted with `PixelBuffer::translate_buffer`:
 ///
@@ -45,33 +45,11 @@ impl ExposedRegion {
     }
 }
 
-/// Moves the complex plane `c` so it is centered on `new_center`, without rendering anything.
-/// Returns the `(rows_up, columns_right)` to shift the pixel buffer with `PixelBuffer::translate_buffer`.
-pub fn center_complex_plane_on(c: &mut ComplexPlane, new_center: &Complex) -> (i128, i128) {
-    let mut translation: Complex = new_center.subtract(&c.center());
-    //Mirror the y translation because the screen y is mirrored compared to the complex plane y axis
-    translation.y = -translation.y;
-    c.translate(translation.x, 0.0);
-    let columns = -c.real_to_pixels(translation.x);
-    c.translate(0.0, translation.y);
-    let rows = -c.imaginary_to_pixels(translation.y);
-    (i128::from(rows), i128::from(columns))
-}
-
 /// Moves the complex plane `c` up by `rows_up` and right by `columns_right` whole pixels (any distance), without rendering anything.
 ///
 /// After the move the plane is the old plane shifted by whole pixels, see `pixel_shift`.
 pub fn move_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i64, columns_right: i64) {
     c.translate(columns_right as f64 * c.increment_x, -(rows_up as f64) * c.increment_y);
-}
-
-/// Moves the complex plane `c` up by `rows_up` and right by `columns_right` pixels, without rendering anything.
-///
-/// Each distance is taken modulo 256 pixels (`as u8`): a move of 256 pixels moves by 0 and one of 300 by 44. The window only moves by small steps.
-pub fn translate_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i16, columns_right: i16) {
-    let row_sign: f64 = if rows_up > 0 {-1.0} else {1.0};
-    let column_sign: f64 = if columns_right > 0 {1.0} else {-1.0};
-    c.translate(column_sign*c.pixels_to_real(columns_right.unsigned_abs() as u8), row_sign*c.pixels_to_imaginary(rows_up.unsigned_abs() as u8)); 
 }
 
 /// The shift of the buffer that turns the image of `shown` into the image of `wanted`, if `wanted` is `shown` moved by whole pixels.
