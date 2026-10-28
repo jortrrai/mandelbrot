@@ -21,6 +21,10 @@ png = "0.17.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 prisma = "0.1.1"
+wgpu = "30"
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
 
 [profile.release]
 lto = "fat"

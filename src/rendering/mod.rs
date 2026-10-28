@@ -8,13 +8,14 @@
 
 mod adaptive;
 mod buffer;
+pub mod gpu;
 mod jitter;
 mod progressive;
 mod region;
 mod state;
 
 pub use adaptive::{adaptive_mask, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
-pub use buffer::render_complex_plane_into_buffer;
+pub use buffer::{render_complex_plane_into_buffer, render_complex_plane_into_buffer_with_gpu};
 pub use progressive::{Render, PREVIEW_BLOCKS};
 pub use region::{move_complex_plane_by_pixels, pixel_shift, ExposedRegion};
 pub use state::SampleState;
