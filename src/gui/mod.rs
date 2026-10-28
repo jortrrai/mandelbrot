@@ -70,6 +70,22 @@ fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: ColorChannelMapping) -> Ve
     rgb
 }
 
+/// The part of a texture that covers the whole image
+const FULL_TEXTURE: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+
+/// The texture of a coarse preview with blocks of `block` x `block` pixels: one texel per block, with the color of its top-left pixel (the pixel whose sample the block shows),
+/// and the part of the texture to draw over the whole image. That part puts the center of every texel on the center of its pixel, so a smoothly scaled preview is not shifted.
+fn coarse_texture(colors: &[TrueColor], mapping: ColorChannelMapping, width: usize, height: usize, block: usize) -> (ColorImage, egui::Rect) {
+    let (columns, rows) = (width.div_ceil(block), height.div_ceil(block));
+    let samples: Vec<TrueColor> = (0..rows).flat_map(|row| (0..columns).map(move |column| colors[row * block * width + column * block])).collect();
+    let image = ColorImage::from_rgb([columns, rows], &colors_to_rgb_bytes(&samples, mapping));
+    //Screen pixel x shows texture coordinate (x / block + offset) / columns; the offset maps the center of pixel `i * block` to the center of texel `i`
+    let offset = 0.5 - 0.5 / block as f32;
+    let uv = |pixels: usize, texels: usize| (offset / texels as f32, (pixels as f32 / block as f32 + offset) / texels as f32);
+    let ((left, right), (top, bottom)) = (uv(width, columns), uv(height, rows));
+    (image, egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom)))
+}
+
 /// The state of the window: the view that is shown, the settings of the render, the render job that is running, the points of interest with their thumbnails and the status log
 #[allow(clippy::struct_excessive_bools)] // The flags are independent switches of the window
 pub struct MandelbrotApp {
@@ -124,6 +140,12 @@ pub struct MandelbrotApp {
     log: Vec<String>,
     texture: Option<TextureHandle>,
     texture_outdated: bool,
+    /// The part of the texture that covers the image: all of it, except for a coarse preview, see `coarse_texture`
+    texture_uv: egui::Rect,
+    /// The block size of the preview that the colors of `p` show, 1 for a full layer: a coarse preview is uploaded small and scaled up smoothly
+    preview_block: usize,
+    /// How many previews the running render has shown, to know the block size of the next one (`rendering::PREVIEW_BLOCKS`)
+    previews_received: usize,
     /// The view that the colors of `p` show. It differs from `c` while the render of a new view has not shown its first layer yet: the image is then drawn moved and scaled, see `transform`
     shown_plane: ComplexPlane,
     /// The receiving end of the running background rendering job, if any. While a job runs, the controls are disabled.
@@ -193,6 +215,9 @@ impl MandelbrotApp {
             log: Vec::new(),
             texture: None,
             texture_outdated: true,
+            texture_uv: FULL_TEXTURE,
+            preview_block: 1,
+            previews_received: 0,
             shown_plane,
             job: None,
             progress: None,
@@ -239,11 +264,17 @@ impl MandelbrotApp {
         if !self.texture_outdated && self.texture.is_some() {
             return;
         }
-        let rgb = colors_to_rgb_bytes(&self.p.colors, self.p.color_channel_mapping);
-        let image = ColorImage::from_rgb([self.p.pixel_plane.width, self.p.pixel_plane.height], &rgb);
+        let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
+        let (image, uv, options) = if self.preview_block > 1 {
+            let (image, uv) = coarse_texture(&self.p.colors, self.p.color_channel_mapping, width, height, self.preview_block);
+            (image, uv, TextureOptions::LINEAR)
+        } else {
+            (ColorImage::from_rgb([width, height], &colors_to_rgb_bytes(&self.p.colors, self.p.color_channel_mapping)), FULL_TEXTURE, TextureOptions::NEAREST)
+        };
+        self.texture_uv = uv;
         match &mut self.texture {
-            Some(texture) => texture.set(image, TextureOptions::NEAREST),
-            None => self.texture = Some(ctx.load_texture("mandelbrot", image, TextureOptions::NEAREST)),
+            Some(texture) => texture.set(image, options),
+            None => self.texture = Some(ctx.load_texture("mandelbrot", image, options)),
         }
         self.texture_outdated = false;
     }
@@ -260,7 +291,7 @@ impl MandelbrotApp {
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         //The image of the last render, at its place in the current view (the whole rectangle when they are the same view)
         let target = transform::shown_rect(&self.shown_plane, &self.c, rect);
-        ui.painter_at(rect).image(texture.id(), target, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        ui.painter_at(rect).image(texture.id(), target, self.texture_uv, Color32::WHITE);
         self.handle_image_pointer(ui, &response, size);
         available
     }

@@ -80,6 +80,10 @@ impl MandelbrotApp {
                     self.shown_plane = plane;
                     self.texture_outdated = true;
                     self.layer_shown = pass > 0;
+                    //A preview of the whole view is uploaded small and scaled up smoothly; a preview of a strip sits next to sharp pixels, so it stays sharp
+                    let whole_view = self.bars.as_ref().is_some_and(|bars| bars.pixels_total == self.p.pixel_plane.width * self.p.pixel_plane.height);
+                    self.preview_block = if pass == 0 && whole_view { rendering::PREVIEW_BLOCKS.get(self.previews_received).copied().unwrap_or(1) } else { 1 };
+                    self.previews_received += usize::from(pass == 0);
                     if pass == 0 {
                         continue; //A preview is not a layer: the progress and the layer times are not changed
                     }
@@ -177,6 +181,7 @@ impl MandelbrotApp {
         //Whether the screen already shows a full layer of this view (e.g. the last render of a gesture): then previews would only make it coarser again
         let layer_on_screen = self.layer_shown && transform::pixel_shift(&self.shown_plane, &self.c) == Some((0, 0));
         self.layer_shown = false;
+        self.previews_received = 0;
         let (sender, receiver) = mpsc::channel();
         let (c, mut p) = (self.c.clone(), self.p.clone());
         let adaptive = self.adaptive_supersampling.then(rendering::AdaptiveSampling::default);

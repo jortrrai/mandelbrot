@@ -11,8 +11,8 @@ use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, 
 /// The largest `max_iterations` for which `Render::run` precomputes the color of every iteration count
 const MAX_COLOR_TABLE_ITERATIONS: u32 = 200_000;
 
-/// The block sizes of the preview levels, coarse to fine, see [`Render::preview`]
-const PREVIEW_BLOCKS: [usize; 3] = [8, 4, 2];
+/// The block sizes of the preview levels, coarse to fine, see [`Render::preview`]. The levels are always reported in this order, starting with the first; a render can stop reporting after any level
+pub const PREVIEW_BLOCKS: [usize; 3] = [8, 4, 2];
 /// Only pixels in the rows and columns that are multiples of this get a preview sample
 const SMALLEST_BLOCK: usize = PREVIEW_BLOCKS[PREVIEW_BLOCKS.len() - 1];
 

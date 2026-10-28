@@ -110,6 +110,7 @@ impl MandelbrotApp {
         self.p = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(size.width, size.height));
         self.p.color_channel_mapping = mapping;
         self.shown_plane = self.c.clone();
+        self.preview_block = 1;
         self.texture_outdated = true;
         self.render(&format!("Resized the view to {size} pixels"));
     }
