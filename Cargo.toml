@@ -1,6 +1,6 @@
 [package]
 name = "mandelbrot"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 repository = "https://github.com/jortrr/mandelbrot"
 readme = "README.md"

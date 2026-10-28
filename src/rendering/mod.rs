@@ -14,7 +14,7 @@ mod region;
 
 pub use adaptive::{adaptive_mask, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 pub use buffer::render_complex_plane_into_buffer;
-pub use progressive::Render;
+pub use progressive::{Render, PREVIEW_BLOCKS};
 pub use region::{center_complex_plane_on, translate_complex_plane_by_pixels, ExposedRegion};
 
 /// The amount of threads that rendering functions use: all logical CPU threads except one, which is left free for the rest of the system and the GUI, but at least one
