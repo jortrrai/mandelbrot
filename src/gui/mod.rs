@@ -322,9 +322,9 @@ impl MandelbrotApp {
 /// How complete a frame of a render is, or has to be before the screen shows it
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Readiness {
-    /// Anything: a preview of only the pixels a move exposed, with gaps
+    /// Anything (no frame needs to wait)
     Any,
-    /// A complete low-resolution frame: a preview of the whole view, or a full layer
+    /// A complete low-resolution frame: a preview (of the whole view, or of the pixels a move exposed next to the ones it kept), or a full layer
     Complete,
     /// A full-resolution frame: a full layer
     FullResolution,

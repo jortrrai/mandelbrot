@@ -537,3 +537,37 @@ fn any_sequence_of_moves_and_interruptions_ends_in_the_complete_image() {
         }
     }
 }
+
+#[test]
+fn a_preview_of_the_strip_a_move_exposed_has_no_gaps() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let mut state = SampleState::new();
+    let _ = resumed(&mut state, &c, &m, 2, None, None, None);
+    //Moves that expose strips at every edge, some not aligned to the 8 x 8 blocks of the coarsest preview
+    for (rows_up, columns_right) in [(0, 5), (0, -5), (3, 0), (-3, 0), (2, -7)] {
+        let mut moved = state.plane().unwrap().clone();
+        translate_complex_plane_by_pixels(&mut moved, rows_up, columns_right);
+        let mut previews = Vec::new();
+        let completed = Render::new(&moved, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(2).resume(&mut state).preview(Some(std::time::Duration::ZERO)).run(|colors, pass| {
+            if pass == 0 {
+                previews.push(colors.to_vec());
+            }
+        });
+        assert!(completed && !previews.is_empty(), "{rows_up}, {columns_right}");
+        //Every exposed pixel of a coarse preview shows the first sample of a pixel of its block, never the black of a gap (the pixels that kept their samples show their own colors)
+        let exposed = ExposedRegion::from_shift(w, h, i128::from(rows_up), -i128::from(columns_right)).unwrap();
+        for (level, preview) in previews.iter().enumerate() {
+            let block = PREVIEW_BLOCKS[level];
+            let firsts: Vec<(u8, u8, u8)> = (0..w * h).map(|index| (state.first[index].red, state.first[index].green, state.first[index].blue)).collect();
+            for y in 0..h {
+                for x in (0..w).filter(|x| exposed.contains(*x, y)) {
+                    let color = (preview[y * w + x].red, preview[y * w + x].green, preview[y * w + x].blue);
+                    let (left, top) = (x - x % block, y - y % block);
+                    let in_block = (top..(top + block).min(h)).any(|by| (left..(left + block).min(w)).any(|bx| firsts[by * w + bx] == color));
+                    assert!(in_block, "move ({rows_up}, {columns_right}), block {block}: ({x}, {y}) shows {color:?}, not a first sample of its block");
+                }
+            }
+        }
+    }
+}

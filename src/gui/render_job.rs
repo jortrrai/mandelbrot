@@ -80,7 +80,8 @@ impl MandelbrotApp {
                     let preview_block = if pass == 0 && whole { rendering::PREVIEW_BLOCKS.get(self.previews_received).copied().unwrap_or(1) } else { 1 };
                     self.previews_received += usize::from(pass == 0);
                     //A frame that is not complete enough is not shown: the screen keeps the last one that was (immersion, flight rendering)
-                    let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::FullResolution } else if whole { Readiness::Complete } else { Readiness::Any };
+                    //Every preview is complete: a block with pixels without samples always shows one of their samples, also in the strip a move exposed (see `Render::preview`)
+                    let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::FullResolution } else { Readiness::Complete };
                     //(a layer that is held back still counts for the progress bar below)
                     if readiness >= self.required_readiness() {
                         self.frame_ready = true;

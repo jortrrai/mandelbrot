@@ -1110,8 +1110,8 @@ fn a_frame_is_only_shown_when_it_is_complete_enough() {
     //Best effort shows everything; immersion only complete frames (a preview of the whole view, or a layer)
     assert_eq!(show(&mut app, 0, false, 1), (true, true));
     app.immersion = true;
-    assert_eq!(show(&mut app, 0, false, 2), (false, false), "a preview of a strip has gaps");
-    assert_eq!(show(&mut app, 0, true, 3), (true, true), "a preview of the whole view is complete");
+    assert_eq!(show(&mut app, 0, false, 2), (true, true), "a low-resolution preview of only the exposed strip is complete too");
+    assert_eq!(show(&mut app, 0, true, 3), (true, true), "and so is a preview of the whole view");
     //A flight in max quality waits for a full-resolution frame
     app.immersion = false;
     app.flight_rendering = super::flight::FlightRendering::MaxQuality;
