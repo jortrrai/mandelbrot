@@ -142,29 +142,24 @@ fn moved_after_a_complete_render(config: &Config, view: Option<&View>, rows_up: 
 
 #[test]
 fn an_interrupted_render_keeps_its_completed_layers_when_the_view_moves() {
-    //A slow render, so it can be caught between its layers
-    let config = Config::build(["mandelbrot", "400", "300", "5000", "8"].map(String::from).into_iter()).unwrap();
-    let view = View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002);
+    //A finished render of 2 layers leaves exactly the samples of a render of 8 layers that was interrupted after 2 (the renderer tests also interrupt in the middle
+    //of a layer); this way the test does not depend on catching a running render, which is slow on some machines and too fast on others
+    let config = Config::build(["mandelbrot", "96", "64", "300", "8"].map(String::from).into_iter()).unwrap();
+    let view = View::new(-0.7498100000000001, -0.020300000000000054, 0.004);
     let mut app = manual_app(&config);
     app.c.set_view(&view);
-    app.render("The view");
-    let start = std::time::Instant::now();
-    while app.progress.as_ref().is_some_and(|progress| progress.pass < 2) {
-        assert!(start.elapsed() < Duration::from_secs(60));
-        std::thread::sleep(Duration::from_millis(1));
-        app.poll_job();
-    }
-    assert!(app.is_busy(), "the render is interrupted after {} of 8 layers", app.progress.as_ref().map_or(8, |progress| progress.pass));
+    app.supersampling_amount = 2;
+    app.render("Two layers");
+    wait_for_job(&mut app);
 
-    //Moving interrupts it; the pixels that stay visible continue from the samples they have (2 layers or more, and part of the next one)
+    //Back to 8 layers and a move: the pixels that stay visible continue from their 2 samples
+    app.supersampling_amount = 8;
     app.translate("up", 10, 0);
     wait_for_job(&mut app);
     let message = app.log.last().unwrap().clone();
-    assert!(message.starts_with("Moved up 10 pixels (continued the samples of 116000 pixels) in "), "{message}");
+    assert!(message.starts_with(&format!("Moved up 10 pixels (continued the samples of {} pixels) in ", 96 * (64 - 10))), "{message}");
     //And the result is exactly the image of a render that was not interrupted, moved the same way
-    let expected = moved_after_a_complete_render(&config, Some(&view), 10, 0);
-    let differing: Vec<(usize, usize)> = (0..400 * 300).filter(|i| app.p.pixels[*i] != expected[*i]).map(|i| (i % 400, i / 400)).collect();
-    assert!(differing.is_empty(), "{} pixels differ, the first: {:?}, rows {:?}", differing.len(), &differing[..differing.len().min(10)], differing.iter().map(|(_, y)| *y).min().zip(differing.iter().map(|(_, y)| *y).max()));
+    assert_eq!(app.p.pixels, moved_after_a_complete_render(&config, Some(&view), 10, 0));
 }
 
 #[test]
