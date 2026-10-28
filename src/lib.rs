@@ -65,10 +65,10 @@ pub mod thumbnails;
 /// A function that colors a pixel from its iteration count and the maximum iterations, e.g. `TrueColor::new_from_bernstein_polynomials`
 type ColoringFunction = fn(iterations: u32, max_iterations: u32) -> TrueColor;
 /// The coloring that the window starts with
-static COLORING_FUNCTION: ColoringFunction = TrueColor::new_from_bernstein_polynomials;
+const COLORING_FUNCTION: ColoringFunction = TrueColor::new_from_bernstein_polynomials;
 
 /// The color channel mapping that the window starts with
-static COLOR_CHANNEL_MAPPING: ColorChannelMapping = ColorChannelMapping::RGB;
+const COLOR_CHANNEL_MAPPING: ColorChannelMapping = ColorChannelMapping::RGB;
 
 /// Runs the application: prints the banner, then opens the window and runs its event loop until it is closed.
 /// Everything except reading the configuration and reporting errors, which `main` does.
