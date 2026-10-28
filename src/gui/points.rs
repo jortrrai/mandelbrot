@@ -25,8 +25,91 @@ pub(super) struct PointFlight {
     pub(super) elapsed: Duration,
     pub(super) last_frame: Instant,
     pub(super) point: PointOfInterest,
+    /// With auto iterations: the limits of the frames on the way
+    pub(super) limits: Option<FlightLimits>,
 }
 
+/// The iteration limits of a flight with auto iterations: for every frame the zoom rule of the preset (`AutoIterationSettings::initial_limit`) times a factor.
+///
+/// The zoom rule is only the starting value of auto iterations: at a deep place the probes often raise the limit by a factor 10 or more. So the factor is what auto
+/// iterations chose at the start of the flight (its limit over the zoom rule there), and what the probes choose for the destination (run in the background when
+/// the flight starts), blended by the zoom between the two. A frame at the zoom of the start or the destination gets exactly that limit, so the arrival does not jump.
+pub(super) struct FlightLimits {
+    /// The scale and the factor at the start
+    start: (f64, f64),
+    /// The scale of the destination, and its factor once its probes are done
+    destination_scale: f64,
+    destination_factor: Option<f64>,
+    /// The limit that the probes choose for the destination, when they are done
+    pending: Option<std::sync::mpsc::Receiver<u32>>,
+}
+
+impl FlightLimits {
+    /// The limit for a frame at `scale`, with the zoom rule of `settings`
+    pub(super) fn limit_at(&mut self, scale: f64, settings: &crate::auto_iterations::AutoIterationSettings) -> u32 {
+        if let Some(limit) = self.pending.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
+            self.destination_factor = Some(f64::from(limit) / f64::from(settings.initial_limit(self.destination_scale)));
+            self.pending = None;
+        }
+        let (start_scale, start_factor) = self.start;
+        let factor = match self.destination_factor {
+            Some(destination_factor) => {
+                //How far the zoom is from the start to the destination (0 to 1, on a logarithmic scale): geometric between the two factors
+                let span = (self.destination_scale / start_scale).ln();
+                let t = if span.abs() < 1e-12 { 1.0 } else { ((scale / start_scale).ln() / span).clamp(0.0, 1.0) };
+                start_factor * (destination_factor / start_factor).powf(t)
+            }
+            None => start_factor,
+        };
+        (f64::from(settings.initial_limit(scale)) * factor).round().clamp(1.0, f64::from(u32::MAX)) as u32
+    }
+
+    /// Waits until the probes of the destination are done (in tests)
+    #[cfg(test)]
+    pub(super) fn wait_for_destination(&mut self) {
+        if let Some(limit) = self.pending.as_ref().and_then(|receiver| receiver.recv().ok()) {
+            //Put it back for the next frame to take
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let _ = sender.send(limit);
+            self.pending = Some(receiver);
+        }
+    }
+}
+
+
+/// Where the points of interest are on the screen when the view `plane` fills `image_rect`: the name and the position of every point inside the image
+pub(super) fn marker_positions(points: &[PointOfInterest], plane: &ComplexPlane, image_rect: egui::Rect) -> Vec<(String, egui::Pos2)> {
+    let (width, height) = ((plane.length_x / plane.increment_x).round(), (plane.length_y / plane.increment_y).round());
+    points.iter().filter_map(|point| {
+        //The pixel of the point (see `ComplexPlane::complex_from_pixel_plane`: the screen y is the negative of the imaginary part)
+        let x = (point.location.real - plane.min_x) / plane.increment_x;
+        let y = (-point.location.imaginary - plane.min_y) / plane.increment_y;
+        let position = image_rect.lerp_inside(egui::vec2((x / width) as f32, (y / height) as f32));
+        image_rect.contains(position).then(|| (point.name.clone(), position))
+    }).collect()
+}
+
+/// Draws the markers of `marker_positions`: small, semi-transparent circles with a soft glow and the names next to them, subtle so they do not hide the fractal
+pub(super) fn draw_markers(painter: &egui::Painter, markers: &[(String, egui::Pos2)]) {
+    let glow = |alpha: u8| Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+    for (name, position) in markers {
+        //The glow: wide, faint circles around a small core
+        for (radius, alpha) in [(10.0, 10), (7.0, 18), (5.0, 30)] {
+            painter.circle_filled(*position, radius, glow(alpha));
+        }
+        painter.circle_filled(*position, 3.0, glow(150));
+        painter.circle_stroke(*position, 3.0, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 90)));
+        //The name, with a faint shadow so it can be read on light and dark parts of the fractal
+        let (anchor, font) = (*position + egui::vec2(9.0, -1.0), egui::FontId::proportional(12.0));
+        painter.text(anchor + egui::vec2(1.0, 1.0), egui::Align2::LEFT_CENTER, name, font.clone(), Color32::from_rgba_unmultiplied(0, 0, 0, 140));
+        painter.text(anchor, egui::Align2::LEFT_CENTER, name, font, Color32::from_rgba_unmultiplied(255, 255, 255, 190));
+    }
+}
+
+/// The zoom of a point of interest as the list shows it, like the zoom of the current view (see `status::format_zoom`)
+pub(super) fn point_zoom_text(point: &PointOfInterest) -> String {
+    format!("Zoom {}", super::status::format_zoom(1.0 / point.location.scale))
+}
 
 /// The thumbnail that is being rendered on a background thread
 pub(super) struct ThumbnailJob {
@@ -152,6 +235,8 @@ impl MandelbrotApp {
                     }
                 }
                 painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 2.0), egui::Align2::LEFT_TOP, &point.name, egui::FontId::proportional(14.0), ui.visuals().strong_text_color());
+                //The zoom of the place, before it is clicked: a deep place can take long to render
+                painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 22.0), egui::Align2::LEFT_TOP, point_zoom_text(point), egui::FontId::proportional(12.0), ui.visuals().weak_text_color());
                 let response = if point.description.is_empty() { response } else { response.on_hover_text(&point.description) };
                 if response.clicked() {
                     frame.chosen = Some(index);
@@ -182,8 +267,31 @@ impl MandelbrotApp {
         let reset = Camera { x: reset_plane.center().x, y: reset_plane.center().y, scale: reset_plane.get_scale() };
         let flight = Flight::new(from, to, self.route, self.pace, reset);
         self.log(format!("Flying to {} ({}, {}, {:.1} s)", point.name, self.route.name(), self.pace.name(), flight.duration().as_secs_f64()));
-        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point });
+        let limits = self.auto_iterations.then(|| self.flight_limits(to));
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point, limits });
         self.frame_ready = true; //The view on the screen is where the flight starts
+    }
+
+    /// The limits of a flight to `destination` with auto iterations, see `FlightLimits`: the factor of the current view, and the probes of the destination started in the background
+    /// (on half the render threads, so the first frames of the flight still render), exactly as the render on arrival runs them
+    fn flight_limits(&self, destination: Camera) -> FlightLimits {
+        let start_scale = self.c.get_scale();
+        let start = (start_scale, f64::from(self.m.max_iterations) / f64::from(self.auto_settings.initial_limit(start_scale)));
+        let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
+        let mut plane = ComplexPlane::new(width, height);
+        plane.set_view(&destination.view());
+        let (settings, mut m) = (self.auto_settings.clone(), self.m.clone());
+        let destination_scale = plane.get_scale();
+        let initial = settings.initial_limit(destination_scale);
+        (m.max_iterations, m.palette_scale) = (initial, Some(initial));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let threads = (crate::rendering::render_thread_count() / 2).max(1);
+            if let Some(result) = crate::auto_iterations::choose_limit(&plane, &m, width, height, &settings, threads, &AtomicBool::new(false)) {
+                let _ = sender.send(result.limit); //The flight may be over already
+            }
+        });
+        FlightLimits { start, destination_scale, destination_factor: None, pending: Some(receiver) }
     }
 
     /// Stops the flight where it is (the Cancel button): the view stays, gets a full-quality render, and the controls are free again
@@ -230,6 +338,16 @@ impl MandelbrotApp {
             return;
         }
         self.c.set_view(&flight.flight.camera_at(elapsed).view());
+        if self.auto_iterations {
+            //Auto iterations follow the zoom all the way: the limit of this frame (see `FlightLimits`), and the palette of its zoom, which is what auto iterations uses
+            let scale = self.c.get_scale();
+            let palette = self.auto_settings.initial_limit(scale);
+            let limit = match &mut flight.limits {
+                Some(limits) => limits.limit_at(scale, &self.auto_settings),
+                None => palette,
+            };
+            (self.m.max_iterations, self.m.palette_scale) = (limit, Some(palette));
+        }
         let all_layers = self.flight_rendering == super::flight::FlightRendering::SuperSampled;
         self.start_render_as(&format!("Flying to {}", flight.point.name), false, true, all_layers);
         self.flight = Some(flight);

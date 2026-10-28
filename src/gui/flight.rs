@@ -21,8 +21,8 @@ pub enum Route {
 }
 
 impl Route {
-    /// Every route, in the order of the drop-down
-    pub const ALL: [Route; 2] = [Route::ViaReset, Route::Shortest];
+    /// Every route, in the order of the drop-down (the default, see `MandelbrotApp::new`, first)
+    pub const ALL: [Route; 2] = [Route::Shortest, Route::ViaReset];
 
     /// The name in the drop-down
     pub const fn name(self) -> &'static str {
@@ -42,8 +42,8 @@ pub enum Pace {
 }
 
 impl Pace {
-    /// Every pace, in the order of the drop-down
-    pub const ALL: [Pace; 3] = [Pace::Cinematic, Pace::Normal, Pace::Fast];
+    /// Every pace, in the order of the drop-down (the default, see `MandelbrotApp::new`, first)
+    pub const ALL: [Pace; 3] = [Pace::Fast, Pace::Normal, Pace::Cinematic];
 
     /// The name in the drop-down
     pub const fn name(self) -> &'static str {
@@ -295,8 +295,8 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_via_reset_and_cinematic() {
-        assert_eq!(Route::ALL[0], Route::ViaReset);
-        assert_eq!(Pace::ALL[0], Pace::Cinematic);
+    fn the_drop_downs_list_the_defaults_first() {
+        assert_eq!(Route::ALL[0], Route::Shortest);
+        assert_eq!(Pace::ALL[0], Pace::Fast);
     }
 }
