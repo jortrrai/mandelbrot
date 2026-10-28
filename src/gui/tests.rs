@@ -382,10 +382,10 @@ fn the_application_lists_the_points_of_interest_of_the_folder_at_startup() {
     let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
-    assert_eq!(app.points.len(), 10, "the ten former views are found without a list of file names in the code");
-    assert_eq!((app.points[0].name.as_str(), app.points[9].name.as_str()), ("Frost on the Shoreline", "Sunlit Reef"), "the former View 1 first and View 10 (VIEW_0) last");
+    assert_eq!(app.points.len(), 11, "the reset view and the ten former views are found without a list of file names in the code");
+    assert_eq!((app.points[0].name.as_str(), app.points[1].name.as_str(), app.points[10].name.as_str()), ("Reset View", "Frost on the Shoreline", "Sunlit Reef"), "the reset view first, then the former View 1, and View 10 (VIEW_0) last");
     assert!(app.points.windows(2).all(|pair| pair[0].file_name.to_lowercase() <= pair[1].file_name.to_lowercase()), "listed by file name");
-    assert!(app.log.iter().any(|message| message.starts_with("Points of interest: 10 loaded from")));
+    assert!(app.log.iter().any(|message| message.starts_with("Points of interest: 11 loaded from")));
     assert!(!app.restore_appearance);
 }
 
@@ -1205,5 +1205,12 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_every_frame_of_a_flight() 
         assert_eq!(app.m.max_iterations, expected, "the frame is rendered with it");
     }
     assert!(limits.windows(2).all(|pair| pair[0] <= pair[1]) && limits[0] < limits[3], "zooming in raises the limit: {limits:?}");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn every_point_of_interest_shows_its_zoom_in_the_list() {
+    let (app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    assert_eq!(super::points::point_zoom_text(&app.points[0]), "Zoom \u{d7}15,625", "scale 0.000064");
     let _ = std::fs::remove_dir_all(folder);
 }
