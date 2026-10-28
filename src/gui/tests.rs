@@ -613,3 +613,45 @@ fn copy_x(app: &mut MandelbrotApp) -> f32 {
     output.drop_without_applying_deltas();
     x.expect("the Copy button is drawn")
 }
+
+/// Saves the image and returns the width and height in the header of the png that was written (the file is removed again)
+fn save_and_read_size(app: &mut MandelbrotApp) -> (u32, u32) {
+    let before = app.log.len();
+    app.save_image();
+    let start = std::time::Instant::now();
+    let saved_to = loop {
+        assert!(start.elapsed() < Duration::from_secs(60), "the image was not saved: {:?}", &app.log[before..]);
+        app.poll_job();
+        if let Some(message) = app.log[before..].iter().find(|message| message.starts_with("Saved the image to ") || message.starts_with("Could not save")) {
+            break message.clone();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let path = saved_to.strip_prefix("Saved the image to ").unwrap_or_else(|| panic!("{saved_to}")).to_string();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    (u32::from_be_bytes(bytes[16..20].try_into().unwrap()), u32::from_be_bytes(bytes[20..24].try_into().unwrap()))
+}
+
+#[test]
+fn the_saved_image_has_the_size_that_is_chosen_for_it() {
+    use super::save_size::SaveSizeChoice;
+    let config = Config::build(["mandelbrot", "64", "48", "50", "1"].map(String::from).into_iter()).unwrap();
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    assert_eq!(save_and_read_size(&mut app), (64, 48), "the command line size is the default");
+    app.save_size.choice = SaveSizeChoice::Preset(String::from("HD 720p"));
+    //A preset needs a render of its own, since the buffer shows another size
+    assert_eq!(save_and_read_size(&mut app), (1280, 720));
+    app.save_size.choice = SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height) = (80, 20);
+    assert_eq!(save_and_read_size(&mut app), (80, 20));
+    app.save_size.choice = SaveSizeChoice::View;
+    assert_eq!(save_and_read_size(&mut app), (64, 48));
+    //A size that is not allowed is refused in the status log and nothing is saved
+    app.save_size.choice = SaveSizeChoice::Custom;
+    app.save_size.custom_width = 8;
+    let before = app.log.len();
+    app.save_image();
+    assert!(app.log[before..].iter().any(|message| message.starts_with("Could not save the image: ") && message.contains("is not allowed")), "{:?}", &app.log[before..]);
+}

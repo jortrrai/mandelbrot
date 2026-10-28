@@ -5,12 +5,14 @@
 //! * `actions`: what the buttons and clicks do.
 //! * `controls`: the controls on the right.
 //! * `points`: the points of interest with their thumbnails.
+//! * `save_size`: the size of the saved image: the presets and the custom size.
 //! * `status`: the current view, the status log and the progress bar.
 
 mod actions;
 mod controls;
 mod points;
 mod render_job;
+mod save_size;
 mod status;
 #[cfg(test)]
 mod tests;
@@ -19,6 +21,7 @@ pub use status::{format_zoom, CurrentView};
 
 use self::points::{ThumbnailJob, ThumbnailMessage};
 use self::render_job::{JobMessage, Progress, RenderBars};
+use self::save_size::SaveSize;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
@@ -32,6 +35,7 @@ use crate::mandelbrot_set::MandelbrotSet;
 use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
 use crate::points_of_interest::{self, PointOfInterest};
 use crate::rendering::{self};
+use crate::resolution::{self, Resolution};
 use crate::thumbnails::{self, Lru};
 use crate::{ColoringFunction, Config, InteractionVariables, COLORING_FUNCTION, COLOR_CHANNEL_MAPPING};
 
@@ -69,6 +73,8 @@ pub struct MandelbrotApp {
     coloring_index: usize,
     supersampling_amount: u8,
     image_supersampling_amount: u8,
+    /// The size of the saved image, see `save_size`
+    save_size: SaveSize,
     /// Edited values of the max iterations field, applied when editing ends
     max_iterations_input: u32,
     /// Whether the maximum iterations are chosen automatically for the zoom of every render, see `auto_iterations`
@@ -120,6 +126,9 @@ impl MandelbrotApp {
         let mut p = PixelBuffer::new(PixelPlane::new(config.window_width, config.window_height));
         p.color_channel_mapping = COLOR_CHANNEL_MAPPING;
         let m = MandelbrotSet::new(config.max_iterations, config.orbit_radius);
+        //The tests never read or write the presets file of the user
+        let presets_path = if cfg!(test) { None } else { resolution::custom_presets_path() };
+        let (save_size, preset_warnings) = SaveSize::new(Resolution::new(config.image_width, config.image_height), presets_path);
         let (notice_sender, notices) = mpsc::channel();
         let (thumb_sender, thumb_results) = mpsc::channel();
         let mut app = MandelbrotApp {
@@ -139,6 +148,7 @@ impl MandelbrotApp {
             supersampling_amount: config.supersampling_amount,
             supersampling_input: config.supersampling_amount,
             image_supersampling_amount: config.supersampling_amount,
+            save_size,
             points: Vec::new(),
             thumbs: Lru::new(thumbnails::MAX_CACHED),
             thumb_job: None,
@@ -162,6 +172,9 @@ impl MandelbrotApp {
         };
         app.log(format!("Window: {}x{} pixels, {} CPU threads used for rendering", config.window_width, config.window_height, rendering::render_thread_count()));
         app.log(format!("Max. iterations: {}, orbit radius: {}, supersampling: {}x", config.max_iterations, config.orbit_radius, config.supersampling_amount));
+        for warning in preset_warnings {
+            app.log(warning);
+        }
         app.load_points_of_interest(points_of_interest::find_folder());
         app.render("Rendered the default view");
         app
