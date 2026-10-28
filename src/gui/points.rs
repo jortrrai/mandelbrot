@@ -387,7 +387,7 @@ impl MandelbrotApp {
         }
         //Every frame renders towards the full quality: the next frame interrupts it when the camera moves on, so a frame gets as many layers as the time allows
         //(super sampled waits for all of them before the camera moves, see `fly_at`)
-        self.start_render_as(&format!("Flying to {}", flight.point.name), false, true, true);
+        self.start_render_as(&format!("Flying to {}", flight.point.name), super::render_job::RenderKind::FlightFrame);
         self.flight = Some(flight);
     }
 

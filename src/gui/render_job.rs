@@ -23,6 +23,39 @@ const PREVIEW_WORTHWHILE: Duration = Duration::from_millis(16);
 /// The full-quality render after a drag or a wheel zoom starts when the gesture stops, or when it has not changed the view for this long (a mouse button held still)
 const GESTURE_PAUSE: Duration = Duration::from_millis(150);
 
+/// What a render is for, which decides its iteration limit, its layers, and whether the history records it
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RenderKind {
+    /// A view the window settles on: every layer, recorded in the history. With `moved` the view is the last view moved by whole pixels (an arrow, a drag,
+    /// centering on a click), so it keeps the iteration limit and continues the samples of the last render, see `render_moved`
+    Settled { moved: bool },
+    /// A frame of a drag or a wheel zoom, for a view that is about to change again: previews and the first layer only, with the iteration limit of the image that
+    /// is shown (no auto iterations probes); the full-quality render follows when the gesture stops, see `settle_gesture`
+    GestureFrame { moved: bool },
+    /// A frame of a flight to a point of interest: the iteration limit that the flight sets (see `points::fly_at`), every layer until the next frame interrupts it
+    FlightFrame,
+}
+
+impl RenderKind {
+    /// Whether the view is the last view moved by whole pixels
+    const fn moved(self) -> bool {
+        match self {
+            RenderKind::Settled { moved } | RenderKind::GestureFrame { moved } => moved,
+            RenderKind::FlightFrame => false,
+        }
+    }
+
+    /// Whether the view is about to change again (a frame of a gesture or a flight): not recorded in the history, with a steady iteration limit
+    const fn passing(self) -> bool {
+        !matches!(self, RenderKind::Settled { .. })
+    }
+
+    /// Whether every supersampling layer is rendered (all but the frames of a gesture, which render the first layer only)
+    const fn all_layers(self) -> bool {
+        !matches!(self, RenderKind::GestureFrame { .. })
+    }
+}
+
 /// A message from a rendering job that runs on a background thread
 pub(super) enum JobMessage {
     /// An intermediate image: the running average of the first `pass` of `total` supersampling layers, or a low-resolution preview of the first layer when `pass` is 0
@@ -175,23 +208,22 @@ impl MandelbrotApp {
             return;
         }
         if let Some((message, _, moved)) = self.settle.take() {
-            self.start_render_as(&message, moved, false, true);
+            self.start_render_as(&message, RenderKind::Settled { moved });
         }
     }
 
     /// Starts a render of the view on a background thread and logs `message` when it is done; `moved` is whether the view was only moved, see `render_moved`.
     /// A render that is running is interrupted first. During a drag or a wheel zoom the render is quick, see `start_render_as`.
     pub(super) fn start_render(&mut self, message: &str, moved: bool) {
-        self.start_render_as(message, moved, self.gesture_active, !self.gesture_active);
+        self.start_render_as(message, if self.gesture_active { RenderKind::GestureFrame { moved } } else { RenderKind::Settled { moved } });
     }
 
-    /// Starts a render like `start_render`. With `during_gesture` it is a quick render for a view that is about to change again: previews and the first layer only, with
-    /// the iteration limit of the image that is shown (no auto iterations probes); the full-quality render follows when the gesture stops, see `settle_gesture`.
+    /// Starts a render like `start_render`, of the `kind` that says what it is for (see `RenderKind`).
     ///
     /// Every render continues the samples of the render before it (`SampleState`): the job waits for the state of the job it interrupts, which keeps everything that
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
-    /// With `all_layers` it renders every supersampling layer even during a gesture (a flight that shows only finished frames, see `flight::FlightRendering::SuperSampled`).
-    pub(super) fn start_render_as(&mut self, message: &str, moved: bool, during_gesture: bool, all_layers: bool) {
+    pub(super) fn start_render_as(&mut self, message: &str, kind: RenderKind) {
+        let (moved, during_gesture, all_layers) = (kind.moved(), kind.passing(), kind.all_layers());
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();
         (self.frame_ready, self.frame_accepted) = (false, false);

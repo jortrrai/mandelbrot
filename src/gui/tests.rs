@@ -1305,3 +1305,21 @@ fn a_best_effort_flight_does_not_interrupt_a_render_that_has_not_shown_anything(
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn every_kind_of_render_decides_its_layers_its_limit_and_its_history() {
+    use super::render_job::RenderKind;
+    let config = Config::sized(64, 48, 50, 4);
+    let mut app = manual_app(&config);
+    let history = app.history.len();
+    for (kind, layers, recorded) in [(RenderKind::Settled { moved: false }, 4, true), (RenderKind::GestureFrame { moved: true }, 1, false), (RenderKind::FlightFrame, 4, false)] {
+        app.c.scale(0.9);
+        let before = app.history.len();
+        app.start_render_as("A render", kind);
+        assert_eq!(app.bars.as_ref().unwrap().total_layers, layers, "{kind:?}");
+        assert_eq!(app.history.len() > before, recorded, "{kind:?}");
+        assert_eq!(app.settle.is_some(), kind != RenderKind::Settled { moved: false }, "{kind:?}: a passing frame leaves a render to settle on");
+        wait_for_job(&mut app);
+    }
+    assert_eq!(app.history.len(), history + 1);
+}
