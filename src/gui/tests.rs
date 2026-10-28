@@ -287,10 +287,10 @@ fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering
 }
 
 fn app_with_points(files: &[(&str, &str)]) -> (MandelbrotApp, std::path::PathBuf) {
+    static NEXT_FOLDER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
-    static NEXT_FOLDER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let folder = std::env::temp_dir().join(format!("mandelbrot-gui-poi-{}-{}", std::process::id(), NEXT_FOLDER.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::create_dir_all(&folder).unwrap();
@@ -473,10 +473,10 @@ fn many_points(count: usize, slow: bool) -> Vec<(String, String)> {
 }
 
 fn app_with_many_points(count: usize) -> (MandelbrotApp, std::path::PathBuf) {
-    app_with_places(many_points(count, false))
+    app_with_places(&many_points(count, false))
 }
 
-fn app_with_places(files: Vec<(String, String)>) -> (MandelbrotApp, std::path::PathBuf) {
+fn app_with_places(files: &[(String, String)]) -> (MandelbrotApp, std::path::PathBuf) {
     let borrowed: Vec<(&str, &str)> = files.iter().map(|(name, text)| (name.as_str(), text.as_str())).collect();
     app_with_points(&borrowed)
 }
@@ -507,14 +507,14 @@ fn nothing_is_rendered_while_the_list_is_scrolled_or_clipped_out_of_view() {
         controls_frame(&mut app, &ctx, 100.0); //The list is below the bottom of this window
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(app.thumbs_visible.is_empty());
+    assert_eq!(app.thumbs_visible, Vec::<u64>::new());
     assert_eq!((app.thumbnails_started, app.thumbs.len()), (0, 0));
     let _ = std::fs::remove_dir_all(folder);
 }
 
 #[test]
 fn a_running_thumbnail_is_cancelled_when_it_leaves_the_view_and_when_the_main_view_renders() {
-    let (mut app, folder) = app_with_places(many_points(25, true));
+    let (mut app, folder) = app_with_places(&many_points(25, true));
     let ctx = egui::Context::default();
     controls_frame(&mut app, &ctx, 1000.0);
     let job = app.thumb_job.as_ref().expect("a visible thumbnail is rendered when the window is idle");
@@ -527,7 +527,7 @@ fn a_running_thumbnail_is_cancelled_when_it_leaves_the_view_and_when_the_main_vi
     std::thread::sleep(Duration::from_millis(100));
     controls_frame(&mut app, &ctx, 1000.0);
     let started = app.thumbnails_started;
-    let second_cancel = Arc::clone(&app.thumb_job.as_ref().map(|job| &job.cancel).expect("a thumbnail job runs again"));
+    let second_cancel = Arc::clone(app.thumb_job.as_ref().map(|job| &job.cancel).expect("a thumbnail job runs again"));
     app.render("Rendering the main view");
     assert!(second_cancel.load(Ordering::Relaxed) && app.thumb_job.is_none(), "the main view has priority");
     for _ in 0..10 {
@@ -593,7 +593,7 @@ fn the_copy_button_asks_for_the_center_and_scale_with_all_digits_to_be_copied() 
     let ctx = egui::Context::default();
     let copy = side_panel_positions(&mut app).into_iter().find(|(text, _)| text == "Copy").expect("the Copy button is drawn");
     //Clicking elsewhere copies nothing; clicking the button copies the description of the view
-    assert!(click_side_panel(&mut app, &ctx, egui::pos2(5.0, 5.0)).is_empty());
+    assert_eq!(click_side_panel(&mut app, &ctx, egui::pos2(5.0, 5.0)), Vec::<String>::new());
     let x = copy_x(&mut app);
     let copied = click_side_panel(&mut app, &ctx, egui::pos2(x, copy.1 + 4.0));
     assert_eq!(copied.len(), 1, "one click copies once: {copied:?}");

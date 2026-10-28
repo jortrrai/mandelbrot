@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn the_palettes_give_the_colors_they_always_gave() {
         let near = |actual: TrueColor, expected: (u8, u8, u8)| {
-            let (a, e) = ([actual.red, actual.green, actual.blue], [expected.0, expected.1, expected.2]);
+            let (a, e) = ([actual.red, actual.green, actual.blue], <[u8; 3]>::from(expected));
             assert!(a.iter().zip(e).all(|(a, e)| a.abs_diff(e) <= 1), "{a:?} is not near {e:?}");
         };
         //Bernstein polynomials of t = iterations / max_iterations: black at t = 0 and almost black inside the set (t = 1 is clamped to 0.999, which leaves a little red)

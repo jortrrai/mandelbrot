@@ -3,31 +3,41 @@ name: Rust
 on:
   push:
     branches: [ "main", "develop" ]
+  # Every pull request, also the ones that are stacked on another branch
   pull_request:
-    branches: [ "main", "develop" ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  clippy_check:
+  clippy:
+    name: Clippy (warnings are errors)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v1
-      - run: rustup component add clippy
-      - uses: actions-rs/clippy-check@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features
-    
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      checks: write
-    steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
 
-    - name: Run tests
-      run: cargo test --verbose
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets --verbose
+      - run: cargo test --verbose
+
+  docs:
+    name: Documentation (warnings are errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

@@ -301,7 +301,7 @@ mod tests {
         let s = AutoIterationSettings { start: 200, per_doubling: 100, minimum: 150, ceiling: 1000, ..Default::default() };
         assert_eq!(s.initial_limit(1.0), 200);
         assert_eq!(s.initial_limit(0.5), 300);
-        assert_eq!(s.initial_limit(1.0 / 1024.0), 1000 .min(200 + 1000));
+        assert_eq!(s.initial_limit(1.0 / 1024.0), 1000);
         assert_eq!(s.initial_limit(1e-30), 1000, "the ceiling holds");
         assert_eq!(s.initial_limit(100.0), 200, "zooming out never goes below the start");
         let low = AutoIterationSettings { start: 10, minimum: 150, ..s };
@@ -367,8 +367,7 @@ mod tests {
         while matches!(state, State::Unresolved) && limit < 1000 { limit = (limit * 2).min(1000); state = probe.run(&m, limit).0; }
         match state {
             State::Escaped => assert_eq!(probe.iterations, fresh),
-            State::Certified => assert_eq!(fresh, 1000),
-            State::Unresolved => assert_eq!(fresh, 1000),
+            State::Certified | State::Unresolved => assert_eq!(fresh, 1000),
         }
     }
 }

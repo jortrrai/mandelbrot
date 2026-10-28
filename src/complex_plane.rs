@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(at_scale(1e-11).precision(), Precision::Degrading);
         assert_eq!(at_scale(1e-13).precision(), Precision::Exhausted);
         //The meaning of the number: at 1 step or fewer, neighboring pixels really do share a coordinate; with room to spare, they never do
-        let distinct_columns = |plane: &ComplexPlane| (0..1199).filter(|x| plane.complex_from_pixel_plane(f64::from(*x), 0.0).x != plane.complex_from_pixel_plane(f64::from(*x + 1), 0.0).x).count();
+        let distinct_columns = |plane: &ComplexPlane| (0..1199).filter(|x| plane.complex_from_pixel_plane(f64::from(*x), 0.0).x.to_bits() != plane.complex_from_pixel_plane(f64::from(*x + 1), 0.0).x.to_bits()).count();
         assert_eq!(distinct_columns(&at_scale(1e-9)), 1199);
         assert!(at_scale(1e-15).precision_steps() < 1.0 && distinct_columns(&at_scale(1e-15)) < 1199);
     }
@@ -267,6 +267,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // `-2.0`, `0.5` and `min_y == -max_y` are exact by construction
     fn a_new_plane_shows_the_whole_set_with_the_aspect_ratio_of_the_window() {
         let plane = ComplexPlane::new(1200, 800);
         assert_eq!((plane.min_x, plane.max_x, plane.length_x), (-2.0, 0.5, 2.5));

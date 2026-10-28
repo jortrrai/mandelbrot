@@ -65,7 +65,7 @@ fn iteration_counts_of_small_views_match_pinned_checksums_on_the_scalar_and_the_
         let set = MandelbrotSet::new(view.max_iterations, 2.0);
         let scalar: Vec<u32> = points.iter().map(|point| set.iterate(point)).collect();
         let mut lanes = Vec::with_capacity(points.len());
-        for group in points.chunks_exact(LANES) {
+        for group in points.as_chunks::<LANES>().0 {
             lanes.extend_from_slice(&set.iterate_lanes(&std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y))));
         }
         assert_eq!(lanes, scalar, "{}: the lockstep (SIMD) path equals the scalar path", view.name);
