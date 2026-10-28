@@ -1,3 +1,5 @@
+//! The part of the complex plane that an image shows, and the mapping between its pixels and complex numbers.
+
 use crate::complex::Complex;
 
 /// # Complex plane
@@ -9,13 +11,13 @@ use crate::complex::Complex;
 /// ### Complex numbers
 /// In complex analysis, the complex numbers are customarily represented by the symbol z, which can be separated into its real (x) and imaginary (y) parts:
 /// \
-/// ```ignore
+/// ```text
 /// z = x + iy
 /// ```
 /// for example: z = 4 + 5i, where x and y are real numbers, and i is the imaginary unit. In this customary notation the complex number z corresponds to the point (x, y) in the Cartesian plane.
 /// \
 /// In the Cartesian plane the point (x, y) can also be represented in polar coordinates as
-/// ```ignore
+/// ```text
 /// (x, y) = (rcosθ, rsinθ)  (r, θ)= (√(x^2 + y^2), arctan(y/x))
 /// ```
 /// ### Complex plane notation ℂ
@@ -23,14 +25,22 @@ use crate::complex::Complex;
 #[derive(Clone)]
 pub struct ComplexPlane {
     // Complex plane dimensions
+    /// The smallest real part that the plane shows
     pub min_x: f64,
+    /// The largest real part that the plane shows
     pub max_x: f64,
+    /// The width of the plane on the real axis (`max_x - min_x`)
     pub length_x: f64,
+    /// The smallest `y` of the plane. The `y` bounds are stored with the orientation of the screen: the imaginary part of a point is the negative of its `y`
     pub min_y: f64,
+    /// The largest `y` of the plane, see `min_y`
     pub max_y: f64,
+    /// The height of the plane (`max_y - min_y`)
     pub length_y: f64,
     // Complex plane increments
+    /// The distance on the real axis between two neighboring pixel columns
     pub increment_x: f64,
+    /// The distance on the imaginary axis between two neighboring pixel rows
     pub increment_y: f64,
     // Pixel plane width and height
     width: usize,
@@ -84,23 +94,13 @@ impl ComplexPlane {
         c
     }
 
-    /// Prints: "Complex plane: R ∈ [{},{}] and C ∈ [{},{}]",`c.min_x`, `c.max_x`, `c.min_y`, `c.max_y`y
-    pub fn print(&self) {
-        println!("Complex plane:\tR ∈ [{},{}]", self.min_x, self.max_x);
-        println!("\t\tC ∈ [{},{}]", self.min_y, self.max_y);
-        println!(
-            "\t\tCenter is {:?} and scale is {}",
-            self.center(),
-            self.get_scale()
-        );
-    }
-
-    /// Resets the total translation and scaling applied to the Complex plane by the translate() and scale() functions
+    /// Resets the total translation and scaling applied to the Complex plane by `translate` and `scale`
     pub fn reset(&mut self) {
         *self = ComplexPlane::new(self.width, self.height);
     }
 
     //Returns the total scale applied to the Complex plane
+    /// The scale of the plane: its width on the real axis divided by 2.5, so a smaller scale is a deeper zoom and scale 1 is the starting view
     pub fn get_scale(&self) -> f64 {
         let s = self.length_x / 2.5;
         s
@@ -156,22 +156,27 @@ impl ComplexPlane {
         self.set_view_separated(view.x, view.y, view.scale);
     }
 
+    /// The distance on the imaginary axis that `amount` pixel rows cover
     pub fn pixels_to_imaginary(&self, amount: u8) -> f64 {
         f64::from(amount) * self.increment_y 
     }
 
+    /// The distance on the real axis that `amount` pixel columns cover
     pub fn pixels_to_real(&self, amount: u8) -> f64 {
         f64::from(amount) * self.increment_x
     }
 
+    /// The amount of pixel rows that an imaginary distance `value` covers, truncated toward zero (and saturated to the range of `i16`)
     pub fn imaginary_to_pixels(&self, value: f64) -> i16 {
         (value / self.increment_y) as i16
     }
 
+    /// The amount of pixel columns that a real distance `value` covers, truncated toward zero (and saturated to the range of `i16`)
     pub fn real_to_pixels(&self, value: f64) -> i16 {
         (value / self.increment_x) as i16
     }
 
+    /// The view that the plane shows now: its center and its scale
     pub fn get_view(&self) -> View {
         let center = self.center();
         let scale = self.get_scale();
@@ -179,6 +184,7 @@ impl ComplexPlane {
     }
 }
 
+/// A view of the complex plane: the center and the scale (see `ComplexPlane::get_scale`)
 pub struct View {
     x: f64,
     y: f64,
@@ -186,6 +192,7 @@ pub struct View {
 }
 
 impl View {
+    /// Creates a view with the center `x + yi` and the given scale
     pub const fn new(x: f64, y: f64, scale: f64) -> View {
         View {x,y,scale}
     }
@@ -194,5 +201,74 @@ impl View {
 impl std::fmt::Debug for View {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "z = {:?}, scale = {}", Complex::new(self.x, self.y), self.scale)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1.0)
+    }
+
+    #[test]
+    fn a_new_plane_shows_the_whole_set_with_the_aspect_ratio_of_the_window() {
+        let plane = ComplexPlane::new(1200, 800);
+        assert_eq!((plane.min_x, plane.max_x, plane.length_x), (-2.0, 0.5, 2.5));
+        assert!(close(plane.max_y, 2.5 * (800.0 / 1200.0) / 2.0) && plane.min_y == -plane.max_y);
+        assert!(close(plane.increment_x, 2.5 / 1200.0) && close(plane.increment_y, plane.length_y / 800.0));
+        assert!(close(plane.increment_x, plane.increment_y), "the pixels are square");
+        assert_eq!(plane.get_scale(), 1.0);
+    }
+
+    #[test]
+    fn pixels_map_to_complex_numbers_with_the_imaginary_axis_pointing_up() {
+        let plane = ComplexPlane::new(1200, 800);
+        let top_left = plane.complex_from_pixel_plane(0.0, 0.0);
+        assert!(close(top_left.x, -2.0) && close(top_left.y, plane.max_y), "the top of the window is the largest imaginary part");
+        let bottom_right = plane.complex_from_pixel_plane(1200.0, 800.0);
+        assert!(close(bottom_right.x, 0.5) && close(bottom_right.y, plane.min_y));
+        let middle = plane.complex_from_pixel_plane(600.0, 400.0);
+        assert!(close(middle.x, -0.75) && middle.y.abs() < 1e-15);
+    }
+
+    #[test]
+    fn a_view_is_set_and_read_back_by_its_center_and_scale() {
+        let mut plane = ComplexPlane::new(640, 480);
+        plane.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.000064));
+        let view = plane.get_view();
+        assert!(close(view.x, -0.7498100000000001) && close(view.y, -0.020300000000000054) && close(view.scale, 0.000064), "{view:?}");
+        let center = plane.center();
+        assert!(close(center.x, view.x) && close(center.y, view.y));
+        assert!(close(plane.length_x, 2.5 * 0.000064));
+        plane.reset();
+        assert_eq!((plane.get_scale(), plane.center().x), (1.0, -0.75));
+    }
+
+    #[test]
+    fn scaling_keeps_the_center_and_moving_moves_the_bounds() {
+        let mut plane = ComplexPlane::new(1200, 800);
+        let center = plane.center();
+        plane.scale(0.5);
+        assert!(close(plane.get_scale(), 0.5) && close(plane.center().x, center.x) && close(plane.center().y, center.y));
+        assert!(close(plane.increment_x, 2.5 * 0.5 / 1200.0));
+        plane.translate(0.25, -0.125);
+        assert!(close(plane.center().x, center.x + 0.25), "moving right by 0.25");
+        assert!(close(plane.center().y, center.y + 0.125), "the y bounds are stored with the screen orientation, so the imaginary part moves the other way");
+    }
+
+    #[test]
+    fn pixel_distances_convert_to_plane_distances_and_back_truncating_towards_zero() {
+        let plane = ComplexPlane::new(1200, 800);
+        assert!(close(plane.pixels_to_real(10), 10.0 * plane.increment_x) && close(plane.pixels_to_imaginary(10), 10.0 * plane.increment_y));
+        assert_eq!(plane.real_to_pixels(10.5 * plane.increment_x), 10);
+        assert_eq!(plane.real_to_pixels(-10.5 * plane.increment_x), -10);
+        assert_eq!(plane.imaginary_to_pixels(3.0 * plane.increment_y), 3);
+    }
+
+    #[test]
+    fn the_text_of_a_view_is_what_is_stored_in_the_metadata_of_saved_images() {
+        assert_eq!(format!("{:?}", View::new(-0.75, 0.1, 0.25)), "z = -0.75 + 0.1i, scale = 0.25");
     }
 }

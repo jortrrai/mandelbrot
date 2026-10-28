@@ -1,4 +1,16 @@
+//! Mandelbrot by Jort: a viewer of the Mandelbrot set with a graphical window.
+//!
+//! The modules, from the mathematics to the window:
+//! * [`complex`], [`complex_plane`]: complex numbers, and the part of the complex plane that an image shows.
+//! * [`mandelbrot_set`]: the escape-time iteration, scalar and four points at a time, with the interior shortcuts and the smooth (continuous) iteration count.
+//! * [`coloring`], [`pixel_buffer`]: the palettes, the channel mappings, and the buffer of pixels with saving to PNG.
+//! * [`rendering`]: the progressive and adaptive renderers that turn a view into colors.
+//! * [`auto_iterations`], [`thumbnails`], [`points_of_interest`]: the automatic iteration limit, the thumbnails and the named places.
+//! * [`gui`]: the window. [`config`] reads the command line, [`interaction`] holds the move and zoom steps.
+//!
+//! The same view and settings always render the same image: the supersampling jitter is a hash of the pixel and the sample, never random.
 #![warn(
+    missing_docs,
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
@@ -9,6 +21,8 @@
     clippy::complexity
 )]
 #![allow(
+    // Image sizes, pixel counts and iteration counts are far below 2^23, so converting them to floats is exact
+    clippy::cast_precision_loss,
     clippy::must_use_candidate,
     clippy::multiple_crate_versions,
     clippy::uninlined_format_args,
@@ -30,9 +44,11 @@ use std::error::Error;
 
 use coloring::ColorChannelMapping;
 pub use config::Config;
+pub use interaction::InteractionVariables;
 
 use crate::coloring::TrueColor;
 
+mod banner;
 pub mod complex_plane;
 pub mod complex;
 pub mod pixel_buffer;
@@ -42,109 +58,25 @@ pub mod auto_iterations;
 pub mod coloring;
 pub mod gui;
 pub mod config;
+pub mod interaction;
 pub mod points_of_interest;
 pub mod thumbnails;
 
-//Coloring function
+/// A function that colors a pixel from its iteration count and the maximum iterations, e.g. `TrueColor::new_from_bernstein_polynomials`
 type ColoringFunction = fn(iterations: u32, max_iterations: u32) -> TrueColor;
-static COLORING_FUNCTION : ColoringFunction = TrueColor::new_from_bernstein_polynomials;
+/// The coloring that the window starts with
+static COLORING_FUNCTION: ColoringFunction = TrueColor::new_from_bernstein_polynomials;
 
-//Color channel mapping
+/// The color channel mapping that the window starts with
 static COLOR_CHANNEL_MAPPING: ColorChannelMapping = ColorChannelMapping::RGB;
 
-//Banner values
-static VERSION: &str = "1.4";
-
-pub struct InteractionVariables{
-    ///Variable determining the amount of rows and columns are translated by pressing the 4 arrow keys
-    pub translation_amount: u8,
-    ///Variable denoting the user scaling speed; the lower this value, the more aggressive the zooming will become
-    pub scale_denominator: f64,
-    pub scale_numerator: f64,
-}
-
-impl InteractionVariables{
-    pub fn new(translation_amount: u8, scale_numerator: f64, scale_denominator: f64) -> InteractionVariables {
-        InteractionVariables { translation_amount, scale_denominator, scale_numerator }
-    }
-
-    pub fn scaling_factor(&self) -> f64 {
-        self.scale_numerator / self.scale_denominator
-    }
-
-    pub fn inverse_scaling_factor(&self) -> f64 {
-        self.scale_denominator / self.scale_numerator
-    }
-
-    pub fn increment_translation_amount(&mut self) {
-        self.translation_amount = self.translation_amount.saturating_add(1);
-    }
-
-    pub fn decrement_translation_amount(&mut self) {
-        if self.translation_amount > 1 {
-            self.translation_amount -=1;
-        }
-    }
-
-    pub fn increment_scale_numerator(&mut self) {
-        if self.scale_numerator < 9.0 {
-            self.scale_numerator += 1.0;
-        }
-    }
-
-    pub fn decrement_scale_numerator(&mut self) {
-        if self.scale_numerator > 1.0 {
-            self.scale_numerator -= 1.0;
-        }
-    }
-}
-
-impl Default for InteractionVariables{
-    fn default() -> Self {
-        InteractionVariables { translation_amount:10, scale_numerator: 9.0, scale_denominator: 10.0 }
-    }
-}
-
-///Prints Mandelbrot ASCII art :) </br> 
-///Prints the `application_banner`, `author_banner`, and `version`
-fn print_banner()
-{
-//Made using: https://patorjk.com/software/taag/#p=display&f=Big&t=Mandelbrot
-let application_banner = r"
-__  __                 _      _ _               _   
-|  \/  |               | |    | | |             | |  
-| \  / | __ _ _ __   __| | ___| | |__  _ __ ___ | |_ 
-| |\/| |/ _` | '_ \ / _` |/ _ \ | '_ \| '__/ _ \| __|
-| |  | | (_| | | | | (_| |  __/ | |_) | | | (_) | |_ 
-|_|  |_|\__,_|_| |_|\__,_|\___|_|_.__/|_|  \___/ \__|";
-//Made using: https://patorjk.com/software/taag/#p=display&f=Small%20Slant&t=by%20Jort
-let author_banner = r"
-   __             __         __ 
-  / /  __ __  __ / /__  ____/ /_
- / _ \/ // / / // / _ \/ __/ __/
-/_.__/\_, /  \___/\___/_/  \__/ 
-     /___/                      ";
-let version = VERSION;
-println!("{}{}v{}\n\n", application_banner, author_banner, version);
-}
-
-///Prints a command info tip for the users benefit
-fn print_command_info() {
-    let tip = "Run Mandelbrot using:";
-    let command = "cargo run --release -- <width> <height> <max_iterations> <supersampling_amount> <window_scale>";
-    let command_info = "where <arg> means substitute with the value of arg\nuse '-' to use the default value of arg";
-    println!("{}\n\t{}\n{}\n",tip, command, command_info);
-}
-
-///Holds all the logic currently in the main function that isn't involved with setting up configuration or handling errors, to make `main` concise and
-///easy to verify by inspection
+/// Runs the application: prints the banner, then opens the window and runs its event loop until it is closed.
+/// Everything except reading the configuration and reporting errors, which `main` does.
 /// # Errors
 /// Returns an Error if the GUI window cannot be created or the GUI event loop fails
 pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
-    //Print the banner
-    print_banner();
-    //Print command info
-    print_command_info();
+    banner::print_banner();
+    banner::print_command_info();
 
     let app = gui::MandelbrotApp::new(config);
     let options = eframe::NativeOptions {

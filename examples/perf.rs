@@ -2,14 +2,13 @@
 //! Prints the median, minimum and maximum time of every stage, and a checksum of the rendered colors:
 //! the checksum is the same for any version that renders the same image, so it proves that an optimization did not change the output.
 //! Optional arguments: the amount of runs (default 9) and a name filter for the workloads, e.g. `cargo run --release --example perf -- 15 detail`.
-use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::{Duration, Instant};
 
 use mandelbrot::coloring::{ColorChannelMapping, TrueColor};
 use mandelbrot::complex_plane::{ComplexPlane, View};
 use mandelbrot::mandelbrot_set::MandelbrotSet;
 use mandelbrot::pixel_buffer::PixelBuffer;
-use mandelbrot::rendering;
+use mandelbrot::rendering::{self, Render};
 
 const WIDTH: usize = 1200;
 const HEIGHT: usize = 800;
@@ -67,7 +66,7 @@ fn render(workload: &Workload, coloring_function: fn(u32, u32) -> TrueColor) -> 
     c.set_view(&workload.view);
     let m = MandelbrotSet::new(workload.max_iterations, 2.0);
     let mut last = Vec::new();
-    rendering::render_progressively(&c, &m, WIDTH, HEIGHT, workload.supersampling_amount, coloring_function, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+    Render::new(&c, &m, WIDTH, HEIGHT, coloring_function).supersampling(workload.supersampling_amount).run( |colors, _| {
         last.clear();
         last.extend_from_slice(colors);
     });
@@ -104,19 +103,31 @@ fn main() {
         let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
         let mut sent = (Vec::new(), Vec::new());
         summarize("4x render, empty layer callback", time_runs(runs, || {
-            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |_, _| {});
+            Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(4).run( |_, _| {});
         }));
         summarize("4x render, window layer callback", time_runs(runs, || {
-            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+            Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(4).run( |colors, _| {
                 buffer.colors.copy_from_slice(colors);
                 buffer.update_pixels();
                 sent = std::hint::black_box((buffer.colors.clone(), buffer.pixels.clone()));
             });
         }));
         summarize("4x render, colors-only layer callback", time_runs(runs, || {
-            rendering::render_progressively(&c, &m, WIDTH, HEIGHT, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |colors, _| {
+            Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(4).run( |colors, _| {
                 sent.0 = std::hint::black_box(colors.to_vec());
             });
+        }));
+    }
+
+    //Saving at another size than the window renders the whole image into a buffer in one go
+    if filter.as_ref().map_or(true, |f| "save-path".contains(f.as_str())) {
+        let workload = &workloads()[1]; //default view
+        let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+        c.set_view(&workload.view);
+        let m = MandelbrotSet::new(workload.max_iterations, 2.0);
+        let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
+        summarize("save path (render_complex_plane_into_buffer, 4x)", time_runs(runs, || {
+            mandelbrot::rendering::render_complex_plane_into_buffer(&mut buffer, &c, &m, 4, TrueColor::new_from_bernstein_polynomials);
         }));
     }
 

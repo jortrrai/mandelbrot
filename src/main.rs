@@ -1,3 +1,5 @@
+//! The application: reads the command line and runs the window of the `mandelbrot` library.
+
 use std::env;
 use std::process;
 

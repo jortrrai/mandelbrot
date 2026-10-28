@@ -1,14 +1,14 @@
 //! Cost of the thumbnails of the points of interest, run with `cargo run --release --example thumbnails`.
 //! Times one thumbnail of every place of the shipped folder, and measures what a thumbnail does to a main render: continuously in the background (what the policy avoids),
 //! and with the policy of the window (a thumbnail that is running is cancelled when the main render starts).
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use mandelbrot::coloring::{ColorChannelMapping, TrueColor};
 use mandelbrot::complex_plane::{ComplexPlane, View};
 use mandelbrot::mandelbrot_set::MandelbrotSet;
 use mandelbrot::points_of_interest::{self, Coloring, Location};
-use mandelbrot::rendering;
+use mandelbrot::rendering::{self, Render};
 use mandelbrot::thumbnails::{self, ThumbnailRequest};
 
 fn median(mut values: Vec<f64>) -> f64 {
@@ -26,7 +26,7 @@ fn main_render() {
     let mut c = ComplexPlane::new(w, h);
     c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002));
     let m = MandelbrotSet::new(5000, 2.0);
-    std::hint::black_box(rendering::render_progressively(&c, &m, w, h, 4, TrueColor::new_from_bernstein_polynomials, &AtomicBool::new(false), &AtomicUsize::new(0), |_, _| {}));
+    std::hint::black_box(Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).run( |_, _| {}));
 }
 
 fn main() {

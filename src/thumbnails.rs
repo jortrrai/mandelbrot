@@ -10,13 +10,13 @@
 //! (the saved one when the window restores appearances, otherwise the current one). It is rendered with `THUMBNAIL_SAMPLES` samples per pixel, whatever the supersampling of the window is.
 //! Thumbnails are not stored on disk: ten of them take less than a tenth of a second to render (see `examples/thumbnails.rs`), and a stored image would go stale whenever the renderer changes.
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 
 use crate::coloring::{ColorChannelMapping, TrueColor};
 use crate::complex_plane::{ComplexPlane, View};
 use crate::mandelbrot_set::MandelbrotSet;
 use crate::points_of_interest::{Coloring, Location};
-use crate::rendering;
+use crate::rendering::Render;
 
 /// The most thumbnails that are kept at the same time
 pub const MAX_CACHED: usize = 64;
@@ -37,10 +37,15 @@ pub fn thumbnail_height(window_width: usize, window_height: usize) -> usize {
 /// What a thumbnail shows
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThumbnailRequest {
+    /// The place: the center, the scale and the maximum iterations (capped by `MAX_THUMBNAIL_ITERATIONS`)
     pub location: Location,
+    /// The coloring of the thumbnail
     pub coloring: Coloring,
+    /// The color channel mapping of the thumbnail
     pub color_channels: ColorChannelMapping,
+    /// The width in pixels
     pub width: usize,
+    /// The height in pixels
     pub height: usize,
 }
 
@@ -77,7 +82,7 @@ pub fn render_thumbnail(request: &ThumbnailRequest, orbit_radius: f64, cancel: &
         Coloring::Bernstein => TrueColor::new_from_bernstein_polynomials,
     };
     let mut last = None;
-    let completed = rendering::render_progressively(&plane, &set, request.width, request.height, THUMBNAIL_SAMPLES, coloring_function, cancel, &AtomicUsize::new(0), |colors, _| {
+    let completed = Render::new(&plane, &set, request.width, request.height, coloring_function).supersampling(THUMBNAIL_SAMPLES).cancel_with(cancel).run( |colors, _| {
         last = Some(colors.to_vec());
     });
     if completed { last } else { None }
@@ -91,18 +96,22 @@ pub struct Lru<V> {
 }
 
 impl<V> Lru<V> {
+    /// Creates a cache that keeps at most `capacity` values (at least one)
     pub fn new(capacity: usize) -> Lru<V> {
         Lru { capacity: capacity.max(1), tick: 0, entries: HashMap::new() }
     }
 
+    /// The amount of values in the cache
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether the cache is empty
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// Whether there is a value for `key`, without counting it as used
     pub fn contains(&self, key: u64) -> bool {
         self.entries.contains_key(&key)
     }
@@ -131,6 +140,7 @@ impl<V> Lru<V> {
         dropped
     }
 
+    /// Removes all values
     pub fn clear(&mut self) {
         self.entries.clear();
     }
