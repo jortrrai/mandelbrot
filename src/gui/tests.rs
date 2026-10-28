@@ -891,3 +891,39 @@ fn a_drag_shifts_the_shown_image_even_when_its_render_was_interrupted() {
     crate::rendering::render_complex_plane_into_buffer(&mut direct, &app.c, &app.m, 4, app.coloring_function);
     assert!(app.p.colors.iter().zip(&direct.colors).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "the settled image is the image of the view");
 }
+
+#[test]
+fn a_coarse_preview_is_uploaded_with_one_texel_per_block_centered_on_its_pixel() {
+    let (width, height, block) = (10, 6, 4);
+    let colors: Vec<TrueColor> = (0..width * height).map(|i| TrueColor::new(i as u8, 0, 0)).collect();
+    let (image, uv) = coarse_texture(&colors, ColorChannelMapping::RGB, width, height, block);
+    assert_eq!(image.size, [3, 2], "the last blocks are partial");
+    assert_eq!(image.pixels[1].r(), 4, "texel (1, 0) is the color of pixel (4, 0)");
+    assert_eq!(image.pixels[3 + 2].r(), (4 * width + 8) as u8, "texel (2, 1) is pixel (8, 4)");
+    //Drawn over the whole image, the center of pixel 4 (x = 4.5) shows the center of texel 1, and the center of row 4 the center of texel row 1
+    let u = |x: f32| uv.min.x + (uv.max.x - uv.min.x) * x / width as f32;
+    let v = |y: f32| uv.min.y + (uv.max.y - uv.min.y) * y / height as f32;
+    assert!((u(4.5) - 1.5 / 3.0).abs() < 1e-6 && (u(0.5) - 0.5 / 3.0).abs() < 1e-6, "{uv:?}");
+    assert!((v(4.5) - 1.5 / 2.0).abs() < 1e-6, "{uv:?}");
+}
+
+#[test]
+fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives() {
+    let config = Config::build(["mandelbrot", "64", "40", "100", "1"].map(String::from).into_iter()).unwrap();
+    let mut app = manual_app(&config);
+    let ctx = egui::Context::default();
+    //Stand in for a render job of the whole view that reports three previews and a layer
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.job = Some(receiver);
+    app.previews_received = 0;
+    let colors = app.p.colors.clone();
+    let mut sizes = Vec::new();
+    for pass in [0, 0, 0, 1] {
+        sender.send(JobMessage::Pass { colors: colors.clone(), plane: app.c.clone(), pass, total: 1, layer_time: Duration::ZERO }).unwrap();
+        app.poll_job();
+        app.update_texture(&ctx);
+        sizes.push((app.preview_block, app.texture.as_ref().unwrap().size()));
+    }
+    assert_eq!(sizes, [(8, [8, 5]), (4, [16, 10]), (2, [32, 20]), (1, [64, 40])]);
+    assert_eq!(app.texture_uv, FULL_TEXTURE);
+}
