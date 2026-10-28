@@ -106,6 +106,26 @@ impl ComplexPlane {
         s
     }
 
+    /// How many steps between neighboring 64-bit numbers fit between two neighboring pixels, at the coordinates of this view: the pixel spacing divided by `f64::EPSILON` times the largest
+    /// coordinate on that axis, for the finer of the two axes. The coordinates of the pixels can only be told apart as long as this is more than 1; at 1 or less, neighboring pixels share one
+    /// coordinate and the image turns into blocks. The iteration amplifies rounding errors, so the image degrades well before that: see `ComplexPlane::precision`.
+    pub fn precision_steps(&self) -> f64 {
+        let steps = |increment: f64, a: f64, b: f64| increment.abs() / (f64::EPSILON * a.abs().max(b.abs()).max(f64::MIN_POSITIVE));
+        steps(self.increment_x, self.min_x, self.max_x).min(steps(self.increment_y, self.min_y, self.max_y))
+    }
+
+    /// How well 64-bit numbers still resolve this view, see `Precision`
+    pub fn precision(&self) -> Precision {
+        let steps = self.precision_steps();
+        if steps < PRECISION_LIMIT_STEPS {
+            Precision::Exhausted
+        } else if steps < PRECISION_WARNING_STEPS {
+            Precision::Degrading
+        } else {
+            Precision::Full
+        }
+    }
+
     /// Scale the complex plane, by multiplying the complex plane dimensions and increments by factor.
     /// If factor > 1.0: zoom out
     /// If factor < 1.0: zoom in
@@ -184,6 +204,22 @@ impl ComplexPlane {
     }
 }
 
+/// Below this many steps of a 64-bit number per pixel (`ComplexPlane::precision_steps`), the view counts as `Precision::Degrading`: for the default 1200 pixel wide window, a zoom of about 2e10
+pub const PRECISION_WARNING_STEPS: f64 = 1024.0;
+/// Below this many steps of a 64-bit number per pixel, the view counts as `Precision::Exhausted`: for the default window, a zoom of about 1e12
+pub const PRECISION_LIMIT_STEPS: f64 = 16.0;
+
+/// How well the 64-bit numbers of the renderer still resolve a view
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precision {
+    /// Every pixel has its own coordinate, with plenty of room to spare
+    Full,
+    /// The coordinates of neighboring pixels are only `PRECISION_WARNING_STEPS` or fewer steps of a 64-bit number apart: the image may start to show noise or blocks
+    Degrading,
+    /// Fewer than `PRECISION_LIMIT_STEPS` steps between neighboring pixels: the image is no longer trustworthy and zooming in further is refused
+    Exhausted,
+}
+
 /// A view of the complex plane: the center and the scale (see `ComplexPlane::get_scale`)
 pub struct View {
     x: f64,
@@ -207,6 +243,24 @@ impl std::fmt::Debug for View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn precision_runs_out_at_the_zoom_where_neighboring_pixels_share_a_coordinate() {
+        let at_scale = |scale: f64| {
+            let mut plane = ComplexPlane::new(1200, 800);
+            plane.set_view(&View::new(-0.75, 0.1, 1.0));
+            plane.scale(scale);
+            plane
+        };
+        assert_eq!(ComplexPlane::new(1200, 800).precision(), Precision::Full);
+        assert_eq!(at_scale(1e-9).precision(), Precision::Full);
+        assert_eq!(at_scale(1e-11).precision(), Precision::Degrading);
+        assert_eq!(at_scale(1e-13).precision(), Precision::Exhausted);
+        //The meaning of the number: at 1 step or fewer, neighboring pixels really do share a coordinate; with room to spare, they never do
+        let distinct_columns = |plane: &ComplexPlane| (0..1199).filter(|x| plane.complex_from_pixel_plane(f64::from(*x), 0.0).x != plane.complex_from_pixel_plane(f64::from(*x + 1), 0.0).x).count();
+        assert_eq!(distinct_columns(&at_scale(1e-9)), 1199);
+        assert!(at_scale(1e-15).precision_steps() < 1.0 && distinct_columns(&at_scale(1e-15)) < 1199);
+    }
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1.0)

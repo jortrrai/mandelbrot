@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use eframe::egui::{self, Color32};
 
 use crate::complex::Complex;
+use crate::complex_plane::Precision;
 use super::render_job::RenderBars;
 use super::MandelbrotApp;
 
@@ -55,6 +56,11 @@ pub fn format_zoom(magnification: f64) -> String {
         format!("\u{d7}{}", trimmed(format!("{magnification:.4}")))
     }
 }
+
+/// The warning of the current view panel when `Precision::Degrading`
+const PRECISION_DEGRADING_TEXT: &str = "Close to the limit of 64-bit numbers: the image may start to show noise or blocks.";
+/// The warning of the current view panel when `Precision::Exhausted`
+const PRECISION_EXHAUSTED_TEXT: &str = "Past the limit of 64-bit numbers: this image is not reliable, and Zoom in is disabled.";
 
 impl MandelbrotApp {
     /// Draws the render progress bar: a main bar with a smaller bar for every supersampling layer, each showing how long that layer took.
@@ -133,6 +139,15 @@ impl MandelbrotApp {
             value(ui, &view.zoom);
             ui.end_row();
         });
+        match self.c.precision() {
+            Precision::Full => {}
+            Precision::Degrading => {
+                ui.colored_label(Color32::from_rgb(230, 160, 40), PRECISION_DEGRADING_TEXT);
+            }
+            Precision::Exhausted => {
+                ui.colored_label(Color32::from_rgb(230, 70, 60), PRECISION_EXHAUSTED_TEXT);
+            }
+        }
     }
 
     /// Draws the status: the render that is running with its Cancel button, the progress bar of the last render, and the scrollable log
