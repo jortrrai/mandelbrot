@@ -139,8 +139,7 @@ pub struct MandelbrotApp {
     show_points: bool,
     /// The name and the description being typed to save the current view as a point of interest, while that form is open
     new_point: Option<(String, String)>,
-    /// How a flight to a point of interest goes (the shortest route by default) and how fast (fast by default), and the flight that is under way, see `flight`
-    route: flight::Route,
+    /// How fast a flight to a point of interest goes (fast by default), and the flight that is under way, see `flight`
     pace: flight::Pace,
     flight: Option<points::PointFlight>,
     /// How complete the frames of a flight have to be (low res by default), see `flight::FlightRendering`
@@ -235,7 +234,6 @@ impl MandelbrotApp {
             restore_appearance: false,
             show_points: false,
             new_point: None,
-            route: flight::Route::Shortest,
             pace: flight::Pace::Fast,
             flight: None,
             flight_rendering: flight::FlightRendering::LowRes,

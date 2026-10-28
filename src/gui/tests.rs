@@ -986,17 +986,17 @@ fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives()
 }
 
 #[test]
-fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace() {
+fn going_to_a_point_flies_there_at_a_cinematic_pace() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
-    assert_eq!((app.route, app.pace, app.flight_rendering), (super::flight::Route::Shortest, super::flight::Pace::Fast, super::flight::FlightRendering::LowRes), "the defaults, for speed");
-    (app.route, app.pace, app.flight_rendering) = (super::flight::Route::ViaReset, super::flight::Pace::Cinematic, super::flight::FlightRendering::BestEffort);
+    assert_eq!((app.pace, app.flight_rendering), (super::flight::Pace::Fast, super::flight::FlightRendering::LowRes), "the defaults, for speed");
+    (app.pace, app.flight_rendering) = (super::flight::Pace::Cinematic, super::flight::FlightRendering::BestEffort);
     let ctx = egui::Context::default();
     let history = app.history.len();
     app.c.set_view(&View::new(-1.25, 0.1, 0.05));
     app.render("Somewhere else");
     wait_for_job(&mut app);
     app.go_to_point_of_interest(0);
-    assert!(app.log.last().unwrap().starts_with("Flying to Test Place (Via reset, Cinematic, "), "{:?}", app.log.last());
+    assert!(app.log.last().unwrap().starts_with("Flying to Test Place (Cinematic, "), "{:?}", app.log.last());
     let (started, duration) = app.flight.as_ref().map(|flight| (flight.last_frame, flight.flight.duration())).unwrap();
     assert!(duration >= Duration::from_secs(2), "{duration:?}");
 
@@ -1008,7 +1008,7 @@ fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace() {
     app.settle_gesture(&ctx);
     assert!(!app.is_busy(), "the arrival renders the place itself");
     let scale = app.c.get_scale();
-    assert!(scale > 0.05 && scale <= 1.0 + 1e-9, "a third of the way via reset, the view is zoomed out: {scale}");
+    assert!(scale > 0.05 && scale < 1.0, "a third of the way, the view is zoomed out to travel, but not to the whole set: {scale}");
 
     //The arrival: the point, its limit, a full-quality render
     finish_flight(&mut app);
@@ -1025,7 +1025,7 @@ fn any_other_action_stops_a_flight_where_it_is() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     app.flight_rendering = super::flight::FlightRendering::BestEffort;
     app.go_to_point_of_interest(0);
-    assert!(app.log.last().unwrap().contains("(Shortest route, Fast, "), "{:?}", app.log.last());
+    assert!(app.log.last().unwrap().contains("(Fast, "), "{:?}", app.log.last());
     let started = app.flight.as_ref().unwrap().last_frame;
     app.fly_at(started + Duration::from_millis(200));
     let on_the_way = app.c.get_view();
