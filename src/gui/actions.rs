@@ -21,6 +21,7 @@ impl MandelbrotApp {
         }
     }
 
+    /// Moves the view by `rows_up` rows and `columns_right` columns of pixels (`name` is the direction, for the status log), and renders the exposed strip
     pub(super) fn translate(&mut self, name: &str, rows_up: i16, columns_right: i16) {
         rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
         //Moving the view to the right moves the content of the buffer to the left
@@ -53,6 +54,7 @@ impl MandelbrotApp {
         self.log("Saving the image...");
     }
 
+    /// Goes to the view that was typed in the three "go to view" fields (x, y and scale); a message in the status log if they are not numbers or the scale is not positive
     pub(super) fn go_to_view(&mut self) {
         let parsed: Vec<Result<f64, _>> = self.view_inputs.iter().map(|text| text.trim().parse::<f64>()).collect();
         match parsed.as_slice() {

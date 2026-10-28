@@ -1,3 +1,5 @@
+//! The part of the complex plane that an image shows, and the mapping between its pixels and complex numbers.
+
 use crate::complex::Complex;
 
 /// # Complex plane
@@ -9,13 +11,13 @@ use crate::complex::Complex;
 /// ### Complex numbers
 /// In complex analysis, the complex numbers are customarily represented by the symbol z, which can be separated into its real (x) and imaginary (y) parts:
 /// \
-/// ```ignore
+/// ```text
 /// z = x + iy
 /// ```
 /// for example: z = 4 + 5i, where x and y are real numbers, and i is the imaginary unit. In this customary notation the complex number z corresponds to the point (x, y) in the Cartesian plane.
 /// \
 /// In the Cartesian plane the point (x, y) can also be represented in polar coordinates as
-/// ```ignore
+/// ```text
 /// (x, y) = (rcosθ, rsinθ)  (r, θ)= (√(x^2 + y^2), arctan(y/x))
 /// ```
 /// ### Complex plane notation ℂ
@@ -23,14 +25,22 @@ use crate::complex::Complex;
 #[derive(Clone)]
 pub struct ComplexPlane {
     // Complex plane dimensions
+    /// The smallest real part that the plane shows
     pub min_x: f64,
+    /// The largest real part that the plane shows
     pub max_x: f64,
+    /// The width of the plane on the real axis (`max_x - min_x`)
     pub length_x: f64,
+    /// The smallest `y` of the plane. The `y` bounds are stored with the orientation of the screen: the imaginary part of a point is the negative of its `y`
     pub min_y: f64,
+    /// The largest `y` of the plane, see `min_y`
     pub max_y: f64,
+    /// The height of the plane (`max_y - min_y`)
     pub length_y: f64,
     // Complex plane increments
+    /// The distance on the real axis between two neighboring pixel columns
     pub increment_x: f64,
+    /// The distance on the imaginary axis between two neighboring pixel rows
     pub increment_y: f64,
     // Pixel plane width and height
     width: usize,
@@ -84,12 +94,13 @@ impl ComplexPlane {
         c
     }
 
-    /// Resets the total translation and scaling applied to the Complex plane by the translate() and scale() functions
+    /// Resets the total translation and scaling applied to the Complex plane by `translate` and `scale`
     pub fn reset(&mut self) {
         *self = ComplexPlane::new(self.width, self.height);
     }
 
     //Returns the total scale applied to the Complex plane
+    /// The scale of the plane: its width on the real axis divided by 2.5, so a smaller scale is a deeper zoom and scale 1 is the starting view
     pub fn get_scale(&self) -> f64 {
         let s = self.length_x / 2.5;
         s
@@ -145,22 +156,27 @@ impl ComplexPlane {
         self.set_view_separated(view.x, view.y, view.scale);
     }
 
+    /// The distance on the imaginary axis that `amount` pixel rows cover
     pub fn pixels_to_imaginary(&self, amount: u8) -> f64 {
         f64::from(amount) * self.increment_y 
     }
 
+    /// The distance on the real axis that `amount` pixel columns cover
     pub fn pixels_to_real(&self, amount: u8) -> f64 {
         f64::from(amount) * self.increment_x
     }
 
+    /// The amount of pixel rows that an imaginary distance `value` covers, truncated toward zero (and saturated to the range of `i16`)
     pub fn imaginary_to_pixels(&self, value: f64) -> i16 {
         (value / self.increment_y) as i16
     }
 
+    /// The amount of pixel columns that a real distance `value` covers, truncated toward zero (and saturated to the range of `i16`)
     pub fn real_to_pixels(&self, value: f64) -> i16 {
         (value / self.increment_x) as i16
     }
 
+    /// The view that the plane shows now: its center and its scale
     pub fn get_view(&self) -> View {
         let center = self.center();
         let scale = self.get_scale();
@@ -168,6 +184,7 @@ impl ComplexPlane {
     }
 }
 
+/// A view of the complex plane: the center and the scale (see `ComplexPlane::get_scale`)
 pub struct View {
     x: f64,
     y: f64,
@@ -175,6 +192,7 @@ pub struct View {
 }
 
 impl View {
+    /// Creates a view with the center `x + yi` and the given scale
     pub const fn new(x: f64, y: f64, scale: f64) -> View {
         View {x,y,scale}
     }

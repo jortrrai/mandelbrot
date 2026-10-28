@@ -3,11 +3,14 @@
 use crate::{complex::Complex, complex_plane::ComplexPlane};
 
 /// The pixels of a buffer that have to be rendered again after the buffer was shifted with `PixelBuffer::translate_buffer`:
+///
 /// the exposed `columns` and the exposed `rows`. A pixel is exposed if its column or its row is exposed, so a shift in one direction exposes a strip,
 /// and a shift in both directions an L shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExposedRegion {
+    /// The exposed columns: the pixels of these columns have to be rendered again
     pub columns: std::ops::Range<usize>,
+    /// The exposed rows
     pub rows: std::ops::Range<usize>,
 }
 
@@ -30,6 +33,7 @@ impl ExposedRegion {
         Some(ExposedRegion { columns: exposed(columns_right, width), rows: exposed(rows_up, height) })
     }
 
+    /// Whether the pixel at (`x`, `y`) is exposed
     pub fn contains(&self, x: usize, y: usize) -> bool {
         self.columns.contains(&x) || self.rows.contains(&y)
     }
@@ -54,9 +58,9 @@ pub fn center_complex_plane_on(c: &mut ComplexPlane, new_center: &Complex) -> (i
     (i128::from(rows), i128::from(columns))
 }
 
-///# Panics
-/// If `rows_up` != 0 && `columns_right` != 0
-/// Moves the complex plane `c` up by `rows_up` and right by `columns_right` pixels, without rendering anything
+/// Moves the complex plane `c` up by `rows_up` and right by `columns_right` pixels, without rendering anything.
+///
+/// Each distance is taken modulo 256 pixels (`as u8`): a move of 256 pixels moves by 0 and one of 300 by 44. The window only moves by small steps.
 pub fn translate_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i16, columns_right: i16) {
     let row_sign: f64 = if rows_up > 0 {-1.0} else {1.0};
     let column_sign: f64 = if columns_right > 0 {1.0} else {-1.0};

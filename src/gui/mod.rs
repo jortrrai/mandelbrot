@@ -59,6 +59,7 @@ fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: &ColorChannelMapping) -> V
     rgb
 }
 
+/// The state of the window: the view that is shown, the settings of the render, the render job that is running, the points of interest with their thumbnails and the status log
 pub struct MandelbrotApp {
     c: ComplexPlane,
     p: PixelBuffer,

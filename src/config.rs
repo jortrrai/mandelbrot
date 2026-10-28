@@ -1,3 +1,5 @@
+//! The configuration that the command line gives: `cargo run --release -- <width> <height> <max_iterations> <supersampling_amount> <window_scale>`.
+
 use std::{str::FromStr, fmt::{Display, self}};
 
 //Argument default values
@@ -8,20 +10,29 @@ static ORBIT_RADIUS: f64 = 2.0;
 static SUPERSAMPLING_AMOUNT: u8 = 1;
 static WINDOW_SCALE: f64 = 1.0;
 
+/// The settings that the command line gives: the size of the window and the image, the iterations, the supersampling and the scale of the window
 #[derive(Clone)]
 pub struct Config {
     // Window dimensions in pixels
+    /// The width of the window in pixels (the image width times the window scale)
     pub window_width: usize,
+    /// The height of the window in pixels (the image height times the window scale)
     pub window_height: usize,
     // Mandelbrot set parameters
+    /// The most iterations of the escape-time iteration of a point
     pub max_iterations: u32,
+    /// The radius that the orbit of a point has to leave to count as escaped
     pub orbit_radius: f64,      //If z remains within the orbit_radius in max_iterations, we assume c does not tend to infinity
     // Rendering parameters
+    /// The amount of samples per pixel, from 1
     pub supersampling_amount: u8,
     //Window scaling factor
+    /// The scale of the window relative to the image
     pub window_scale: f64,
     //Scaled window dimensions in pixels (used in images)
+    /// The width in pixels of a saved image
     pub image_width: usize,
+    /// The height in pixels of a saved image
     pub image_height: usize
 }
 
@@ -57,7 +68,7 @@ impl Config {
         Ok(Config {window_width, window_height, max_iterations, orbit_radius: ORBIT_RADIUS, supersampling_amount, window_scale, image_width, image_height})
     }
 
-    ///Parses an argument to a T value if possible, returns an error if not. Returns default if argument is None </br>
+    ///Parses an argument to a T value if possible, returns an error if not. Returns default if argument is None\
     ///If Some(arg) == "-", return default
     /// # Errors
     /// Return an Error if the given argument cannot be parsed to a T type
@@ -81,6 +92,7 @@ impl Config {
         }
     }
 
+    /// Prints that the argument `name` was not given and that `default` is used
     pub fn print_no_argument_given<T: std::fmt::Display>(name: &str, default: &T) {
         println!("No {} argument given, using default: {}", name, default);
     }

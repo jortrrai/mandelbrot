@@ -3,7 +3,7 @@
 /// The version printed in the banner
 static VERSION: &str = "1.4";
 
-///Prints Mandelbrot ASCII art :) </br> 
+///Prints Mandelbrot ASCII art :)\
 ///Prints the `application_banner`, `author_banner`, and `version`
 pub fn print_banner()
 {

@@ -1,3 +1,5 @@
+//! Complex numbers, with the arithmetic that the escape-time iteration uses.
+
 use std::fmt;
 
 ///Complex number (x + bi), i^2 = -1: <https://en.wikipedia.org/wiki/Complex_number>
@@ -9,6 +11,7 @@ pub struct Complex {
 }
 
 impl Complex {
+    /// Creates the complex number `x + yi`
     pub const fn new(x: f64, y: f64) -> Complex {
         Complex { x, y }
     }

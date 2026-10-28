@@ -21,12 +21,14 @@ pub struct CurrentView {
 }
 
 impl CurrentView {
+    /// The texts for the view with the center `center` and the scale `scale`
     pub fn new(center: &Complex, scale: f64) -> CurrentView {
         CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), zoom: format_zoom(1.0 / scale) }
     }
 }
 
 /// The zoom as text, "x" and the magnification: ordinary decimal numbers from 0.001 up to a billion (at most two decimals, none for a whole number, thousands separated by commas:
+///
 /// "x1", "x2.5", "x156.25", "x15,625", "x250,000"), and scientific notation only beyond that ("x1.00e9", "x1.00e-4").
 pub fn format_zoom(magnification: f64) -> String {
     if !magnification.is_finite() || magnification <= 0.0 {
@@ -133,6 +135,7 @@ impl MandelbrotApp {
         });
     }
 
+    /// Draws the status: the render that is running with its Cancel button, the progress bar of the last render, and the scrollable log
     pub(super) fn log_ui(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Status");

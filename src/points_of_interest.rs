@@ -44,11 +44,14 @@ pub const MAX_ITERATIONS_RANGE: RangeInclusive<u32> = 1..=1_000_000;
 /// The coloring of an appearance
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coloring {
+    /// The HSV palette
     Hsv,
+    /// The Bernstein polynomial palette
     Bernstein,
 }
 
 impl Coloring {
+    /// The coloring with the key `key` (case-insensitive), if there is one
     pub fn from_key(key: &str) -> Option<Coloring> {
         match key.trim().to_lowercase().as_str() {
             "hsv" => Some(Coloring::Hsv),
@@ -57,6 +60,7 @@ impl Coloring {
         }
     }
 
+    /// The key of the coloring as it is written in a file
     pub fn key(self) -> &'static str {
         match self {
             Coloring::Hsv => "hsv",
@@ -68,25 +72,35 @@ impl Coloring {
 /// Where to look
 #[derive(Clone, Debug, PartialEq)]
 pub struct Location {
+    /// The real part of the center of the view
     pub real: f64,
+    /// The imaginary part of the center of the view
     pub imaginary: f64,
     /// The scale of the renderer, see the module documentation
     pub scale: f64,
+    /// The most iterations of the escape-time iteration
     pub max_iterations: u32,
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Appearance {
+    /// The coloring, if the file gives one
     pub coloring: Option<Coloring>,
+    /// The color channel mapping, if the file gives one
     pub color_channels: Option<ColorChannelMapping>,
 }
 
+/// A named place: where to look, and optionally how it should look
 #[derive(Clone, Debug, PartialEq)]
 pub struct PointOfInterest {
+    /// The display name
     pub name: String,
+    /// A longer text for a tooltip, possibly empty
     pub description: String,
+    /// Where to look
     pub location: Location,
+    /// How it looks; `None` if the file has no appearance
     pub appearance: Option<Appearance>,
     /// The name of the file it was loaded from
     pub file_name: String,
@@ -125,7 +139,11 @@ struct RawPointOfInterest {
 }
 
 /// Parses and checks the text of a point of interest file. `file_name` is only used in the messages.
+///
 /// Returns the point and warnings (an appearance that could not be used is left out with a warning), or the reason that the file cannot be used.
+///
+/// # Errors
+/// The text is not valid JSON or lacks a field, the format version is not supported, the name is empty, the center is not finite, the scale is not positive or the maximum iterations are outside the allowed range.
 pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String>), String> {
     let raw: RawPointOfInterest = serde_json::from_str(text).map_err(|error| format!("{file_name}: {error}"))?;
     if raw.format_version != FORMAT_VERSION {
@@ -176,6 +194,7 @@ pub struct LoadReport {
 }
 
 /// Loads every `.json` file of `folder`. Other files are ignored; a file that cannot be used is skipped and reported in `problems`, the rest loads.
+///
 /// A folder that does not exist or cannot be read gives no points and a problem.
 pub fn load_folder(folder: &Path) -> LoadReport {
     let mut report = LoadReport::default();
@@ -206,6 +225,7 @@ pub fn load_folder(folder: &Path) -> LoadReport {
 }
 
 /// The folder to load: `points_of_interest` in the current directory, or else the one next to the sources this program was built from (so `cargo run` works from any directory).
+///
 /// If neither exists, the one in the current directory, which `load_folder` then reports.
 pub fn find_folder() -> PathBuf {
     let in_current_directory = PathBuf::from(FOLDER_NAME);

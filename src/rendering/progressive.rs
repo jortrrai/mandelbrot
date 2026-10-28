@@ -19,6 +19,7 @@ pub fn render_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, h
 }
 
 /// Renders the pixels of the Complex plane `c` that are inside `region` progressively, one supersampling layer (pass) at a time, so intermediate images can be shown early.
+///
 /// All other pixels keep the colors of `base`, e.g. the shifted image of a previous render, so moving the view only renders the newly exposed pixels.
 /// Pass `k` computes sample `k` of every pixel in the region, with the same deterministic jitter as `render_box_render_complex_plane_into_buffer`,
 /// so after the last pass the colors are identical to the ones that function produces.
@@ -32,11 +33,16 @@ pub fn render_region_progressively(c: &ComplexPlane, m: &MandelbrotSet, width: u
     render_region_adaptively(c, m, width, height, region, base, supersampling_amount, None, coloring_function, cancel, pixels_done, on_pass)
 }
 
-/// Like `render_region_progressively`, but with `adaptive` set the first `ADAPTIVE_UNIFORM_SAMPLES` samples are taken for every pixel, and the later samples
-/// only for the pixels that `adaptive_mask` marks as boundary or detail pixels. The other pixels keep the average of their first samples.
+/// Like `render_region_progressively`, but with `adaptive` set the extra samples are only taken where the picture shows detail.
+///
+/// The first `ADAPTIVE_UNIFORM_SAMPLES` samples are taken for every pixel, the later samples only for the pixels that `adaptive_mask` marks as boundary or detail pixels.
+/// The other pixels keep the average of their first samples.
 /// This is a quality/speed heuristic, not equivalent to full supersampling: a feature that neither of the first two samples of a pixel or its neighbors shows can be missed.
 /// With `adaptive` unset, or at most `ADAPTIVE_UNIFORM_SAMPLES` samples, every pixel gets every sample, exactly like `render_region_progressively`.
 /// The pass numbering is unchanged (`on_pass` is called once per sample); the later passes are just cheaper.
+///
+/// # Panics
+/// If `base` does not have `width * height` colors, or if a thread of the render panics.
 pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, region: &ExposedRegion, base: &[TrueColor], supersampling_amount: u8, adaptive: Option<&AdaptiveSampling>, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor, cancel: &AtomicBool, pixels_done: &AtomicUsize, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
     assert_eq!(base.len(), width * height, "base should have a color for every pixel");
     let supersampling_amount = supersampling_amount.clamp(1, 64);

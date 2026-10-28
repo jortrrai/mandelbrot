@@ -9,6 +9,7 @@ use super::{MandelbrotApp, COLORING_FUNCTIONS, COLOR_CHANNEL_MAPPINGS};
 
 
 impl MandelbrotApp {
+    /// Draws the controls: moving, zooming, the places, the iterations, the quality, the colors and saving. A control that changes the view or the settings starts a new render
     pub(super) fn controls_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Controls");
 

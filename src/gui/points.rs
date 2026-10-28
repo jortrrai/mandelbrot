@@ -44,6 +44,7 @@ pub(super) const POINT_ROW_HEIGHT: f32 = 104.0;
 pub(super) const POINT_ROWS_SHOWN: f32 = 3.0;
 
 impl MandelbrotApp {
+    /// Cancels the thumbnail that is being rendered, if any (a render of the main view has priority, and a thumbnail that left the view is not needed)
     pub(super) fn cancel_thumbnail_job(&mut self) {
         if let Some(job) = self.thumb_job.take() {
             job.cancel.store(true, Ordering::Relaxed);

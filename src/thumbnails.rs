@@ -37,10 +37,15 @@ pub fn thumbnail_height(window_width: usize, window_height: usize) -> usize {
 /// What a thumbnail shows
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThumbnailRequest {
+    /// The place: the center, the scale and the maximum iterations (capped by `MAX_THUMBNAIL_ITERATIONS`)
     pub location: Location,
+    /// The coloring of the thumbnail
     pub coloring: Coloring,
+    /// The color channel mapping of the thumbnail
     pub color_channels: ColorChannelMapping,
+    /// The width in pixels
     pub width: usize,
+    /// The height in pixels
     pub height: usize,
 }
 
@@ -91,18 +96,22 @@ pub struct Lru<V> {
 }
 
 impl<V> Lru<V> {
+    /// Creates a cache that keeps at most `capacity` values (at least one)
     pub fn new(capacity: usize) -> Lru<V> {
         Lru { capacity: capacity.max(1), tick: 0, entries: HashMap::new() }
     }
 
+    /// The amount of values in the cache
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether the cache is empty
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// Whether there is a value for `key`, without counting it as used
     pub fn contains(&self, key: u64) -> bool {
         self.entries.contains_key(&key)
     }
@@ -131,6 +140,7 @@ impl<V> Lru<V> {
         dropped
     }
 
+    /// Removes all values
     pub fn clear(&mut self) {
         self.entries.clear();
     }

@@ -6,18 +6,22 @@ pub struct InteractionVariables {
     pub translation_amount: u8,
     ///Variable denoting the user scaling speed; the lower this value, the more aggressive the zooming will become
     pub scale_denominator: f64,
+    /// The numerator of the factor by which a zoom step scales the plane (see `scaling_factor`)
     pub scale_numerator: f64,
 }
 
 impl InteractionVariables{
+    /// Creates the variables: the step of a move in pixels, and the numerator and denominator of the zoom factor
     pub fn new(translation_amount: u8, scale_numerator: f64, scale_denominator: f64) -> InteractionVariables {
         InteractionVariables { translation_amount, scale_denominator, scale_numerator }
     }
 
+    /// The factor that zooming in multiplies the plane with: `scale_numerator / scale_denominator`
     pub fn scaling_factor(&self) -> f64 {
         self.scale_numerator / self.scale_denominator
     }
 
+    /// The factor that zooming out multiplies the plane with: the inverse of `scaling_factor`
     pub fn inverse_scaling_factor(&self) -> f64 {
         self.scale_denominator / self.scale_numerator
     }

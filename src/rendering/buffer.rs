@@ -16,14 +16,17 @@ pub struct RenderBox {
 }
 
 impl RenderBox {
+    /// Creates the box from its limits
     pub fn new(min_x: usize, max_x: usize, min_y: usize, max_y: usize) -> RenderBox { 
         RenderBox { min_x, max_x, min_y, max_y } 
     }
 
+    /// Prints the box and its pixel count to the terminal
     pub fn print(&self) {
         println!("RenderBox: ({},{}) -> ({},{}) {{{} pixels}}",self.min_x,self.min_y,self.max_x,self.max_y, self.compute_pixel_count());
     }
 
+    /// The amount of pixels that the box covers
     pub fn compute_pixel_count(&self) -> usize {
         (self.max_x-self.min_x)*(self.max_y-self.min_y)
     }
@@ -36,6 +39,7 @@ impl RenderBox {
 
 
 /// Render the Complex plane c into the 32-bit pixel buffer by applying the Mandelbrot formula iteratively to every Complex point mapped to a pixel in the buffer. 
+///
 /// The buffer should have a size of width*height.
 /// `orbit_radius` determines when Zn is considered to have gone to infinity.
 /// `max_iterations` concerns the maximum amount of times the Mandelbrot formula will be applied to each Complex number.
@@ -46,6 +50,7 @@ pub fn render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &ComplexPlane, m
 }
 
 /// Render the Complex plane c into the 32-bit pixel buffer by applying the Mandelbrot formula iteratively to every Complex point mapped to a pixel in the buffer. 
+///
 /// The buffer should have a size of width*height.
 /// Only renders Pixels inside the render box denoted by `render_min_x`, `render_max_x`, `render_min_y`, `render_max_y`
 /// `orbit_radius` determines when Zn is considered to have gone to infinity.
@@ -145,10 +150,12 @@ pub fn render_box_render_complex_plane_into_buffer(p: &mut PixelBuffer, c: &Comp
     benchmark("render_box_render_complex_plane_into_buffer()", time);
 }
 
+/// The start of a measurement for `benchmark`
 fn benchmark_start() -> Instant {
     Instant::now()
 }
 
+/// Prints how long `function` took since `time`
 fn benchmark(function: &str,time: Instant) {
     println!("[Benchmark] {}: {:.2?}",function, time.elapsed());
 }
