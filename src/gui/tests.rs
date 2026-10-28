@@ -1214,3 +1214,25 @@ fn every_point_of_interest_shows_its_zoom_in_the_list() {
     assert_eq!(super::points::point_zoom_text(&app.points[0]), "Zoom \u{d7}15,625", "scale 0.000064");
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn the_markers_of_the_points_of_interest_are_at_their_locations_and_only_inside_the_view() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    assert!(!app.show_points, "off by default");
+    let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(640.0, 480.0));
+    //The default view: the place is inside it, at the pixel of its location
+    let markers = super::points::marker_positions(&app.points, &app.c, rect);
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].0, "Test Place");
+    let location = &app.points[0].location;
+    let pixel = |plane: &ComplexPlane, position: egui::Pos2| {
+        let (x, y) = (f64::from((position.x - rect.min.x) / rect.width()) * 64.0, f64::from((position.y - rect.min.y) / rect.height()) * 48.0);
+        plane.complex_from_pixel_plane(x, y)
+    };
+    let at = pixel(&app.c, markers[0].1);
+    assert!((at.x - location.real).abs() < 1e-5 && (at.y - location.imaginary).abs() < 1e-5, "{at:?}");
+    //A view far away from it: no marker
+    app.c.set_view(&View::new(0.3, 0.6, 0.01));
+    assert_eq!(super::points::marker_positions(&app.points, &app.c, rect).len(), 0);
+    let _ = std::fs::remove_dir_all(folder);
+}

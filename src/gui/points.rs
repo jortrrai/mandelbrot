@@ -28,6 +28,35 @@ pub(super) struct PointFlight {
 }
 
 
+/// Where the points of interest are on the screen when the view `plane` fills `image_rect`: the name and the position of every point inside the image
+pub(super) fn marker_positions(points: &[PointOfInterest], plane: &ComplexPlane, image_rect: egui::Rect) -> Vec<(String, egui::Pos2)> {
+    let (width, height) = ((plane.length_x / plane.increment_x).round(), (plane.length_y / plane.increment_y).round());
+    points.iter().filter_map(|point| {
+        //The pixel of the point (see `ComplexPlane::complex_from_pixel_plane`: the screen y is the negative of the imaginary part)
+        let x = (point.location.real - plane.min_x) / plane.increment_x;
+        let y = (-point.location.imaginary - plane.min_y) / plane.increment_y;
+        let position = image_rect.lerp_inside(egui::vec2((x / width) as f32, (y / height) as f32));
+        image_rect.contains(position).then(|| (point.name.clone(), position))
+    }).collect()
+}
+
+/// Draws the markers of `marker_positions`: small, semi-transparent circles with a soft glow and the names next to them, subtle so they do not hide the fractal
+pub(super) fn draw_markers(painter: &egui::Painter, markers: &[(String, egui::Pos2)]) {
+    let glow = |alpha: u8| Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+    for (name, position) in markers {
+        //The glow: wide, faint circles around a small core
+        for (radius, alpha) in [(10.0, 10), (7.0, 18), (5.0, 30)] {
+            painter.circle_filled(*position, radius, glow(alpha));
+        }
+        painter.circle_filled(*position, 3.0, glow(150));
+        painter.circle_stroke(*position, 3.0, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 90)));
+        //The name, with a faint shadow so it can be read on light and dark parts of the fractal
+        let (anchor, font) = (*position + egui::vec2(9.0, -1.0), egui::FontId::proportional(12.0));
+        painter.text(anchor + egui::vec2(1.0, 1.0), egui::Align2::LEFT_CENTER, name, font.clone(), Color32::from_rgba_unmultiplied(0, 0, 0, 140));
+        painter.text(anchor, egui::Align2::LEFT_CENTER, name, font, Color32::from_rgba_unmultiplied(255, 255, 255, 190));
+    }
+}
+
 /// The zoom of a point of interest as the list shows it, like the zoom of the current view (see `status::format_zoom`)
 pub(super) fn point_zoom_text(point: &PointOfInterest) -> String {
     format!("Zoom {}", super::status::format_zoom(1.0 / point.location.scale))
