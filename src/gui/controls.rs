@@ -5,6 +5,7 @@ use eframe::egui::{self};
 
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
+use crate::complex_plane::Precision;
 use super::{MandelbrotApp, COLORING_FUNCTIONS, COLOR_CHANNEL_MAPPINGS};
 
 
@@ -62,7 +63,12 @@ impl MandelbrotApp {
     /// The buttons that zoom, reset the view and set the zoom speed
     fn zoom_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Zoom in").clicked() {
+            let exhausted = self.c.precision() == Precision::Exhausted;
+            let zoom_in = ui.add_enabled(!exhausted, egui::Button::new("Zoom in"));
+            if exhausted {
+                zoom_in.clone().on_disabled_hover_text("The limit of 64-bit numbers is reached: deeper views would only show rounding noise. Zoom out, or go to another place.");
+            }
+            if zoom_in.clicked() {
                 self.c.scale(self.vars.scaling_factor());
                 self.render("Zoomed in");
             }
