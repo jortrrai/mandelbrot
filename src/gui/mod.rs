@@ -1,11 +1,11 @@
 //! The graphical user interface: the fractal on the left, the controls in the top right and a scrollable status log in the bottom right.
 //! The terminal is only used for developer output.
 //!
-//! * [`render_job`]: the background threads that render the view layer by layer.
-//! * [`actions`]: what the buttons and clicks do.
-//! * [`controls`]: the controls on the right.
-//! * [`points`]: the points of interest with their thumbnails.
-//! * [`status`]: the current view, the status log and the progress bar.
+//! * `render_job`: the background threads that render the view layer by layer.
+//! * `actions`: what the buttons and clicks do.
+//! * `controls`: the controls on the right.
+//! * `points`: the points of interest with their thumbnails.
+//! * `status`: the current view, the status log and the progress bar.
 
 mod actions;
 mod controls;
