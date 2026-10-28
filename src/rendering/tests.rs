@@ -113,6 +113,7 @@ fn sample_jitter_is_in_unit_square_and_varies() {
     assert!(distinct.len() > 1500, "jitter should vary per pixel and sample, got {} distinct values", distinct.len());
 }
 
+#[allow(clippy::too_many_arguments)] // A test helper: the arguments are the settings of one render, and every test passes them at once
 fn adaptive_render(c: &ComplexPlane, m: &MandelbrotSet, w: usize, h: usize, region: &ExposedRegion, base: &[TrueColor], samples: u8, adaptive: Option<&AdaptiveSampling>, cancel: &AtomicBool) -> (Vec<(u8, u8, u8)>, u8, bool) {
     let mut last = Vec::new();
     let mut passes = 0;

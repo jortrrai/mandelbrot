@@ -1,17 +1,17 @@
 //! The configuration that the command line gives: `cargo run --release -- <width> <height> <max_iterations> <supersampling_amount> <window_scale>`.
 
-use std::{str::FromStr, fmt::{Display, self}};
+use std::{fmt::Display, str::FromStr};
 
 //Argument default values
-static WIDTH: usize = 1200;
-static HEIGHT: usize = 800;
-static MAX_ITERATIONS: u32 = 1000;
-static ORBIT_RADIUS: f64 = 2.0;
-static SUPERSAMPLING_AMOUNT: u8 = 1;
-static WINDOW_SCALE: f64 = 1.0;
+const WIDTH: usize = 1200;
+const HEIGHT: usize = 800;
+const MAX_ITERATIONS: u32 = 1000;
+const ORBIT_RADIUS: f64 = 2.0;
+const SUPERSAMPLING_AMOUNT: u8 = 1;
+const WINDOW_SCALE: f64 = 1.0;
 
 /// The settings that the command line gives: the size of the window and the image, the iterations, the supersampling and the scale of the window
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Config {
     // Window dimensions in pixels
     /// The width of the window in pixels (the image width times the window scale)
@@ -98,12 +98,6 @@ impl Config {
     }
 }
 
-impl fmt::Debug for Config {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { //TODO: Improve debug printing format legibility
-        f.debug_struct("Config").field("window_width", &self.window_width).field("window_height", &self.window_height).field("max_iterations", &self.max_iterations).field("orbit_radius", &self.orbit_radius).field("supersampling_amount", &self.supersampling_amount).field("window_scale", &self.window_scale).field("image_width", &self.image_width).field("image_height", &self.image_height).finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +112,11 @@ mod tests {
         assert_eq!((config.window_width, config.window_height, config.image_width, config.image_height), (1200, 800, 1200, 800));
         assert_eq!((config.max_iterations, config.supersampling_amount), (1000, 1));
         assert_eq!((config.orbit_radius, config.window_scale), (2.0, 1.0));
+    }
+
+    #[test]
+    fn the_debug_text_lists_every_field_as_it_always_did() {
+        assert_eq!(format!("{:?}", build(&[]).unwrap()), "Config { window_width: 1200, window_height: 800, max_iterations: 1000, orbit_radius: 2.0, supersampling_amount: 1, window_scale: 1.0, image_width: 1200, image_height: 800 }");
     }
 
     #[test]

@@ -78,44 +78,49 @@ impl PixelBuffer {
         }
     }
 
-    ///Saves the `PixelBuffer` as an RGB png image to `saved/{file_name_without_extension}.png`\
-    ///Stores the current `ComplexPlane` View in the png's metadata under the view keyword\
-    ///Stores the `supersampling_amount` in the metadata\
-    ///Also stores author and application metadata
-    /// # Panics
-    /// If the file `saved/{file_name_without_extension}.png` cannot be created
-    pub fn save_as_png(&self, file_name_without_extension: &str, view: &View, m: &MandelbrotSet, supersampling_amount: u8) {
+    /// Saves the `PixelBuffer` as an RGB png image to `saved/{file_name_without_extension}.png`\
+    /// Stores the current `ComplexPlane` View in the png's metadata under the view keyword\
+    /// Stores the `supersampling_amount` in the metadata\
+    /// Also stores author and application metadata
+    /// # Errors
+    /// Returns the error if the `saved` folder or the file cannot be created, or the image cannot be encoded or written
+    pub fn save_as_png(&self, file_name_without_extension: &str, view: &View, m: &MandelbrotSet, supersampling_amount: u8) -> std::io::Result<()> {
         let file_name_without_extension = file_name_without_extension.replace(':', "-").replace(' ', "_"); //Replace ':' with '-' for Windows file system. Replace ' ' with '_' because spaces are annoying in filenames.
         let file_name = format!("saved{}{}.png", std::path::MAIN_SEPARATOR_STR, file_name_without_extension);
-        match std::fs::create_dir_all("saved") { //Create the saved folder if it does not exist 
-            Ok(()) => (), //Currently not doing anything with the Result of trying to create the saved folder
-            Err(err) => eprintln!("{}", err),
-        }
-        let path = Path::new(&file_name);
-        let file = File::create(path).unwrap();
+        std::fs::create_dir_all("saved")?; //Create the saved folder if it does not exist
+        self.write_png(Path::new(&file_name), view, m, supersampling_amount)
+    }
+
+    /// Writes the `PixelBuffer` as an RGB png image to `path`, with the metadata of `save_as_png`
+    /// # Errors
+    /// Returns the error if the file cannot be created, or the image cannot be encoded or written
+    fn write_png(&self, path: &Path, view: &View, m: &MandelbrotSet, supersampling_amount: u8) -> std::io::Result<()> {
+        let file = File::create(path)?;
         let w = &mut BufWriter::new(file);
         let mut encoder = png::Encoder::new(w, self.pixel_plane.width as u32, self.pixel_plane.height as u32);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
-        let view_text = format!("{:?}", view);
-        encoder.add_text_chunk(String::from("view"), view_text).unwrap();
-        let mandelbrot_set_text = format!("{:?}", m);
-        encoder.add_text_chunk(String::from("mandelbrot_set"), mandelbrot_set_text).unwrap();
-        let supersampling_amount_text = format!("{}x", supersampling_amount);
-        encoder.add_text_chunk(String::from("supersampling_amount"), supersampling_amount_text).unwrap();
-        encoder.add_text_chunk(String::from("application"), String::from("Mandelbrot by Jort (https://github.com/jortrr/mandelbrot)")).unwrap();
-        encoder.add_text_chunk(String::from("author"), String::from("jortrr (https://github.com/jortrr/)")).unwrap();
-        let color_channel_mapping_text = format!("{:?}", self.color_channel_mapping);
-        encoder.add_text_chunk(String::from("color_channel_mapping"), color_channel_mapping_text).unwrap();
-        let mut data: Vec<u8> = Vec::new();
+        let texts = [
+            ("view", format!("{view:?}")),
+            ("mandelbrot_set", format!("{m:?}")),
+            ("supersampling_amount", format!("{supersampling_amount}x")),
+            ("application", String::from("Mandelbrot by Jort (https://github.com/jortrr/mandelbrot)")),
+            ("author", String::from("jortrr (https://github.com/jortrr/)")),
+            ("color_channel_mapping", format!("{:?}", self.color_channel_mapping)),
+        ];
+        for (keyword, text) in texts {
+            encoder.add_text_chunk(String::from(keyword), text).map_err(std::io::Error::other)?;
+        }
+        let mut data: Vec<u8> = Vec::with_capacity(self.colors.len() * 3);
         let [r_source, g_source, b_source] = self.color_channel_mapping.sources();
         for color in &self.colors {
             data.push(color.channel(r_source));
             data.push(color.channel(g_source));
             data.push(color.channel(b_source));
         }
-        let mut writer = encoder.write_header().unwrap();
-        writer.write_image_data(&data).unwrap();
+        let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
+        writer.write_image_data(&data).map_err(std::io::Error::other)?;
+        writer.finish().map_err(std::io::Error::other)
     }
 }
 
@@ -134,6 +139,22 @@ mod tests {
         }
         buffer.update_pixels();
         buffer
+    }
+
+    #[test]
+    fn writing_a_png_reports_errors_instead_of_panicking() {
+        let buffer = numbered_buffer();
+        let (view, m) = (View::new(-0.75, 0.0, 1.0), MandelbrotSet::new(10, 2.0));
+        let folder = std::env::temp_dir().join(format!("mandelbrot-png-test-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("ok.png");
+        buffer.write_png(&path, &view, &m, 1).expect("a png can be written to an existing folder");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[1..4], b"PNG");
+        assert!(bytes.windows(4).any(|window| window == b"view"), "the view is stored in the metadata");
+        let missing = folder.join("no-such-folder").join("x.png");
+        assert!(buffer.write_png(&missing, &view, &m, 1).is_err(), "a folder that does not exist is an error, not a panic");
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     fn color_at(buffer: &PixelBuffer, x: usize, y: usize) -> (u8, u8) {

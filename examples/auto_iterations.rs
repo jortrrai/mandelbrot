@@ -30,10 +30,10 @@ fn render(c: &ComplexPlane, m: &MandelbrotSet, w: usize, h: usize, threads: usiz
     std::thread::scope(|s| {
         for (o, p) in out.chunks_mut(chunk).zip(points.chunks(chunk)) {
             s.spawn(move || {
-                let mut groups = p.chunks_exact(LANES);
+                let (groups, remainder) = p.as_chunks::<LANES>();
                 let mut i = 0;
-                for g in &mut groups { o[i..i + LANES].copy_from_slice(&m.iterate_lanes(&std::array::from_fn(|k| Complex::new(g[k].x, g[k].y)))); i += LANES; }
-                for r in groups.remainder() { o[i] = m.iterate(r); i += 1; }
+                for g in groups { o[i..i + LANES].copy_from_slice(&m.iterate_lanes(&std::array::from_fn(|k| Complex::new(g[k].x, g[k].y)))); i += LANES; }
+                for r in remainder { o[i] = m.iterate(r); i += 1; }
             });
         }
     });

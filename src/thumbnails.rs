@@ -158,7 +158,7 @@ mod tests {
     fn the_height_follows_the_window_aspect_ratio() {
         assert_eq!(thumbnail_height(1200, 800), 96);
         assert_eq!(thumbnail_height(800, 800), 144);
-        assert_eq!(thumbnail_height(0, 0), 144 * 1);
+        assert_eq!(thumbnail_height(0, 0), 144);
     }
 
     #[test]
@@ -208,7 +208,7 @@ mod tests {
     fn the_cache_never_holds_more_than_its_capacity_and_drops_the_least_recently_used() {
         let mut cache: Lru<u32> = Lru::new(3);
         for key in 0..3 {
-            assert!(cache.insert(key, key as u32).is_empty());
+            assert_eq!(cache.insert(key, key as u32), Vec::<u32>::new());
         }
         assert_eq!(cache.get(0), Some(&0), "0 is used again, so 1 is now the oldest");
         assert_eq!(cache.insert(3, 3), vec![1]);

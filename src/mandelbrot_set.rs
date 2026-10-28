@@ -529,7 +529,7 @@ mod tests {
         let points = test_points();
         for max_iterations in [1, 7, 300] {
             let m = MandelbrotSet::new(max_iterations, 2.0);
-            for group in points.chunks_exact(LANES) {
+            for group in points.as_chunks::<LANES>().0 {
                 let group: [Complex; LANES] = std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y));
                 let lanes = m.iterate_lanes_smooth(&group);
                 let generic = m.iterate_lanes_smooth_dispatch(&group);
