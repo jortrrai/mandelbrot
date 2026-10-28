@@ -3,16 +3,26 @@
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, ColorImage, TextureOptions};
 
 use crate::coloring::ColorChannelMapping;
-use crate::complex_plane::View;
+use crate::complex_plane::{ComplexPlane, View};
 use crate::pixel_buffer::PixelBuffer;
 use crate::points_of_interest::{self, Coloring, PointOfInterest};
 use crate::thumbnails::{self, ThumbnailRequest};
+use super::flight::{Camera, Flight};
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
+
+/// A flight to a point of interest that is under way: the path, how far along it the flight is, and the point to apply on arrival
+pub(super) struct PointFlight {
+    pub(super) flight: Flight,
+    /// The time of the flight so far, and the frame it was last moved in: the flight clock follows the frames of the window
+    pub(super) elapsed: Duration,
+    pub(super) last_frame: Instant,
+    pub(super) point: PointOfInterest,
+}
 
 
 /// The thumbnail that is being rendered on a background thread
@@ -159,10 +169,59 @@ impl MandelbrotApp {
         self.points_folder = folder;
     }
 
-    /// Goes to the point of interest at `index`: its center, scale and maximum iterations are applied, and with `restore_appearance` also the coloring and color channels saved in its file.
-    /// Otherwise the current appearance, and the supersampling, stay as they are.
+    /// Flies to the point of interest at `index`, by the chosen route at the chosen pace (see `flight`); `fly` moves the view on every frame and arrives with `arrive_at`
     pub(super) fn go_to_point_of_interest(&mut self, index: usize) {
         let Some(point) = self.points.get(index).cloned() else { return };
+        let center = self.c.center();
+        let from = Camera { x: center.x, y: center.y, scale: self.c.get_scale() };
+        let to = Camera { x: point.location.real, y: point.location.imaginary, scale: point.location.scale };
+        let reset_plane = ComplexPlane::new(self.p.pixel_plane.width, self.p.pixel_plane.height);
+        let reset = Camera { x: reset_plane.center().x, y: reset_plane.center().y, scale: reset_plane.get_scale() };
+        let flight = Flight::new(from, to, self.route, self.pace, reset);
+        self.log(format!("Flying to {} ({}, {}, {:.1} s)", point.name, self.route.name(), self.pace.name(), flight.duration().as_secs_f64()));
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point });
+    }
+
+    /// Stops the flight where it is (the Cancel button): the view stays, gets a full-quality render, and the controls are free again
+    pub(super) fn cancel_flight(&mut self) {
+        if let Some(flight) = self.flight.take() {
+            self.render(&format!("Stopped the flight to {}", flight.point.name));
+        }
+    }
+
+    /// Ends the flight at its destination at once (the Skip button)
+    pub(super) fn skip_flight(&mut self) {
+        if let Some(flight) = self.flight.take() {
+            self.arrive_at(&flight.point);
+        }
+    }
+
+    /// Moves the view along the flight to a point of interest, if one is under way, and asks for the next frame
+    pub(super) fn fly(&mut self, ctx: &egui::Context) {
+        self.fly_at(Instant::now());
+        if self.flight.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// The frame of the flight at `now`: a quick render of the view on the way (like a frame of a gesture), or the point itself on arrival
+    pub(super) fn fly_at(&mut self, now: Instant) {
+        let Some(mut flight) = self.flight.take() else { return };
+        flight.elapsed += now.saturating_duration_since(flight.last_frame);
+        flight.last_frame = now;
+        let elapsed = flight.elapsed;
+        if flight.flight.arrived(elapsed) {
+            self.arrive_at(&flight.point);
+            return;
+        }
+        self.c.set_view(&flight.flight.camera_at(elapsed).view());
+        self.start_render_as(&format!("Flying to {}", flight.point.name), false, true);
+        self.flight = Some(flight);
+    }
+
+    /// Goes to `point`: its center, scale and maximum iterations are applied, and with `restore_appearance` also the coloring and color channels saved in its file.
+    /// Otherwise the current appearance, and the supersampling, stay as they are.
+    fn arrive_at(&mut self, point: &PointOfInterest) {
         let location = &point.location;
         self.c.set_view(&View::new(location.real, location.imaginary, location.scale));
         self.m.max_iterations = location.max_iterations;

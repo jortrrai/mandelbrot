@@ -152,6 +152,9 @@ impl MandelbrotApp {
 
     /// After a drag or a wheel zoom, starts the full-quality render of the view as soon as the gesture stops or pauses for `GESTURE_PAUSE`
     pub(super) fn settle_gesture(&mut self, ctx: &egui::Context) {
+        if self.flight.is_some() {
+            return; //A flight renders its destination with full quality when it arrives, see `points::fly_at`
+        }
         let Some((_, changed, _)) = &self.settle else { return };
         if let (true, Some(remaining)) = (self.gesture_active, GESTURE_PAUSE.checked_sub(changed.elapsed())) {
             ctx.request_repaint_after(remaining);
@@ -173,10 +176,14 @@ impl MandelbrotApp {
     ///
     /// Every render continues the samples of the render before it (`SampleState`): the job waits for the state of the job it interrupts, which keeps everything that
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
-    fn start_render_as(&mut self, message: &str, moved: bool, during_gesture: bool) {
+    pub(super) fn start_render_as(&mut self, message: &str, moved: bool, during_gesture: bool) {
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();
-        self.history.record(&self.c);
+        self.flight = None; //Any other render stops a flight to a point of interest where it is; a frame of the flight puts it back, see `points::fly_at`
+        if !during_gesture {
+            //Only the views that the window settles on: not every frame of a drag, a wheel zoom or a flight
+            self.history.record(&self.c);
+        }
         self.buffer_is_complete = false;
         self.settle = during_gesture.then(|| (message.to_string(), Instant::now(), moved));
         //The samples of the last render, handed from job to job; this job hands its own on when it stops, finished or not
