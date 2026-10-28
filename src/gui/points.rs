@@ -15,11 +15,13 @@ use crate::thumbnails::{self, ThumbnailRequest};
 use super::flight::{Camera, Flight};
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
 
-/// A flight to a point of interest that is under way: the path, when it started, and the point to apply on arrival
+/// A flight to a point of interest that is under way: the path, how far along it the flight is, and the point to apply on arrival
 pub(super) struct PointFlight {
     pub(super) flight: Flight,
-    pub(super) started: Instant,
-    point: PointOfInterest,
+    /// The time of the flight so far, and the frame it was last moved in: the flight clock follows the frames of the window
+    pub(super) elapsed: Duration,
+    pub(super) last_frame: Instant,
+    pub(super) point: PointOfInterest,
 }
 
 
@@ -177,7 +179,21 @@ impl MandelbrotApp {
         let reset = Camera { x: reset_plane.center().x, y: reset_plane.center().y, scale: reset_plane.get_scale() };
         let flight = Flight::new(from, to, self.route, self.pace, reset);
         self.log(format!("Flying to {} ({}, {}, {:.1} s)", point.name, self.route.name(), self.pace.name(), flight.duration().as_secs_f64()));
-        self.flight = Some(PointFlight { flight, started: Instant::now(), point });
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point });
+    }
+
+    /// Stops the flight where it is (the Cancel button): the view stays, gets a full-quality render, and the controls are free again
+    pub(super) fn cancel_flight(&mut self) {
+        if let Some(flight) = self.flight.take() {
+            self.render(&format!("Stopped the flight to {}", flight.point.name));
+        }
+    }
+
+    /// Ends the flight at its destination at once (the Skip button)
+    pub(super) fn skip_flight(&mut self) {
+        if let Some(flight) = self.flight.take() {
+            self.arrive_at(&flight.point);
+        }
     }
 
     /// Moves the view along the flight to a point of interest, if one is under way, and asks for the next frame
@@ -190,8 +206,10 @@ impl MandelbrotApp {
 
     /// The frame of the flight at `now`: a quick render of the view on the way (like a frame of a gesture), or the point itself on arrival
     pub(super) fn fly_at(&mut self, now: Instant) {
-        let Some(flight) = self.flight.take() else { return };
-        let elapsed = now.saturating_duration_since(flight.started);
+        let Some(mut flight) = self.flight.take() else { return };
+        flight.elapsed += now.saturating_duration_since(flight.last_frame);
+        flight.last_frame = now;
+        let elapsed = flight.elapsed;
         if flight.flight.arrived(elapsed) {
             self.arrive_at(&flight.point);
             return;

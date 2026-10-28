@@ -131,6 +131,19 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest; using any control or the mouse stops a flight");
         });
+        if let Some(flight) = &self.flight {
+            //The progress along the path, and the buttons to stop the flight or to be there at once
+            let share = flight.flight.share_of_path(flight.elapsed) as f32;
+            let text = format!("To {}: {:.0}% of the way", flight.point.name, share * 100.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
+                    self.cancel_flight();
+                } else if ui.button("Skip").on_hover_text("Goes to the place at once").clicked() {
+                    self.skip_flight();
+                }
+            });
+            ui.add(egui::ProgressBar::new(share).text(text));
+        }
         ui.horizontal(|ui| {
             for (input, hint) in self.view_inputs.iter_mut().zip(["x", "y", "scale"]) {
                 ui.add(egui::TextEdit::singleline(input).hint_text(hint).desired_width(80.0));
