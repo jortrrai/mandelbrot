@@ -19,7 +19,7 @@ use super::MandelbrotApp;
 /// A message from a rendering job that runs on a background thread
 pub(super) enum JobMessage {
     /// An intermediate image: the running average of the first `pass` of `total` supersampling layers
-    Pass { colors: Vec<TrueColor>, pass: u8, total: u8, layer_time: Duration },
+    Pass { colors: Vec<TrueColor>, plane: ComplexPlane, pass: u8, total: u8, layer_time: Duration },
     /// The iteration limit that auto iterations chose for the render, sent as soon as it is known, before the first layer is rendered
     Limit { max_iterations: u32, palette_scale: u32 },
     /// The job has finished (or was cancelled), this is its final result
@@ -67,8 +67,9 @@ impl MandelbrotApp {
         loop {
             let Some(receiver) = &self.job else { return };
             match receiver.try_recv() {
-                Ok(JobMessage::Pass { colors, pass, total, layer_time }) => {
+                Ok(JobMessage::Pass { colors, plane, pass, total, layer_time }) => {
                     self.p.colors = colors;
+                    self.shown_plane = plane;
                     self.texture_outdated = true;
                     if let Some(progress) = &mut self.progress {
                         progress.pass = pass;
@@ -95,6 +96,7 @@ impl MandelbrotApp {
                             bars.finished = Some((elapsed, completed));
                         }
                     }
+                    self.shown_plane = c.clone();
                     self.c = c;
                     self.p = p;
                     self.texture_outdated = true;
@@ -201,7 +203,7 @@ impl MandelbrotApp {
                 p.colors.copy_from_slice(colors);
                 let layer_time = layer_started.elapsed();
                 println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
-                let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), pass, total: supersampling_amount, layer_time });
+                let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time });
                 layer_started = Instant::now();
             });
             p.update_pixels(); //The pixels of the last completed layer

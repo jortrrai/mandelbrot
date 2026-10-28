@@ -20,6 +20,7 @@ mod points;
 mod render_job;
 mod save_size;
 mod status;
+mod transform;
 #[cfg(test)]
 mod tests;
 
@@ -123,6 +124,8 @@ pub struct MandelbrotApp {
     log: Vec<String>,
     texture: Option<TextureHandle>,
     texture_outdated: bool,
+    /// The view that the colors of `p` show. It differs from `c` while the render of a new view has not shown its first layer yet: the image is then drawn moved and scaled, see `transform`
+    shown_plane: ComplexPlane,
     /// The receiving end of the running background rendering job, if any. While a job runs, the controls are disabled.
     job: Option<Receiver<JobMessage>>,
     /// Set while a progressive render runs
@@ -139,6 +142,7 @@ pub struct MandelbrotApp {
 impl MandelbrotApp {
     pub(super) fn new(config: &Config) -> MandelbrotApp {
         let c = ComplexPlane::new(config.window_width, config.window_height);
+        let shown_plane = c.clone();
         let mut p = PixelBuffer::new(PixelPlane::new(config.window_width, config.window_height));
         p.color_channel_mapping = COLOR_CHANNEL_MAPPING;
         let m = MandelbrotSet::new(config.max_iterations, config.orbit_radius);
@@ -183,6 +187,7 @@ impl MandelbrotApp {
             log: Vec::new(),
             texture: None,
             texture_outdated: true,
+            shown_plane,
             job: None,
             progress: None,
             bars: None,
@@ -243,7 +248,10 @@ impl MandelbrotApp {
         let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
         let scale = (available.x / width).min(available.y / height);
         let size = egui::vec2(width * scale, height * scale);
-        let response = ui.add(egui::Image::new((texture.id(), size)).sense(egui::Sense::click_and_drag()));
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        //The image of the last render, at its place in the current view (the whole rectangle when they are the same view)
+        let target = transform::shown_rect(&self.shown_plane, &self.c, rect);
+        ui.painter_at(rect).image(texture.id(), target, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
         self.handle_image_pointer(ui, &response, size);
         available
     }

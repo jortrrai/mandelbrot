@@ -820,3 +820,20 @@ fn dragging_moves_the_view_and_the_wheel_zooms_around_the_cursor() {
     let after = app.c.complex_from_pixel_plane(100.0, 20.0);
     assert!((after.x - under_cursor.x).abs() < 1e-9 && (after.y - under_cursor.y).abs() < 1e-9, "{after:?} {under_cursor:?}");
 }
+
+#[test]
+fn the_last_image_follows_a_new_view_until_the_render_of_that_view_arrives() {
+    let config = Config::build(["mandelbrot", "120", "80", "100", "1"].map(String::from).into_iter()).unwrap();
+    let mut app = manual_app(&config);
+    let full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    assert_eq!(super::transform::shown_fraction(&app.shown_plane, &app.c), full);
+
+    //Move 12 columns to the right: until the new render shows a layer, the old image is drawn 12 columns (a tenth of the image) to the left
+    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 12);
+    app.render_moved("Moved", (0, -12));
+    let moved = super::transform::shown_fraction(&app.shown_plane, &app.c);
+    assert!((moved.min.x + 0.1).abs() < 1e-5 && moved.min.y.abs() < 1e-5, "{moved:?}");
+    wait_for_job(&mut app);
+    let after = super::transform::shown_fraction(&app.shown_plane, &app.c);
+    assert!((after.min - full.min).length() < 1e-5 && (after.max - full.max).length() < 1e-5, "the rendered image fills the view again: {after:?}");
+}
