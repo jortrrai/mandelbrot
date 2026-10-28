@@ -7,7 +7,7 @@ const WIDTH: usize = 1200;
 const HEIGHT: usize = 800;
 const MAX_ITERATIONS: u32 = 1000;
 const ORBIT_RADIUS: f64 = 2.0;
-const SUPERSAMPLING_AMOUNT: u8 = 1;
+const SUPERSAMPLING_AMOUNT: u8 = 32;
 const WINDOW_SCALE: f64 = 1.0;
 
 /// The settings that the command line gives: the size of the window and the image, the iterations, the supersampling and the scale of the window
@@ -118,13 +118,13 @@ mod tests {
     fn without_arguments_the_defaults_are_used() {
         let config = build(&[]).unwrap();
         assert_eq!((config.window_width, config.window_height, config.image_width, config.image_height), (1200, 800, 1200, 800));
-        assert_eq!((config.max_iterations, config.supersampling_amount), (1000, 1));
+        assert_eq!((config.max_iterations, config.supersampling_amount), (1000, 32));
         assert_eq!((config.orbit_radius, config.window_scale), (2.0, 1.0));
     }
 
     #[test]
     fn the_debug_text_lists_every_field_as_it_always_did() {
-        assert_eq!(format!("{:?}", build(&[]).unwrap()), "Config { window_width: 1200, window_height: 800, max_iterations: 1000, orbit_radius: 2.0, supersampling_amount: 1, window_scale: 1.0, image_width: 1200, image_height: 800, fit_window: true }");
+        assert_eq!(format!("{:?}", build(&[]).unwrap()), "Config { window_width: 1200, window_height: 800, max_iterations: 1000, orbit_radius: 2.0, supersampling_amount: 32, window_scale: 1.0, image_width: 1200, image_height: 800, fit_window: true }");
     }
 
     #[test]
