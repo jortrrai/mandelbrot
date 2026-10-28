@@ -5,7 +5,9 @@ use eframe::egui::{self};
 
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
+use crate::resolution;
 use crate::complex_plane::Precision;
+use super::save_size::SaveSizeChoice;
 use super::{MandelbrotApp, COLORING_FUNCTIONS, COLOR_CHANNEL_MAPPINGS};
 
 
@@ -116,6 +118,13 @@ impl MandelbrotApp {
     /// The maximum iterations (manual or automatic, with its presets), adaptive supersampling and the quality of the window
     fn render_settings_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let mut follow = self.fit.enabled;
+            if ui.checkbox(&mut follow, "Match the window size").on_hover_text("The image is rendered with one pixel for every pixel of the area it is shown in, and again when the window is resized. The view keeps its center and zoom. Off: the image keeps its size and is scaled to the window.").changed() {
+                self.fit.set_enabled(follow);
+            }
+            ui.label(format!("({})", self.view_resolution()));
+        });
+        ui.horizontal(|ui| {
             ui.label("Max. iterations:");
             let response = ui.add_enabled(!self.auto_iterations, egui::DragValue::new(&mut self.max_iterations_input).range(1..=1_000_000).speed(10.0));
             if (response.drag_stopped() || response.lost_focus()) && self.max_iterations_input != self.m.max_iterations {
@@ -222,8 +231,59 @@ impl MandelbrotApp {
             ui.label("Saved image quality:");
             ui.add(egui::DragValue::new(&mut self.image_supersampling_amount).range(1..=64).suffix("x"));
         });
+        self.save_size_controls(ui);
         if ui.button("Save image").clicked() {
             self.save_image();
+        }
+    }
+
+    /// The list with the size of the saved image, the fields of a custom size and the buttons that keep it as a preset
+    fn save_size_controls(&mut self, ui: &mut egui::Ui) {
+        let (command_line, view) = (self.command_line_resolution(), self.view_resolution());
+        ui.horizontal(|ui| {
+            ui.label("Saved image size:");
+            egui::ComboBox::from_id_salt("save_size").selected_text(self.save_size.selected_text(command_line, view)).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::CommandLine, format!("Command line ({command_line})"));
+                ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::View, format!("Same as the view ({view})"));
+                ui.separator();
+                for preset in self.save_size.all_presets() {
+                    let custom = self.save_size.is_custom_preset(&preset.name);
+                    let label = if custom { format!("{} (custom)", preset.label()) } else { preset.label() };
+                    ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::Preset(preset.name), label);
+                }
+                ui.separator();
+                ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::Custom, "Custom size...");
+            });
+        });
+        match self.save_size.resolve(command_line, view) {
+            Ok(resolution) => ui.label(format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6)),
+            Err(reason) => ui.colored_label(egui::Color32::from_rgb(230, 70, 60), reason),
+        };
+        if self.save_size.choice == SaveSizeChoice::Custom {
+            ui.horizontal(|ui| {
+                ui.label("Width:");
+                ui.add(egui::DragValue::new(&mut self.save_size.custom_width).range(resolution::MIN_SIDE..=resolution::MAX_SIDE));
+                ui.label("Height:");
+                ui.add(egui::DragValue::new(&mut self.save_size.custom_height).range(resolution::MIN_SIDE..=resolution::MAX_SIDE));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Preset name:");
+                ui.add(egui::TextEdit::singleline(&mut self.save_size.preset_name).desired_width(120.0));
+                if ui.button("Save as preset").on_hover_text("Keeps this size in the list, also the next time the program starts").clicked() {
+                    match self.save_size.add_preset() {
+                        Ok(message) => self.log(message),
+                        Err(reason) => self.log(format!("Could not save the preset: {reason}")),
+                    }
+                }
+            });
+        }
+        if let SaveSizeChoice::Preset(name) = self.save_size.choice.clone() {
+            if self.save_size.is_custom_preset(&name) && ui.button("Delete this preset").clicked() {
+                match self.save_size.delete_preset(&name) {
+                    Ok(message) => self.log(message),
+                    Err(reason) => self.log(format!("Could not delete the preset: {reason}")),
+                }
+            }
         }
     }
 }

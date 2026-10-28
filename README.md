@@ -47,7 +47,7 @@ cargo run --release -- <width> <height> <max_iterations> <supersampling_amount> 
 ```
 | Argument | Default | Meaning |
 |---|---|---|
-| `width`, `height` | 1200, 800 | the size of an image in pixels |
+| `width`, `height` | 1200, 800 | the size of the image in pixels, and the size of a saved image. Without them (or `window_scale`) the image follows the size of the window, see *Match the window size* below |
 | `max_iterations` | 1000 | the most iterations of a point |
 | `supersampling_amount` | 1 | samples per pixel (1 to 64) |
 | `window_scale` | 1.0 | the scale of the window relative to the image, e.g. `0.5` shows a 1920x1080 image in a 960x540 window |
@@ -64,9 +64,10 @@ The fractal is on the left. On the right, from top to bottom, are the controls, 
 - **Go to view**: type the `x`, `y` and `scale` of a view.
 - **Max. iterations**: the most iterations of a point. **Auto iterations** chooses it for the zoom of every render; its drop-down offers the presets *Performance*, *Balanced* (the default) and *High Detail*, and the fields below it are the settings of the preset. It is a heuristic on a sparse grid, not a proof: very narrow detail can be missed.
 - **Adaptive supersampling**: the first two samples of every pixel, the rest only where the picture shows detail (a heuristic; the same render can differ slightly from full supersampling).
+- **Match the window size**: the image is rendered with one pixel for every pixel of the area it is shown in, and rendered again (after the window has stayed the same size for a moment) when the window is resized. The view keeps its center and its zoom: a wider window shows the same part of the real axis, a taller one shows more of the imaginary axis. It is on by default, and off when the command line gives a `width`, `height` or `window_scale`.
 - **Quality (supersampling)**: samples per pixel, from 1x to 64x.
 - **Coloring** (Bernstein polynomials or HSV) and **Color channels** (any of the 27 mappings such as `RGB` or `BGR`).
-- **Save Image** with its own *Saved image quality*: the PNG goes to the `saved` folder, with the view, the settings and the application in its metadata.
+- **Save Image** with its own *Saved image quality* and *Saved image size*: the command line size (the default), the size of the view, one of ten presets (HD 720p to 8K UHD, squares, portrait), a preset of your own, or *Custom size...* (16 to 16,384 pixels per side, at most 100 megapixels). Give a custom size a name and *Save as preset* to keep it in `resolution_presets.json` in your configuration folder (`~/.config/mandelbrot` on Linux). The PNG goes to the `saved` folder, with the view, the settings and the application in its metadata.
 - Click the fractal to see the coordinates of a point in the status; right-click to center the view on it.
 
 **Current view**: the center (real and imaginary, with all digits) and the zoom (the magnification relative to the starting view). *Copy* puts the center and the scale on the clipboard.

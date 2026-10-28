@@ -33,7 +33,10 @@ pub struct Config {
     /// The width in pixels of a saved image
     pub image_width: usize,
     /// The height in pixels of a saved image
-    pub image_height: usize
+    pub image_height: usize,
+    /// Whether the window starts with the render size following the size of the window. Only when none of the size arguments (width, height, window scale) was given:
+    /// a size on the command line is what the user asked for, so it is kept until the user turns the option on in the window.
+    pub fit_window: bool,
 }
 
 
@@ -48,10 +51,12 @@ impl Config {
         args.next(); //Skip the first argument as it is the name of the executable
 
         //First argument
-        let image_width = Config::parse_argument("width", args.next(), WIDTH)?; 
+        let width_argument = args.next();
+        let image_width = Config::parse_argument("width", width_argument.clone(), WIDTH)?;
 
         //Second argument
-        let image_height = Config::parse_argument("height", args.next(), HEIGHT)?;
+        let height_argument = args.next();
+        let image_height = Config::parse_argument("height", height_argument.clone(), HEIGHT)?;
 
         //Third argument
         let max_iterations = Config::parse_argument("max_iterations", args.next(), MAX_ITERATIONS)?;
@@ -60,12 +65,15 @@ impl Config {
         let supersampling_amount = Config::parse_argument("supersampling_amount", args.next(), SUPERSAMPLING_AMOUNT)?;
 
         //Fifth argument
-        let window_scale = Config::parse_argument("window_scale", args.next(), WINDOW_SCALE)?;
+        let window_scale_argument = args.next();
+        let window_scale = Config::parse_argument("window_scale", window_scale_argument.clone(), WINDOW_SCALE)?;
+        let given = |argument: &Option<String>| argument.as_deref().is_some_and(|text| text != "-");
+        let fit_window = !(given(&width_argument) || given(&height_argument) || given(&window_scale_argument));
         //Scale width and height
         let window_width = (f64::from(image_width as u32) * window_scale) as usize;
         let window_height = (f64::from(image_height as u32) * window_scale) as usize;
 
-        Ok(Config {window_width, window_height, max_iterations, orbit_radius: ORBIT_RADIUS, supersampling_amount, window_scale, image_width, image_height})
+        Ok(Config {window_width, window_height, max_iterations, orbit_radius: ORBIT_RADIUS, supersampling_amount, window_scale, image_width, image_height, fit_window})
     }
 
     ///Parses an argument to a T value if possible, returns an error if not. Returns default if argument is None\
@@ -116,7 +124,16 @@ mod tests {
 
     #[test]
     fn the_debug_text_lists_every_field_as_it_always_did() {
-        assert_eq!(format!("{:?}", build(&[]).unwrap()), "Config { window_width: 1200, window_height: 800, max_iterations: 1000, orbit_radius: 2.0, supersampling_amount: 1, window_scale: 1.0, image_width: 1200, image_height: 800 }");
+        assert_eq!(format!("{:?}", build(&[]).unwrap()), "Config { window_width: 1200, window_height: 800, max_iterations: 1000, orbit_radius: 2.0, supersampling_amount: 1, window_scale: 1.0, image_width: 1200, image_height: 800, fit_window: true }");
+    }
+
+    #[test]
+    fn the_render_size_follows_the_window_unless_a_size_was_asked_for() {
+        assert!(build(&[]).unwrap().fit_window);
+        assert!(build(&["-", "-", "250", "4"]).unwrap().fit_window, "dashes and the other arguments do not ask for a size");
+        assert!(!build(&["640"]).unwrap().fit_window);
+        assert!(!build(&["-", "600"]).unwrap().fit_window);
+        assert!(!build(&["-", "-", "-", "-", "0.5"]).unwrap().fit_window);
     }
 
     #[test]

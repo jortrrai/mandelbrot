@@ -6,6 +6,7 @@
 //! * [`coloring`], [`pixel_buffer`]: the palettes, the channel mappings, and the buffer of pixels with saving to PNG.
 //! * [`rendering`]: the progressive and adaptive renderers that turn a view into colors.
 //! * [`auto_iterations`], [`thumbnails`], [`points_of_interest`]: the automatic iteration limit, the thumbnails and the named places.
+//! * [`resolution`]: the image resolutions: built-in presets, the custom presets of the user and the file that keeps them.
 //! * [`gui`]: the window. [`config`] reads the command line, [`interaction`] holds the move and zoom steps.
 //!
 //! The same view and settings always render the same image: the supersampling jitter is a hash of the pixel and the sample, never random.
@@ -60,6 +61,7 @@ pub mod gui;
 pub mod config;
 pub mod interaction;
 pub mod points_of_interest;
+pub mod resolution;
 pub mod thumbnails;
 
 /// A function that colors a pixel from its iteration count and the maximum iterations, e.g. `TrueColor::new_from_bernstein_polynomials`
