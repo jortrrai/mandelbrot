@@ -78,6 +78,16 @@ impl ComplexPlane {
         }
     }
 
+    /// The plane for a window of `width` x `height` pixels that shows the same part of the real axis and has the same center.
+    /// The real bounds are copied exactly, so resizing a window again and again never drifts; the imaginary bounds follow the new aspect ratio, so the pixels stay square.
+    pub fn resized(&self, width: usize, height: usize) -> ComplexPlane {
+        let (float_width, float_height) = (f64::from(width as u32), f64::from(height as u32));
+        let length_y = self.length_x * (float_height / float_width);
+        let middle_y = self.min_y + (self.max_y - self.min_y) / 2.0; //Stored with the orientation of the screen, like the bounds
+        let (min_y, max_y) = (middle_y - length_y / 2.0, middle_y + length_y / 2.0);
+        ComplexPlane { min_x: self.min_x, max_x: self.max_x, length_x: self.length_x, min_y, max_y, length_y: max_y - min_y, increment_x: self.length_x / float_width, increment_y: (max_y - min_y) / float_height, width, height }
+    }
+
     /// Translate the Complex plane by adding x to `min_x` and `max_x`, and y to `min_y` and `max_y`
     pub fn translate(&mut self, x: f64, y: f64) {
         self.min_x += x;
@@ -243,6 +253,28 @@ impl std::fmt::Debug for View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::float_cmp)] // The real bounds are copied, so they are exactly equal
+    fn resizing_keeps_the_real_bounds_and_the_center_and_makes_the_pixels_square() {
+        let mut plane = ComplexPlane::new(1200, 800);
+        plane.set_view(&View::new(-0.7498, 0.0203, 0.00064));
+        let wide = plane.resized(1600, 600);
+        assert_eq!((wide.min_x, wide.max_x, wide.length_x), (plane.min_x, plane.max_x, plane.length_x));
+        assert!(close(wide.center().x, plane.center().x) && close(wide.center().y, plane.center().y));
+        assert!(close(wide.increment_x, wide.increment_y), "the pixels are square");
+        assert!(close(wide.length_y, wide.length_x * 600.0 / 1600.0));
+        assert!(close(wide.get_scale(), plane.get_scale()), "the zoom is about the real axis, so it does not change");
+        //Resizing to the same size changes nothing, and resizing back and forth does not drift
+        let same = plane.resized(1200, 800);
+        assert_eq!((same.min_y, same.max_y, same.increment_x), (plane.min_y, plane.max_y, plane.increment_x));
+        let mut drifting = plane.clone();
+        for step in 0..1000 {
+            drifting = drifting.resized(300 + step % 7 * 100, 200 + step % 5 * 90);
+        }
+        assert_eq!((drifting.min_x, drifting.max_x), (plane.min_x, plane.max_x));
+        assert!(drifting.center().y.to_bits().abs_diff(plane.center().y.to_bits()) < 1000, "{} {}", drifting.center().y, plane.center().y);
+    }
 
     #[test]
     fn precision_runs_out_at_the_zoom_where_neighboring_pixels_share_a_coordinate() {

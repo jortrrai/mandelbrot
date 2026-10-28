@@ -4,12 +4,14 @@
 //! * `render_job`: the background threads that render the view layer by layer.
 //! * `actions`: what the buttons and clicks do.
 //! * `controls`: the controls on the right.
+//! * `fit`: the render size that follows the size of the window.
 //! * `points`: the points of interest with their thumbnails.
 //! * `save_size`: the size of the saved image: the presets and the custom size.
 //! * `status`: the current view, the status log and the progress bar.
 
 mod actions;
 mod controls;
+mod fit;
 mod points;
 mod render_job;
 mod save_size;
@@ -19,6 +21,7 @@ mod tests;
 
 pub use status::{format_zoom, CurrentView};
 
+use self::fit::Fit;
 use self::points::{ThumbnailJob, ThumbnailMessage};
 use self::render_job::{JobMessage, Progress, RenderBars};
 use self::save_size::SaveSize;
@@ -73,6 +76,8 @@ pub struct MandelbrotApp {
     coloring_index: usize,
     supersampling_amount: u8,
     image_supersampling_amount: u8,
+    /// Whether the render size follows the size of the window, see `fit`
+    fit: Fit,
     /// The size of the saved image, see `save_size`
     save_size: SaveSize,
     /// Edited values of the max iterations field, applied when editing ends
@@ -148,6 +153,7 @@ impl MandelbrotApp {
             supersampling_amount: config.supersampling_amount,
             supersampling_input: config.supersampling_amount,
             image_supersampling_amount: config.supersampling_amount,
+            fit: Fit::new(config.fit_window),
             save_size,
             points: Vec::new(),
             thumbs: Lru::new(thumbnails::MAX_CACHED),
@@ -227,10 +233,12 @@ impl eframe::App for MandelbrotApp {
 
         egui::Panel::right("side_panel").default_size(SIDE_PANEL_WIDTH).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
 
+        let mut fit_area = egui::Vec2::ZERO;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
+            let available = ui.available_size();
+            fit_area = available;
             let Some(texture) = self.texture.clone() else { return };
             let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
-            let available = ui.available_size();
             let scale = (available.x / width).min(available.y / height);
             let size = egui::vec2(width * scale, height * scale);
             let response = ui.add(egui::Image::new((texture.id(), size)).sense(egui::Sense::click()));
@@ -244,5 +252,6 @@ impl eframe::App for MandelbrotApp {
                 }
             }
         });
+        self.fit_to_window(&ctx, fit_area);
     }
 }

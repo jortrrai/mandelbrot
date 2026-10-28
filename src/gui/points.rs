@@ -110,12 +110,12 @@ impl MandelbrotApp {
     /// so the work does not depend on how many points there are.
     pub(super) fn points_ui(&mut self, ui: &mut egui::Ui) -> PointsFrame {
         let mut frame = PointsFrame::default();
-        let (width, height) = (thumbnails::THUMBNAIL_WIDTH as f32, thumbnails::thumbnail_height(self.config.window_width, self.config.window_height) as f32);
+        let (width, height) = (thumbnails::THUMBNAIL_WIDTH as f32, thumbnails::thumbnail_height(self.p.pixel_plane.width, self.p.pixel_plane.height) as f32);
         egui::ScrollArea::vertical().id_salt("points_of_interest_list").max_height(POINT_ROW_HEIGHT * POINT_ROWS_SHOWN).auto_shrink([false, true]).show_rows(ui, POINT_ROW_HEIGHT, self.points.len(), |ui, rows| {
             for index in rows {
                 let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), POINT_ROW_HEIGHT - 4.0), egui::Sense::click());
                 let point = &self.points[index];
-                let request = Self::thumbnail_request_for(point, self.coloring_index, self.restore_appearance, self.p.color_channel_mapping, (self.config.window_width, self.config.window_height));
+                let request = Self::thumbnail_request_for(point, self.coloring_index, self.restore_appearance, self.p.color_channel_mapping, (self.p.pixel_plane.width, self.p.pixel_plane.height));
                 //Visible: at least a quarter of the row is inside the list and inside the scrolling controls around it (not clipped away)
                 let shown = rect.intersect(ui.clip_rect());
                 let visible = shown.is_positive() && shown.height() >= rect.height() * 0.25;

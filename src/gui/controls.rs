@@ -118,6 +118,13 @@ impl MandelbrotApp {
     /// The maximum iterations (manual or automatic, with its presets), adaptive supersampling and the quality of the window
     fn render_settings_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let mut follow = self.fit.enabled;
+            if ui.checkbox(&mut follow, "Match the window size").on_hover_text("The image is rendered with one pixel for every pixel of the area it is shown in, and again when the window is resized. The view keeps its center and zoom. Off: the image keeps its size and is scaled to the window.").changed() {
+                self.fit.set_enabled(follow);
+            }
+            ui.label(format!("({})", self.view_resolution()));
+        });
+        ui.horizontal(|ui| {
             ui.label("Max. iterations:");
             let response = ui.add_enabled(!self.auto_iterations, egui::DragValue::new(&mut self.max_iterations_input).range(1..=1_000_000).speed(10.0));
             if (response.drag_stopped() || response.lost_focus()) && self.max_iterations_input != self.m.max_iterations {
