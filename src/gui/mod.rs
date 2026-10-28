@@ -183,6 +183,10 @@ pub struct MandelbrotApp {
     /// Messages from background tasks that do not change the view, e.g. saving an image
     notices: Receiver<String>,
     notice_sender: Sender<String>,
+    /// The GPU that helps with rendering once it is opened and checked (see `rendering::gpu`), whether to use it, and where the result of opening it arrives
+    gpu: Option<std::sync::Arc<rendering::gpu::GpuIterator>>,
+    use_gpu: bool,
+    gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
 }
 
 impl MandelbrotApp {
@@ -255,6 +259,16 @@ impl MandelbrotApp {
             samples: None,
             buffer_is_complete: false,
             notices,
+            gpu: None,
+            use_gpu: true,
+            gpu_opening: config.gpu.then(|| {
+                //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
+                let (sender, receiver) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = sender.send(rendering::gpu::GpuIterator::new());
+                });
+                receiver
+            }),
             notice_sender,
         };
         app.log(format!("Window: {}x{} pixels, {} CPU threads used for rendering", config.window_width, config.window_height, rendering::render_thread_count()));

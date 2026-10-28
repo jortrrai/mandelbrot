@@ -6,6 +6,7 @@ use super::adaptive::{mask_where, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 use super::jitter::sample_jitter;
 use super::region::ExposedRegion;
 use super::render_thread_count;
+use super::gpu::GpuIterator;
 use super::state::{SampleKey, SampleState, FOREIGN};
 use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, mandelbrot_set::{MandelbrotSet, LANES}};
 
@@ -40,12 +41,14 @@ pub struct Render<'a> {
     pixels_done: Option<&'a AtomicUsize>,
     preview: Option<Duration>,
     state: Option<&'a mut SampleState>,
+    gpu: Option<(&'a GpuIterator, Duration)>,
+    gpu_samples: Option<&'a AtomicUsize>,
 }
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(u32, u32) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, state: None }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, state: None, gpu: None, gpu_samples: None }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -115,6 +118,21 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// With `Some((gpu, join_after))`, the GPU helps with every pass that has run for `join_after` (see `sample_pass`): it computes bit for bit the same samples
+    /// (see `gpu`), so the image is the same; a pass that is done before `join_after` never waits for the GPU.
+    #[must_use]
+    pub fn gpu(mut self, gpu: Option<(&'a GpuIterator, Duration)>) -> Self {
+        self.gpu = gpu;
+        self
+    }
+
+    /// Adds the number of samples that the GPU computed to `gpu_samples`
+    #[must_use]
+    pub fn count_gpu_samples_in(mut self, gpu_samples: &'a AtomicUsize) -> Self {
+        self.gpu_samples = Some(gpu_samples);
+        self
+    }
+
     /// Runs the render. After every completed pass `on_pass` is called with the colors of the whole image (`width * height`, row by row), that is `base` with the region replaced
     /// by the running average of all samples so far, and the number of the pass (from 1).
     /// Returns `false` if the render was cancelled before all passes completed.
@@ -122,7 +140,9 @@ impl<'a> Render<'a> {
     /// # Panics
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, state } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, state, gpu, gpu_samples } = self;
+        let own_gpu_samples = AtomicUsize::new(0);
+        let gpu_samples = gpu_samples.unwrap_or(&own_gpu_samples);
         let (never_cancelled, own_counter) = (AtomicBool::new(false), AtomicUsize::new(0));
         let (cancel, pixels_done) = (cancel.unwrap_or(&never_cancelled), pixels_done.unwrap_or(&own_counter));
         let supersampling_amount = supersampling_amount.clamp(1, 64);
@@ -168,6 +188,7 @@ impl<'a> Render<'a> {
         }
         let mut mask: Option<Vec<bool>> = None;
         let mut masked = [0_usize; 66];
+        let mut time_per_sample: Option<Duration> = None;
         for sample in 0..supersampling_amount {
             let index = usize::from(sample);
             if let Some(adaptive) = adaptive.filter(|_| sample == ADAPTIVE_UNIFORM_SAMPLES) {
@@ -187,7 +208,14 @@ impl<'a> Render<'a> {
             let eligible = if mask.is_some() { masked[index] } else { pending[index] };
             //The pixels that get no sample in this pass count as done
             pixels_done.store(total - eligible, Ordering::Relaxed);
-            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done) } else { 0 };
+            //The GPU only for a pass that is expected to be slow, from the time per sample of the pass before (unknown for the first pass: then the join delay decides)
+            let expected = time_per_sample.map(|per_sample| per_sample * u32::try_from(eligible).unwrap_or(u32::MAX));
+            let pass_gpu = gpu.filter(|_| expected.is_none_or(|expected| expected > GPU_WORTHWHILE)).map(|(gpu, join_after)| (gpu, join_after, gpu_samples));
+            let pass_started = Instant::now();
+            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu) } else { 0 };
+            if processed > 0 {
+                time_per_sample = Some(pass_started.elapsed() / u32::try_from(processed).unwrap_or(u32::MAX));
+            }
             if cancel.load(Ordering::Relaxed) {
                 return false;
             }
@@ -203,74 +231,135 @@ impl<'a> Render<'a> {
     }
 }
 
-/// Pass `sample` of `Render::run`: takes sample `sample` (placed in `anchor`, see `positions`) of every pixel that has `sample` samples (and is marked by `mask`, if any), updates `state` and `colors`
-/// row by row on all threads, and returns how many pixels it sampled. A cancelled pass stops after the rows it started; those rows are complete in `state`.
-/// Without `track` (a state that is not kept) every pixel of the render has `sample` samples except the ones the previews computed, so the counts are not updated.
-#[allow(clippy::too_many_arguments)] // The state of `Render::run` that a pass shares
+/// Pass `sample` of `Render::run`: takes sample `sample` (placed in `anchor`, see `positions`) of every pixel that has `sample` samples (and is marked by `mask`, if
+/// any), updates `state` and `colors` row by row on all threads, and returns how many pixels it sampled. A cancelled pass stops in the middle of a row; the pixels it
+/// sampled are complete in `state`. Without `track` (a state that is not kept) every pixel of the render has `sample` samples except the ones the previews computed,
+/// so the counts are not updated.
+///
+/// With `gpu`, the GPU helps once the pass has run for its join delay (a fast pass never waits for it): it takes `GPU_ROWS` rows at a time from the same queue as
+/// the CPU threads, so the work divides itself by speed. The GPU computes the same positions bit for bit (see `gpu`), and the same code applies them to the rows.
+/// If the GPU fails, its rows are computed on the CPU and the GPU is not used for the rest of the pass.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The state of `Render::run` that a pass shares; the CPU threads and the GPU worker share its closures
 fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
-    cancel: &AtomicBool, pixels_done: &AtomicUsize) -> usize {
+    cancel: &AtomicBool, pixels_done: &AtomicUsize, gpu: Option<(&GpuIterator, Duration, &AtomicUsize)>) -> usize {
     let (width, height, origin) = (state.width, state.height, state.origin);
+    let started = Instant::now();
     let processed = AtomicUsize::new(0);
-        let divisor = u32::from(sample) + 1;
-        let mask_ref = mask;
-        let skip_first = sample == 0 && !has_first.is_empty();
-        //The colors of the first two samples are only kept when they are needed (adaptive supersampling, a kept state); otherwise every row gets an empty slice
-        let (first_rows, second_rows) = (rows_or_empty(&mut state.first, width, height), rows_or_empty(&mut state.second, width, height));
-        let rows = Mutex::new(state.sums.chunks_mut(width).zip(state.counts.chunks_mut(width)).zip(first_rows).zip(second_rows).zip(colors.chunks_mut(width)).enumerate());
-        thread::scope(|scope| {
-            for _ in 0..render_thread_count() {
-                scope.spawn(|| loop {
+    let divisor = u32::from(sample) + 1;
+    let skip_first = sample == 0 && !has_first.is_empty();
+    //The pixels of row `y` that get this sample
+    let select = |y: usize, counts: &[u8]| -> Vec<usize> {
+        if track {
+            (0..width).filter(|x| counts[*x] == sample && mask.is_none_or(|mask| mask[y * width + x])).collect()
+        } else {
+            (0..width).filter(|x| counts[*x] != FOREIGN && mask.is_none_or(|mask| mask[y * width + x]) && !(skip_first && has_first[y * width + x])).collect()
+        }
+    };
+    //Adds the samples at `positions` of the pixels `xs` of a row, and updates its running averages and counts: the same for the CPU threads and the GPU
+    let apply = |y: usize, row: &mut [[u32; 3]], counts: &mut [u8], first: &mut [TrueColor], second: &mut [TrueColor], color_row: &mut [TrueColor], xs: &[usize], positions: &[f64]| {
+        for (x, position) in xs.iter().zip(positions) {
+            let color = color_of(*position);
+            let sum = &mut row[*x];
+            if sample == 0 {
+                //The first sample replaces the sum, so a state that starts over does not have to clear its sums
+                *sum = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
+            } else {
+                sum[0] += u32::from(color.red);
+                sum[1] += u32::from(color.green);
+                sum[2] += u32::from(color.blue);
+            }
+        }
+        let xs = &xs[..positions.len()];
+        //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
+        for x in xs {
+            let sum = row[*x];
+            let color = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
+            color_row[*x] = color;
+            if track {
+                counts[*x] = sample + 1;
+            }
+            match sample {
+                0 if !first.is_empty() => first[*x] = color,
+                1 if !second.is_empty() => second[*x] = color,
+                _ => {}
+            }
+        }
+        if skip_first {
+            //The first samples that the previews computed (the representatives of blocks): the color of the pixel itself, whether or not a preview showed it
+            for x in (0..width).filter(|x| has_first[y * width + x]) {
+                color_row[x] = sum_color(row[x]);
+            }
+        }
+        processed.fetch_add(xs.len(), Ordering::Relaxed);
+        pixels_done.fetch_add(xs.len(), Ordering::Relaxed);
+    };
+    //The positions of the pixels `xs` of row `y` on the CPU; a cancelled render stops in the middle of the row
+    let on_cpu = |y: usize, xs: &[usize]| {
+        let mut out = Vec::with_capacity(xs.len());
+        positions(c, m, y, xs, sample, origin, Some(cancel), |_, position| out.push(position));
+        out
+    };
+    //The colors of the first two samples are only kept when they are needed (adaptive supersampling, a kept state); otherwise every row gets an empty slice
+    let (first_rows, second_rows) = (rows_or_empty(&mut state.first, width, height), rows_or_empty(&mut state.second, width, height));
+    let rows = Mutex::new(state.sums.chunks_mut(width).zip(state.counts.chunks_mut(width)).zip(first_rows).zip(second_rows).zip(colors.chunks_mut(width)).enumerate());
+    thread::scope(|scope| {
+        for _ in 0..render_thread_count() {
+            scope.spawn(|| loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let next_row = rows.lock().unwrap().next();
+                let Some((y, ((((row, counts), first), second), color_row))) = next_row else { return };
+                let xs = select(y, counts);
+                let positions = on_cpu(y, &xs);
+                apply(y, row, counts, first, second, color_row, &xs, &positions);
+            });
+        }
+        if let Some((gpu, join_after, gpu_samples)) = gpu.as_ref() {
+            scope.spawn(|| {
+                //A fast pass is done before the GPU joins: then it costs nothing
+                while started.elapsed() < *join_after {
+                    if cancel.load(Ordering::Relaxed) || rows.lock().unwrap().len() == 0 {
+                        return;
+                    }
+                    thread::sleep(Duration::from_micros(200));
+                }
+                let mut gpu_works = true;
+                loop {
                     if cancel.load(Ordering::Relaxed) {
                         return;
                     }
-                    let next_row = rows.lock().unwrap().next();
-                    let Some((y, ((((row, counts), first), second), color_row))) = next_row else { return };
-                    let xs: Vec<usize> = if track {
-                        (0..width).filter(|x| counts[*x] == sample && mask_ref.is_none_or(|mask| mask[y * width + x])).collect()
-                    } else {
-                        (0..width).filter(|x| counts[*x] != FOREIGN && mask_ref.is_none_or(|mask| mask[y * width + x]) && !(skip_first && has_first[y * width + x])).collect()
-                    };
-                    //A cancelled render stops in the middle of the row: the pixels it sampled are complete (their sums and counts), the others keep what they had
-                    let done = positions(c, m, y, &xs, sample, origin, Some(cancel), |x, position| {
-                        let color = color_of(position);
-                        let sum = &mut row[x];
-                        if sample == 0 {
-                            //The first sample replaces the sum, so a state that starts over does not have to clear its sums
-                            *sum = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
-                        } else {
-                            sum[0] += u32::from(color.red);
-                            sum[1] += u32::from(color.green);
-                            sum[2] += u32::from(color.blue);
-                        }
-                    });
-                    let xs = &xs[..done];
-                    //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
-                    for x in xs {
-                        let sum = row[*x];
-                        let color = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
-                        color_row[*x] = color;
-                        if track {
-                            counts[*x] = sample + 1;
-                        }
-                        match sample {
-                            0 if !first.is_empty() => first[*x] = color,
-                            1 if !second.is_empty() => second[*x] = color,
-                            _ => {}
-                        }
+                    let batch: Vec<_> = rows.lock().unwrap().by_ref().take(GPU_ROWS).collect();
+                    if batch.is_empty() {
+                        return;
                     }
-                    if skip_first {
-                        //The first samples that the previews computed (the representatives of blocks): the color of the pixel itself, whether or not a preview showed it
-                        for x in (0..width).filter(|x| has_first[y * width + x]) {
-                            color_row[x] = sum_color(row[x]);
-                        }
+                    let selected: Vec<Vec<usize>> = batch.iter().map(|(y, ((((_, counts), _), _), _))| select(*y, counts)).collect();
+                    let points: Vec<Complex> = batch.iter().zip(&selected).flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, sample, origin))).collect();
+                    let from_gpu = if gpu_works { gpu.positions(m, &points).ok() } else { None };
+                    gpu_works = from_gpu.is_some();
+                    if gpu_works {
+                        gpu_samples.fetch_add(points.len(), Ordering::Relaxed);
                     }
-                    processed.fetch_add(xs.len(), Ordering::Relaxed);
-                    pixels_done.fetch_add(xs.len(), Ordering::Relaxed);
-                });
-            }
-        });
+                    let mut offset = 0;
+                    for ((y, ((((row, counts), first), second), color_row)), xs) in batch.into_iter().zip(&selected) {
+                        let positions = from_gpu.as_ref().map_or_else(|| on_cpu(y, xs), |all| all[offset..offset + xs.len()].to_vec());
+                        offset += xs.len();
+                        apply(y, row, counts, first, second, color_row, xs, &positions);
+                    }
+                }
+            });
+        }
+    });
     processed.into_inner()
 }
+
+/// A pass is only given to the GPU when the pass before suggests it takes longer than this: starting the GPU worker for a short pass costs more than it saves
+/// (measured: the default view at 32x adaptive, with many passes of a few milliseconds, took 90.5 ms with the GPU in every pass instead of 86.5 ms)
+const GPU_WORTHWHILE: Duration = Duration::from_millis(12);
+
+/// The rows the GPU takes from the queue of a pass at a time (about 38,000 pixels at 1200 x 800): enough to keep it busy, few enough that the CPU threads do not
+/// wait long for its last batch
+const GPU_ROWS: usize = 32;
 
 /// Large color tables are built on all render threads. Starting the threads costs about 0.17 ms, so below this many entries one thread is as fast or faster
 /// (measured: 20,000 Bernstein entries take 0.08 ms on one thread and 0.18 ms on all; at 65,376 entries both take about 0.2 ms)
@@ -351,14 +440,16 @@ fn average(sum: [u32; 3], count: u8) -> TrueColor {
 /// A pixel is pixel `(x + origin.0, y + origin.1)` of `anchor`, which places its samples and keys their jitter, see `SampleState`.
 ///
 /// With `cancel`, it stops between groups once `cancel` is set, and returns how many of `xs` (from the start) it gave to `sink`; without, it does all of them.
+/// The point of sample `sample` of pixel `(x, y)`: pixel `(x + origin.0, y + origin.1)` of `anchor`, at the jitter of that pixel and sample (see `SampleState`)
+fn sample_point(anchor: &ComplexPlane, x: usize, y: usize, sample: u8, origin: (isize, isize)) -> Complex {
+    let (anchor_x, anchor_y) = (x.cast_signed() + origin.0, y.cast_signed() + origin.1);
+    let (jitter_x, jitter_y) = sample_jitter(anchor_x as usize, anchor_y as usize, sample);
+    anchor.complex_from_pixel_plane(anchor_x as f64 + jitter_x, anchor_y as f64 + jitter_y)
+}
+
 #[allow(clippy::too_many_arguments)] // The row, the sample and where to place it, and the cancel flag: the inner loop of every pass, kept as one function
 fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample: u8, origin: (isize, isize), cancel: Option<&AtomicBool>, mut sink: impl FnMut(usize, f64)) -> usize {
-    let anchor_y = y.cast_signed() + origin.1;
-    let sample_point = |x: usize| {
-        let anchor_x = x.cast_signed() + origin.0;
-        let (jitter_x, jitter_y) = sample_jitter(anchor_x as usize, anchor_y as usize, sample);
-        anchor.complex_from_pixel_plane(anchor_x as f64 + jitter_x, anchor_y as f64 + jitter_y)
-    };
+    let sample_point = |x: usize| sample_point(anchor, x, y, sample, origin);
     let (groups, remainder) = xs.as_chunks::<LANES>();
     for (index, group) in groups.iter().enumerate() {
         if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
