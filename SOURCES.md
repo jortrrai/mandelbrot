@@ -10,3 +10,13 @@
 - [Fractals & Rendering Techniques](https://darkeclipz.github.io/fractals/paper/Fractals%20&%20Rendering%20Techniques.html)
 - [Supersampling](https://en.wikipedia.org/wiki/Supersampling)
 - [How To View Image Metadata On Linux](https://ostechnix.com/how-to-view-image-metadata-on-linux/)
+
+## Methods used in the code
+
+- [Plotting algorithms for the Mandelbrot set](https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set): the smooth (continuous) iteration count, the cardioid and period-two bulb test, and periodicity checking
+- [Cycle detection: Brent's algorithm](https://en.wikipedia.org/wiki/Cycle_detection#Brent's_algorithm): finding orbits that repeat exactly
+- [SplitMix64](https://prng.di.unimi.it/splitmix64.c): the hash behind the deterministic supersampling jitter
+- [Advanced Vector Extensions (AVX2)](https://en.wikipedia.org/wiki/Advanced_Vector_Extensions): iterating several points at once
+- [Rust `is_x86_feature_detected!`](https://doc.rust-lang.org/std/arch/macro.is_x86_feature_detected.html) and [`#[target_feature]`](https://doc.rust-lang.org/reference/attributes/codegen.html#the-target_feature-attribute): choosing the AVX2 loops at run time
+- [egui](https://docs.rs/egui) and [eframe](https://docs.rs/eframe): the window and its controls
+- [Text to ASCII Art Generator (TAAG)](https://patorjk.com/software/taag/): the banner
