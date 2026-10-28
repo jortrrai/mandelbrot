@@ -230,7 +230,8 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                     } else {
                         (0..width).filter(|x| counts[*x] != FOREIGN && mask_ref.is_none_or(|mask| mask[y * width + x]) && !(skip_first && has_first[y * width + x])).collect()
                     };
-                    positions(c, m, y, &xs, sample, origin, |x, position| {
+                    //A cancelled render stops in the middle of the row: the pixels it sampled are complete (their sums and counts), the others keep what they had
+                    let done = positions(c, m, y, &xs, sample, origin, Some(cancel), |x, position| {
                         let color = color_of(position);
                         let sum = &mut row[x];
                         if sample == 0 {
@@ -242,8 +243,9 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                             sum[2] += u32::from(color.blue);
                         }
                     });
+                    let xs = &xs[..done];
                     //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
-                    for x in &xs {
+                    for x in xs {
                         let sum = row[*x];
                         let color = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
                         color_row[*x] = color;
@@ -322,7 +324,10 @@ fn average(sum: [u32; 3], count: u8) -> TrueColor {
 
 /// Computes the position (smooth iteration count) of sample `sample` of the pixels `xs` of row `y` and gives each to `sink`: `LANES` pixels at the same time, the remaining pixels one by one.
 /// A pixel is pixel `(x + origin.0, y + origin.1)` of `anchor`, which places its samples and keys their jitter, see `SampleState`.
-fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample: u8, origin: (isize, isize), mut sink: impl FnMut(usize, f64)) {
+///
+/// With `cancel`, it stops between groups once `cancel` is set, and returns how many of `xs` (from the start) it gave to `sink`; without, it does all of them.
+#[allow(clippy::too_many_arguments)] // The row, the sample and where to place it, and the cancel flag: the inner loop of every pass, kept as one function
+fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample: u8, origin: (isize, isize), cancel: Option<&AtomicBool>, mut sink: impl FnMut(usize, f64)) -> usize {
     let anchor_y = y.cast_signed() + origin.1;
     let sample_point = |x: usize| {
         let anchor_x = x.cast_signed() + origin.0;
@@ -330,7 +335,10 @@ fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], s
         anchor.complex_from_pixel_plane(anchor_x as f64 + jitter_x, anchor_y as f64 + jitter_y)
     };
     let (groups, remainder) = xs.as_chunks::<LANES>();
-    for group in groups {
+    for (index, group) in groups.iter().enumerate() {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            return index * LANES;
+        }
         let points: [Complex; LANES] = std::array::from_fn(|lane| sample_point(group[lane]));
         let positions = m.position_lanes(&points);
         for (lane, x) in group.iter().enumerate() {
@@ -340,6 +348,7 @@ fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], s
     for x in remainder {
         sink(*x, m.position(&sample_point(*x)));
     }
+    xs.len()
 }
 
 /// The previews of [`Render::preview`]: computes the first sample of the top-left pixel of every block of each level that has no samples yet into `state`, and reports
@@ -387,12 +396,14 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
                             }
                         }
                     }
+                    let mut sampled = 0;
                     for row in 0..rows_in_band {
                         let xs: Vec<usize> = to_sample.iter().filter(|index| **index / width == row).map(|index| index % width).collect();
                         if xs.is_empty() {
                             continue;
                         }
-                        positions(c, m, by * block + row, &xs, 0, origin, |x, position| {
+                        //Stops in the middle of the band when cancelled: the representatives it sampled are complete
+                        let done = positions(c, m, by * block + row, &xs, 0, origin, Some(cancel), |x, position| {
                             let (index, color) = (row * width + x, color_of(position));
                             sums[index] = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
                             counts[index] = 1;
@@ -401,8 +412,12 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
                             }
                             has[index] = true;
                         });
+                        sampled += done;
+                        if done < xs.len() {
+                            break;
+                        }
                     }
-                    count.fetch_add(to_sample.len(), Ordering::Relaxed);
+                    count.fetch_add(sampled, Ordering::Relaxed);
                     busy_nanos.fetch_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
                 });
             }
