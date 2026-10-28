@@ -119,6 +119,30 @@ fn main() {
         }));
     }
 
+    //Previews before the first layer (`Render::preview`, with the threshold of the window): how soon the first image is there, and what the previews cost in total,
+    //with the settings of the window (32x adaptive supersampling) on a slow and a fast view
+    if filter.as_ref().is_none_or(|f| "previews".contains(f.as_str())) {
+        for workload in [&workloads()[2], &workloads()[0]] {
+            let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+            c.set_view(&workload.view);
+            let m = MandelbrotSet::new(workload.max_iterations, 2.0);
+            for (name, preview) in [("without previews", None), ("with previews", Some(Duration::from_millis(16)))] {
+                let mut first = Vec::new();
+                let totals = time_runs(runs, || {
+                    let started = Instant::now();
+                    let mut first_image = None;
+                    Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(32).adaptive(Some(rendering::AdaptiveSampling::default())).preview(preview).run( |colors, _| {
+                        first_image.get_or_insert_with(|| started.elapsed());
+                        std::hint::black_box(colors.to_vec());
+                    });
+                    first.push(first_image.unwrap_or_default());
+                });
+                summarize(&format!("{} 32x adaptive {name}, first image", workload.name), first);
+                summarize(&format!("{} 32x adaptive {name}, whole render", workload.name), totals);
+            }
+        }
+    }
+
     //Saving at another size than the window renders the whole image into a buffer in one go
     if filter.as_ref().is_none_or(|f| "save-path".contains(f.as_str())) {
         let workload = &workloads()[1]; //default view
