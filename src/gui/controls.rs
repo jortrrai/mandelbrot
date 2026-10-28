@@ -84,6 +84,15 @@ impl MandelbrotApp {
             }
         });
         ui.horizontal(|ui| {
+            ui.label("Views:");
+            if ui.add_enabled(self.history.can_go_back(), egui::Button::new("< Back")).on_hover_text("Goes back to the previous view").clicked() {
+                self.go_back();
+            }
+            if ui.add_enabled(self.history.can_go_forward(), egui::Button::new("Forward >")).on_hover_text("Goes forward again after going back").clicked() {
+                self.go_forward();
+            }
+        });
+        ui.horizontal(|ui| {
             ui.label("Zoom speed (1 = fastest, 9 = slowest):");
             ui.add(egui::DragValue::new(&mut self.vars.scale_numerator).range(1.0..=9.0).speed(0.1).max_decimals(0));
         });

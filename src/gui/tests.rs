@@ -713,3 +713,99 @@ fn a_size_on_the_command_line_is_kept_until_the_window_is_followed_on_request() 
     let clicked = app.c.complex_from_pixel_plane(250.0, 200.0);
     assert!((clicked.x - center.x).abs() < app.c.increment_x && (clicked.y - center.y).abs() < app.c.increment_y);
 }
+
+#[test]
+fn back_and_forward_return_to_the_views_that_were_visited() {
+    let config = Config::build(["mandelbrot", "120", "80"].map(String::from).into_iter()).unwrap();
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    assert!(!app.history.can_go_back(), "the start is the only view");
+    let (start_center, start_scale) = (app.c.center(), app.c.get_scale());
+    app.c.set_view(&View::new(-0.75, 0.1, 0.5));
+    app.render("Went to a view");
+    wait_for_job(&mut app);
+    app.c.scale(0.5);
+    app.render("Zoomed in");
+    wait_for_job(&mut app);
+    app.max_iterations_input = 300;
+    app.m.max_iterations = 300;
+    app.render("Set max. iterations to 300"); //The same view again: no new entry
+    wait_for_job(&mut app);
+    assert_eq!(app.history.len(), 3);
+
+    app.go_back();
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.5).abs() < 1e-12 && (app.c.center().x + 0.75).abs() < 1e-12);
+    assert!(app.log.iter().any(|message| message.starts_with("Went back to the previous view in ")));
+    app.go_back();
+    wait_for_job(&mut app);
+    assert_eq!((app.c.center().x, app.c.get_scale()), (start_center.x, start_scale));
+    assert!(!app.history.can_go_back() && app.history.can_go_forward());
+    app.go_forward();
+    wait_for_job(&mut app);
+    app.go_forward();
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.25).abs() < 1e-12 && !app.history.can_go_forward());
+    assert_eq!(app.history.len(), 3, "walking through the history adds nothing to it");
+
+    //After a resize of the window, an old view is shown at the new size
+    app.resize_view(Resolution::new(90, 90));
+    wait_for_job(&mut app);
+    app.go_back();
+    wait_for_job(&mut app);
+    assert_eq!(app.view_resolution(), Resolution::new(90, 90));
+    assert!((app.c.get_scale() - 0.5).abs() < 1e-12);
+}
+
+/// One frame of the image alone in a window of `width` x `height` points, with `events` from the mouse
+fn image_frame(app: &mut MandelbrotApp, ctx: &egui::Context, width: f32, height: f32, events: Vec<egui::Event>) {
+    app.poll_job();
+    app.update_texture(ctx);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+    let output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
+            app.image_ui(ui);
+        });
+    });
+    output.drop_without_applying_deltas();
+}
+
+#[test]
+fn dragging_moves_the_view_and_the_wheel_zooms_around_the_cursor() {
+    let ctx = egui::Context::default();
+    let config = Config::build(["mandelbrot", "120", "80"].map(String::from).into_iter()).unwrap();
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    let pointer = |position: egui::Pos2| egui::Event::PointerMoved(position);
+    let button = |position: egui::Pos2, pressed: bool| egui::Event::PointerButton { pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    let (start, end) = (egui::pos2(60.0, 40.0), egui::pos2(90.0, 60.0));
+
+    //Drag the image 30 points to the right and 20 down: the view moves 30 pixels left and 20 up
+    let (center, increment) = (app.c.center(), (app.c.increment_x, app.c.increment_y));
+    image_frame(&mut app, &ctx, 120.0, 80.0, vec![pointer(start)]);
+    image_frame(&mut app, &ctx, 120.0, 80.0, vec![button(start, true)]);
+    for step in 1..=6 {
+        let position = start + (end - start) * (step as f32 / 6.0);
+        image_frame(&mut app, &ctx, 120.0, 80.0, vec![pointer(position)]);
+        wait_for_job(&mut app);
+    }
+    image_frame(&mut app, &ctx, 120.0, 80.0, vec![button(end, false)]);
+    wait_for_job(&mut app);
+    let moved = app.c.center();
+    let (columns, rows) = ((center.x - moved.x) / increment.0, (moved.y - center.y) / increment.1);
+    assert!(columns > 10.0 && columns <= 30.5 && rows > 6.0 && rows <= 20.5, "the view moved {columns} columns left and {rows} rows up");
+    assert!(app.log.iter().filter(|message| message.starts_with("Moved by dragging")).count() <= 2, "a drag does not log a line for every render: {:?}", app.log);
+    assert!(!app.gesture_active || app.is_busy());
+
+    //Scroll up over a point: it zooms in and the point stays under the cursor
+    let cursor = egui::pos2(100.0, 20.0);
+    let (scale, under_cursor) = (app.c.get_scale(), app.c.complex_from_pixel_plane(100.0, 20.0));
+    image_frame(&mut app, &ctx, 120.0, 80.0, vec![pointer(cursor)]);
+    for _ in 0..8 {
+        image_frame(&mut app, &ctx, 120.0, 80.0, vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, 25.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: egui::Modifiers::NONE }]);
+        wait_for_job(&mut app);
+    }
+    assert!(app.c.get_scale() < scale * 0.9, "zoomed in from {scale} to {}", app.c.get_scale());
+    let after = app.c.complex_from_pixel_plane(100.0, 20.0);
+    assert!((after.x - under_cursor.x).abs() < 1e-9 && (after.y - under_cursor.y).abs() < 1e-9, "{after:?} {under_cursor:?}");
+}

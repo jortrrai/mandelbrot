@@ -68,6 +68,26 @@ impl MandelbrotApp {
         self.log("Saving the image...");
     }
 
+    /// Goes back to the view that was shown before this one, if there is one
+    pub(super) fn go_back(&mut self) {
+        if let Some(plane) = self.history.go_back() {
+            self.show_remembered_view(&plane, "Went back to the previous view");
+        }
+    }
+
+    /// Goes forward again to the view that was left with Back, if there is one
+    pub(super) fn go_forward(&mut self) {
+        if let Some(plane) = self.history.go_forward() {
+            self.show_remembered_view(&plane, "Went forward to the next view");
+        }
+    }
+
+    /// Shows a view from the history at the size of the window now: the same center and width on the real axis
+    fn show_remembered_view(&mut self, plane: &ComplexPlane, message: &str) {
+        self.c = plane.resized(self.p.pixel_plane.width, self.p.pixel_plane.height);
+        self.render(message);
+    }
+
     /// The image size of the command line, see `Config::image_width`
     pub(super) fn command_line_resolution(&self) -> Resolution {
         Resolution::new(self.config.image_width, self.config.image_height)
