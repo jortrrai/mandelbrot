@@ -29,9 +29,15 @@ pub const MAX_THUMBNAIL_ITERATIONS: u32 = 20_000;
 /// Bump this when the renderer or the coloring changes what a place looks like, so that nothing keeps showing the old look
 pub const RENDER_REVISION: u32 = 1;
 
-/// The height of a thumbnail for a window of `window_width` x `window_height` pixels
+/// The shortest thumbnail in pixels, for a very wide window
+pub const MIN_THUMBNAIL_HEIGHT: usize = 32;
+/// The tallest thumbnail in pixels, for a square or tall window: the rows of the list are 100 points high
+pub const MAX_THUMBNAIL_HEIGHT: usize = 96;
+
+/// The height of a thumbnail for a window of `window_width` x `window_height` pixels: it follows the aspect ratio of the window, from `MIN_THUMBNAIL_HEIGHT` to `MAX_THUMBNAIL_HEIGHT`
 pub fn thumbnail_height(window_width: usize, window_height: usize) -> usize {
-    ((THUMBNAIL_WIDTH * window_height.max(1)) as f64 / window_width.max(1) as f64).round().max(1.0) as usize
+    let height = ((THUMBNAIL_WIDTH * window_height.max(1)) as f64 / window_width.max(1) as f64).round() as usize;
+    height.clamp(MIN_THUMBNAIL_HEIGHT, MAX_THUMBNAIL_HEIGHT)
 }
 
 /// What a thumbnail shows
@@ -157,8 +163,9 @@ mod tests {
     #[test]
     fn the_height_follows_the_window_aspect_ratio() {
         assert_eq!(thumbnail_height(1200, 800), 96);
-        assert_eq!(thumbnail_height(800, 800), 144);
-        assert_eq!(thumbnail_height(0, 0), 144);
+        assert_eq!(thumbnail_height(800, 800), MAX_THUMBNAIL_HEIGHT, "a square window would need 144, which does not fit in the row");
+        assert_eq!(thumbnail_height(2000, 400), MIN_THUMBNAIL_HEIGHT);
+        assert_eq!(thumbnail_height(0, 0), MAX_THUMBNAIL_HEIGHT);
     }
 
     #[test]
