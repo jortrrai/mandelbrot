@@ -119,6 +119,18 @@ fn main() {
         }));
     }
 
+    //Saving at another size than the window renders the whole image into a buffer in one go
+    if filter.as_ref().map_or(true, |f| "save-path".contains(f.as_str())) {
+        let workload = &workloads()[1]; //default view
+        let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+        c.set_view(&workload.view);
+        let m = MandelbrotSet::new(workload.max_iterations, 2.0);
+        let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
+        summarize("save path (render_complex_plane_into_buffer, 4x)", time_runs(runs, || {
+            mandelbrot::rendering::render_complex_plane_into_buffer(&mut buffer, &c, &m, 4, TrueColor::new_from_bernstein_polynomials);
+        }));
+    }
+
     //Shifting the pixel buffer, which is what a move does before rendering the exposed strip
     if filter.as_ref().map_or(true, |f| "shift".contains(f.as_str())) {
         let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));

@@ -55,9 +55,9 @@ impl PixelBuffer {
     }
 
     /// Translate the complex plane in the `buffer` `rows` up and `columns` to the right.
-    /// This operation is significantly less expensive than the `render_box_render_complex_plane_into_buffer` function, as it does not rerender anything in the complex plane, it simply
+    /// This operation is significantly less expensive than rendering the image again, as it does not rerender anything in the complex plane, it simply
     /// get rids of `rows.abs()` rows and `columns.abs()` columns, and moves the image rows to the right and columns up.
-    /// Note: The removed rows and columns should be rerendered by the `render_box_render_complex_plane_into_buffer` function.
+    /// Note: The vacated rows and columns have to be rendered again, see `rendering::Render::only` and `rendering::ExposedRegion`.
     pub fn translate_buffer(&mut self, rows_up: i128, columns_right: i128) {
         //Iterate over the correct y's in the correct order
         let y_range : Vec<usize> = if rows_up > 0 {((rows_up as usize)..self.pixel_plane.height).rev().collect()} else {(0..((self.pixel_plane.height as i128 + rows_up) as usize)).collect()};
