@@ -3,7 +3,7 @@
 //! Every sample of a pixel is taken at a pseudo-random offset inside the pixel. The offset only depends on the pixel, the number of the sample and the hash below, never on thread scheduling,
 //! so identical settings always render identical images.
 
-/// The SplitMix64 finalizer, a well-mixed 64-bit hash: <https://prng.di.unimi.it/splitmix64.c>
+/// The `SplitMix64` finalizer, a well-mixed 64-bit hash: <https://prng.di.unimi.it/splitmix64.c>
 pub(super) fn splitmix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

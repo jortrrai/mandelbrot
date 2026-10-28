@@ -39,7 +39,9 @@ impl MandelbrotApp {
         let sender = self.notice_sender.clone();
         std::thread::spawn(move || {
             let view = c.get_view();
-            if config.window_scale == 1.0 && buffer_is_complete {
+            #[allow(clippy::float_cmp)] // 1.0 is the exact default: only an unscaled window shows the image that is saved
+            let unscaled = config.window_scale == 1.0;
+            if unscaled && buffer_is_complete {
                 p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount);
             } else {
                 let mut image_p = PixelBuffer::new(PixelPlane::new(config.image_width, config.image_height));

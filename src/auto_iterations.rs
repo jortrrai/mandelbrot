@@ -158,6 +158,7 @@ impl Probe {
     }
 
     /// Iterates up to `limit` with the same arithmetic as `MandelbrotSet::iterate`; returns the state and the steps taken
+    #[allow(clippy::float_cmp)] // An orbit that repeats bit for bit (exact equality) is the certificate that the point never escapes
     fn run(&mut self, m: &MandelbrotSet, limit: u32) -> (State, u64) {
         let r2 = m.orbit_radius * m.orbit_radius;
         let start = self.iterations;

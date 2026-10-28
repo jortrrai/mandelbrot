@@ -47,7 +47,7 @@ const COLOR_CHANNEL_MAPPINGS: [&str; 27] = [
 ];
 
 /// Converts colors to RGB bytes for a texture, applying the color channel mapping while converting; the same colors as `PixelBuffer::colors_to_pixels`
-fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: &ColorChannelMapping) -> Vec<u8> {
+fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: ColorChannelMapping) -> Vec<u8> {
     let (red, green, blue) = mapping.get_r_g_b_mapping();
     let channel_index = |channel: char| match channel { 'R' => 0, 'G' => 1, _ => 2 };
     let (red, green, blue) = (channel_index(red), channel_index(green), channel_index(blue));
@@ -60,6 +60,7 @@ fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: &ColorChannelMapping) -> V
 }
 
 /// The state of the window: the view that is shown, the settings of the render, the render job that is running, the points of interest with their thumbnails and the status log
+#[allow(clippy::struct_excessive_bools)] // The flags are independent switches of the window
 pub struct MandelbrotApp {
     c: ComplexPlane,
     p: PixelBuffer,
@@ -193,7 +194,7 @@ impl MandelbrotApp {
         if !self.texture_outdated && self.texture.is_some() {
             return;
         }
-        let rgb = colors_to_rgb_bytes(&self.p.colors, &self.p.color_channel_mapping);
+        let rgb = colors_to_rgb_bytes(&self.p.colors, self.p.color_channel_mapping);
         let image = ColorImage::from_rgb([self.p.pixel_plane.width, self.p.pixel_plane.height], &rgb);
         match &mut self.texture {
             Some(texture) => texture.set(image, TextureOptions::NEAREST),

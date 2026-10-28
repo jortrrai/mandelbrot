@@ -79,8 +79,7 @@ impl MandelbrotSet {
         }
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
         let mut z = Complex::new(0.0, 0.0);
-        let mut iterations: u32 = 0;
-        for _ in 0..self.max_iterations {
+        for iterations in 0..self.max_iterations {
             z = z.squared().add(c);
             if (z.x * z.x + z.y * z.y) > orbit_radius_squared {
                 //Continue to the end of the block of CHECK_INTERVAL steps, like the lockstep loop does for its points, so both paths start the smooth position from the same z
@@ -90,7 +89,6 @@ impl MandelbrotSet {
                 }
                 return self.smooth_position(end, (z.x, z.y), c);
             }
-            iterations += 1;
         }
         f64::from(self.max_iterations)
     }
@@ -174,6 +172,8 @@ impl MandelbrotSet {
     }
 
     /// The plain lockstep loop: the escape count of `LANES` points, all stepping together, with the interior shortcuts and the exact cycle detection of the module documentation
+    // Exact comparison of floats is the cycle certificate (an orbit that repeats bit for bit); inline(always) is a measured performance requirement (see the documentation)
+    #[allow(clippy::float_cmp, clippy::inline_always)]
     #[inline(always)]
     fn iterate_lanes_plain_generic(&self, points: &[Complex; LANES]) -> [u32; LANES] {
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
@@ -264,6 +264,8 @@ impl MandelbrotSet {
     }
 
     /// The lockstep loop that also records, for every point that escaped, z at the end of the block of steps in which it escaped (so the smooth position can be computed). Its arithmetic is exactly that of the plain loop
+    // Exact comparison of floats is the cycle certificate (an orbit that repeats bit for bit); inline(always) is a measured performance requirement (see the documentation)
+    #[allow(clippy::float_cmp, clippy::inline_always)]
     #[inline(always)]
     fn iterate_lanes_smooth_generic(&self, points: &[Complex; LANES], out: &mut LaneResult) {
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;

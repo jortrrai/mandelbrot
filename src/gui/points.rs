@@ -1,5 +1,6 @@
 //! The list of points of interest of the window, with their thumbnails (see `crate::thumbnails`).
 
+use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -174,11 +175,11 @@ impl MandelbrotApp {
                     Coloring::Bernstein => 1,
                 }; //See COLORING_FUNCTIONS
                 self.coloring_function = COLORING_FUNCTIONS[self.coloring_index].1;
-                restored += &format!(", coloring {}", COLORING_FUNCTIONS[self.coloring_index].0);
+                let _ = write!(restored, ", coloring {}", COLORING_FUNCTIONS[self.coloring_index].0);
             }
             if let Some(mapping) = appearance.color_channels {
                 self.p.color_channel_mapping = mapping;
-                restored += &format!(", color channels {mapping:?}");
+                let _ = write!(restored, ", color channels {mapping:?}");
             }
         }
         let message = if restored.is_empty() { format!("Moved to {}", point.name) } else { format!("Moved to {} and restored its appearance{restored}", point.name) };

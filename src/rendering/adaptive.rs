@@ -7,7 +7,7 @@ use super::region::ExposedRegion;
 use crate::coloring::TrueColor;
 
 /// Settings of adaptive supersampling, see `render_region_adaptively`
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdaptiveSampling {
     /// Two colors differ when the sum of the differences of their red, green and blue channels (0..=765) is above this
     pub threshold: u32,
