@@ -135,11 +135,11 @@ pub struct MandelbrotApp {
     thumbs_visible: Vec<u64>,
     /// Whether going to a point of interest also restores the appearance saved in its file (the coloring and the color channels); off by default
     restore_appearance: bool,
-    /// How a flight to a point of interest goes (via the reset view by default) and how fast (cinematic by default), and the flight that is under way, see `flight`
+    /// How a flight to a point of interest goes (the shortest route by default) and how fast (fast by default), and the flight that is under way, see `flight`
     route: flight::Route,
     pace: flight::Pace,
     flight: Option<points::PointFlight>,
-    /// How complete the frames of a flight have to be (best effort by default), see `flight::FlightRendering`
+    /// How complete the frames of a flight have to be (low res by default), see `flight::FlightRendering`
     flight_rendering: flight::FlightRendering,
     /// Immersion: the screen never shows black where nothing is rendered yet; the view only moves once the new view has at least a complete low-resolution frame
     immersion: bool,
@@ -225,10 +225,10 @@ impl MandelbrotApp {
             thumbs_visible: Vec::new(),
             points_folder: std::path::PathBuf::new(),
             restore_appearance: false,
-            route: flight::Route::ViaReset,
-            pace: flight::Pace::Cinematic,
+            route: flight::Route::Shortest,
+            pace: flight::Pace::Fast,
             flight: None,
-            flight_rendering: flight::FlightRendering::BestEffort,
+            flight_rendering: flight::FlightRendering::LowRes,
             immersion: false,
             frame_ready: false,
             frame_accepted: false,

@@ -230,6 +230,12 @@ impl MandelbrotApp {
             return;
         }
         self.c.set_view(&flight.flight.camera_at(elapsed).view());
+        if self.auto_iterations {
+            //Auto iterations follow the zoom all the way: the limit (and the palette) for the zoom of this frame, by the zoom rule of the preset; the probes, which
+            //would cost a frame time of their own, refine it on arrival
+            let limit = self.auto_settings.initial_limit(self.c.get_scale());
+            (self.m.max_iterations, self.m.palette_scale) = (limit, Some(limit));
+        }
         let all_layers = self.flight_rendering == super::flight::FlightRendering::SuperSampled;
         self.start_render_as(&format!("Flying to {}", flight.point.name), false, true, all_layers);
         self.flight = Some(flight);

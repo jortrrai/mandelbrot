@@ -22,12 +22,13 @@ fn wait_for_job(app: &mut MandelbrotApp) {
     }
 }
 
-/// Lets the flight to a point of interest that is under way arrive (as if its time has passed) and waits for the render of the point
+/// Lets the flight to a point of interest that is under way arrive (as if its time has passed, or with Skip for a flight that waits for its frames) and waits for the render of the point
 fn finish_flight(app: &mut MandelbrotApp) {
     if let Some(flight) = &app.flight {
         let arrival = flight.last_frame + flight.flight.duration();
         app.fly_at(arrival);
     }
+    app.skip_flight();
     assert!(app.flight.is_none());
     wait_for_job(app);
 }
@@ -987,7 +988,8 @@ fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives()
 #[test]
 fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace_with_quick_frames() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
-    assert_eq!((app.route, app.pace), (super::flight::Route::ViaReset, super::flight::Pace::Cinematic), "the defaults");
+    assert_eq!((app.route, app.pace, app.flight_rendering), (super::flight::Route::Shortest, super::flight::Pace::Fast, super::flight::FlightRendering::LowRes), "the defaults, for speed");
+    (app.route, app.pace, app.flight_rendering) = (super::flight::Route::ViaReset, super::flight::Pace::Cinematic, super::flight::FlightRendering::BestEffort);
     let ctx = egui::Context::default();
     let history = app.history.len();
     app.c.set_view(&View::new(-1.25, 0.1, 0.05));
@@ -1021,8 +1023,7 @@ fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace_with_quick_frames(
 #[test]
 fn any_other_action_stops_a_flight_where_it_is() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
-    app.route = super::flight::Route::Shortest;
-    app.pace = super::flight::Pace::Fast;
+    app.flight_rendering = super::flight::FlightRendering::BestEffort;
     app.go_to_point_of_interest(0);
     assert!(app.log.last().unwrap().contains("(Shortest route, Fast, "), "{:?}", app.log.last());
     let started = app.flight.as_ref().unwrap().last_frame;
@@ -1181,5 +1182,28 @@ fn a_super_sampled_flight_renders_every_layer_of_every_frame() {
     assert_ne!(format!("{:?}", app.c.get_view()), format!("{first:?}"), "and moves on when it is");
     app.cancel_flight();
     wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn with_auto_iterations_the_limit_follows_the_zoom_of_every_frame_of_a_flight() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.auto_iterations = true;
+    app.flight_rendering = super::flight::FlightRendering::BestEffort;
+    app.render("Auto iterations");
+    wait_for_job(&mut app);
+    app.go_to_point_of_interest(0);
+    let start = app.flight.as_ref().unwrap().last_frame;
+    let duration = app.flight.as_ref().unwrap().flight.duration();
+    let mut limits = Vec::new();
+    for step in 1..=4 {
+        app.fly_at(start + duration.mul_f64(f64::from(step) / 5.0));
+        let expected = app.auto_settings.initial_limit(app.c.get_scale());
+        assert_eq!((app.m.max_iterations, app.m.palette_scale), (expected, Some(expected)), "frame {step} at scale {}", app.c.get_scale());
+        limits.push(app.m.max_iterations);
+        wait_for_job(&mut app);
+        assert_eq!(app.m.max_iterations, expected, "the frame is rendered with it");
+    }
+    assert!(limits.windows(2).all(|pair| pair[0] <= pair[1]) && limits[0] < limits[3], "zooming in raises the limit: {limits:?}");
     let _ = std::fs::remove_dir_all(folder);
 }
