@@ -587,3 +587,60 @@ fn a_color_table_built_on_all_threads_is_the_table_of_one_thread() {
         }
     }
 }
+
+#[test]
+fn a_render_with_the_gpu_is_bit_for_bit_the_render_without_it() {
+    //Runs where there is a GPU with f64 shaders. The GPU computes every sample (no CPU threads), so the whole render by the GPU is compared with the CPU's,
+    //and once with both together (the share of the GPU then depends on the timing of the threads, so it is not checked)
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let joined = Some((&gpu, std::time::Duration::ZERO));
+    let gpu_samples = AtomicUsize::new(0);
+    let (w, h) = (160, 120);
+    let (c, m) = boundary_plane(w, h);
+    let render = |gpu: Option<(&super::gpu::GpuIterator, std::time::Duration)>, only_gpu: bool, adaptive: Option<AdaptiveSampling>, state: Option<&mut SampleState>, plane: &ComplexPlane| {
+        let mut last = Vec::new();
+        let render = Render::new(plane, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(6).adaptive(adaptive).gpu(gpu).count_gpu_samples_in(&gpu_samples);
+        let render = if only_gpu { render.on_the_gpu_only() } else { render };
+        let render = match state { Some(state) => render.resume(state), None => render };
+        let completed = render.run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>());
+        assert!(completed);
+        last
+    };
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        let cpu = render(None, false, adaptive, None, &c);
+        let before = gpu_samples.load(Ordering::Relaxed);
+        assert_eq!(render(joined, true, adaptive, None, &c), cpu, "a render from nothing by the GPU, adaptive {adaptive:?}");
+        assert!(gpu_samples.load(Ordering::Relaxed) - before >= w * h * 2, "the GPU computed every sample (at least the 2 uniform ones of every pixel)");
+        assert_eq!(render(joined, false, adaptive, None, &c), cpu, "with the CPU threads, adaptive {adaptive:?}");
+        //A render that continues a state after a move
+        let (mut with, mut without) = (SampleState::new(), SampleState::new());
+        let _ = render(joined, true, adaptive, Some(&mut with), &c);
+        let _ = render(None, false, adaptive, Some(&mut without), &c);
+        let mut moved = c.clone();
+        move_complex_plane_by_pixels(&mut moved, 7, -11);
+        assert_eq!(render(joined, true, adaptive, Some(&mut with), &moved), render(None, false, adaptive, Some(&mut without), &moved), "a moved view, adaptive {adaptive:?}");
+        assert!((0..h).all(|y| (0..w).all(|x| with.samples(x, y) == without.samples(x, y))), "the same samples");
+    }
+}
+
+#[test]
+fn an_image_saved_with_the_gpu_has_the_pixels_of_one_saved_without_it() {
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let (c, m) = boundary_plane(200, 150);
+    let (mut without, mut with) = (PixelBuffer::new(PixelPlane::new(200, 150)), PixelBuffer::new(PixelPlane::new(200, 150)));
+    render_complex_plane_into_buffer(&mut without, &c, &m, 3, TrueColor::new_from_bernstein_polynomials);
+    render_complex_plane_into_buffer_with_gpu(&mut with, &c, &m, 3, TrueColor::new_from_bernstein_polynomials, Some(&gpu));
+    assert_eq!(with.pixels, without.pixels);
+}

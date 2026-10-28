@@ -216,6 +216,41 @@ fn main() {
                     summarize(&format!("{name} ({max_iterations} it), GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points).expect("the GPU")); }));
                     println!("{:<44} the same positions bit for bit: {same}", "");
                 }
+                //Whole renders: the CPU threads alone, and with the GPU joining every pass after 8 ms
+                let join = Some((&gpu, Duration::from_millis(8)));
+                for (name, view, max_iterations, samples, adaptive) in [
+                    ("default view 1x", View::new(-0.75, 0.0, 1.0), 1000, 1, false),
+                    ("seahorse 1x", View::new(-0.7498100000000001, -0.020300000000000054, 0.000064), 5000, 1, false),
+                    ("deep 1x", View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-10), 20000, 1, false),
+                    ("default view 32x adaptive", View::new(-0.75, 0.0, 1.0), 1000, 32, true),
+                    ("seahorse 32x adaptive", View::new(-0.7498100000000001, -0.020300000000000054, 0.000064), 5000, 32, true),
+                ] {
+                    let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+                    c.set_view(&view);
+                    let m = MandelbrotSet::new(max_iterations, 2.0);
+                    let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
+                    let render = |gpu: Option<(&rendering::gpu::GpuIterator, Duration)>| {
+                        let mut last = Vec::new();
+                        Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).gpu(gpu).run(|colors, _| last = colors.to_vec());
+                        last
+                    };
+                    let same = render(None).iter().zip(&render(join)).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue));
+                    summarize(&format!("render {name}, CPU"), time_runs(runs, || { std::hint::black_box(render(None)); }));
+                    summarize(&format!("render {name}, CPU + GPU"), time_runs(runs, || { std::hint::black_box(render(join)); }));
+                    println!("{:<44} the same image: {same}", "");
+                }
+                //Saving an image of 1920 x 1080 at 4x (the save path, with the GPU from the start of every pass)
+                let mut c = ComplexPlane::new(1920, 1080);
+                c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.000064));
+                let m = MandelbrotSet::new(5000, 2.0);
+                let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(1920, 1080));
+                let mut with_gpu = buffer.clone();
+                rendering::render_complex_plane_into_buffer(&mut buffer, &c, &m, 4, TrueColor::new_from_bernstein_polynomials);
+                rendering::render_complex_plane_into_buffer_with_gpu(&mut with_gpu, &c, &m, 4, TrueColor::new_from_bernstein_polynomials, Some(&gpu));
+                let same = buffer.pixels == with_gpu.pixels;
+                summarize("save seahorse 1920x1080 4x, CPU", time_runs(runs, || rendering::render_complex_plane_into_buffer(&mut buffer, &c, &m, 4, TrueColor::new_from_bernstein_polynomials)));
+                summarize("save seahorse 1920x1080 4x, CPU + GPU", time_runs(runs, || rendering::render_complex_plane_into_buffer_with_gpu(&mut with_gpu, &c, &m, 4, TrueColor::new_from_bernstein_polynomials, Some(&gpu))));
+                println!("{:<44} the same image: {same}", "");
             }
         }
     }

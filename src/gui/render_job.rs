@@ -20,6 +20,9 @@ use super::{MandelbrotApp, Readiness};
 /// A preview of a new view is only shown if the first layer is expected to take longer than this, about a frame: a faster first layer is shown directly, see `Render::preview`
 const PREVIEW_WORTHWHILE: Duration = Duration::from_millis(16);
 
+/// The GPU joins a pass of a render once the pass has run for this long, so passes that are fast on the CPU alone never wait for it, see `Render::gpu`
+const GPU_JOIN_AFTER: Duration = Duration::from_millis(8);
+
 /// The full-quality render after a drag or a wheel zoom starts when the gesture stops, or when it has not changed the view for this long (a mouse button held still)
 const GESTURE_PAUSE: Duration = Duration::from_millis(150);
 
@@ -104,6 +107,16 @@ impl MandelbrotApp {
     pub(super) fn poll_job(&mut self) {
         while let Ok(notice) = self.notices.try_recv() {
             self.log(notice);
+        }
+        if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
+            self.gpu_opening = None;
+            match opened {
+                Ok(gpu) => {
+                    self.log(format!("GPU: {}, checked against the CPU: it computes the same samples, bit for bit", gpu.name()));
+                    self.gpu = Some(Arc::new(gpu));
+                }
+                Err(reason) => self.log(format!("GPU not used: {reason}")),
+            }
         }
         loop {
             let Some(receiver) = &self.job else { return };
@@ -269,6 +282,7 @@ impl MandelbrotApp {
         //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
         let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
         let preview = (!layer_on_screen && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
+        let gpu = self.gpu.clone().filter(|_| self.use_gpu);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let pixels_done = Arc::new(AtomicUsize::new(0));
@@ -308,7 +322,7 @@ impl MandelbrotApp {
             }
             let mut layer_started = started;
             let mut reported = false;
-            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
+            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 p.colors.copy_from_slice(colors);
                 reported = true;
