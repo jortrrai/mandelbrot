@@ -986,7 +986,7 @@ fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives()
 }
 
 #[test]
-fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace_with_quick_frames() {
+fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     assert_eq!((app.route, app.pace, app.flight_rendering), (super::flight::Route::Shortest, super::flight::Pace::Fast, super::flight::FlightRendering::LowRes), "the defaults, for speed");
     (app.route, app.pace, app.flight_rendering) = (super::flight::Route::ViaReset, super::flight::Pace::Cinematic, super::flight::FlightRendering::BestEffort);
@@ -1000,13 +1000,13 @@ fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace_with_quick_frames(
     let (started, duration) = app.flight.as_ref().map(|flight| (flight.last_frame, flight.flight.duration())).unwrap();
     assert!(duration >= Duration::from_secs(2), "{duration:?}");
 
-    //A frame on the way: a quick render (the first layer only), and no full-quality render while the flight goes on
+    //A frame on the way renders towards the full quality (as many layers as it gets before the next frame), and no other render starts while the flight goes on
     app.fly_at(started + duration / 3);
     assert!(app.flight.is_some());
-    assert_eq!(app.bars.as_ref().unwrap().total_layers, 1);
+    assert_eq!(app.bars.as_ref().unwrap().total_layers, app.supersampling_amount);
     wait_for_job(&mut app);
     app.settle_gesture(&ctx);
-    assert!(!app.is_busy(), "the full-quality render waits for the arrival");
+    assert!(!app.is_busy(), "the arrival renders the place itself");
     let scale = app.c.get_scale();
     assert!(scale > 0.05 && scale <= 1.0 + 1e-9, "a third of the way via reset, the view is zoomed out: {scale}");
 
