@@ -378,6 +378,13 @@ impl MandelbrotApp {
             };
             (self.m.max_iterations, self.m.palette_scale) = (limit, Some(palette));
         }
+        //Best effort: a frame whose render has not shown anything yet is not interrupted, or on an expensive view almost no render would ever be shown. The camera
+        //moves on anyway (the image on the screen follows it, see `transform`), and the next render starts at the latest camera as soon as this one has shown a frame.
+        let best_effort = self.flight_readiness() == Readiness::Any;
+        if best_effort && self.is_busy() && !self.frame_accepted {
+            self.flight = Some(flight);
+            return;
+        }
         let all_layers = self.flight_rendering == super::flight::FlightRendering::SuperSampled;
         self.start_render_as(&format!("Flying to {}", flight.point.name), false, true, all_layers);
         self.flight = Some(flight);

@@ -132,7 +132,9 @@ impl MandelbrotApp {
                         }
                         self.p = p;
                     }
-                    self.c = c;
+                    if self.flight.is_none() {
+                        self.c = c; //During a flight the camera moves on while a render runs (best effort), so it is not set back to the view of the render
+                    }
                     self.texture_outdated = true;
                     if !self.gesture_active {
                         let description = self.view_description();

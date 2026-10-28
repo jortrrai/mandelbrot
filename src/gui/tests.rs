@@ -1280,3 +1280,28 @@ fn the_current_view_can_be_saved_as_a_point_of_interest() {
     assert!(folder.join("00-my-place.json").exists());
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn a_best_effort_flight_does_not_interrupt_a_render_that_has_not_shown_anything() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::BestEffort;
+    app.go_to_point_of_interest(0);
+    let start = app.flight.as_ref().unwrap().last_frame;
+    app.fly_at(start + Duration::from_millis(100));
+    let first_job = app.progress.as_ref().map(|progress| Arc::as_ptr(&progress.cancel)).unwrap();
+    let first_view = app.c.get_view();
+    //The next frame comes before the render has shown anything: the camera moves on, the render goes on
+    app.fly_at(start + Duration::from_millis(200));
+    assert_ne!(format!("{:?}", app.c.get_view()), format!("{first_view:?}"), "the camera follows the clock");
+    assert_eq!(app.progress.as_ref().map(|progress| Arc::as_ptr(&progress.cancel)), Some(first_job), "the render that has not shown anything is not interrupted");
+    let camera = app.c.get_view();
+    wait_for_job(&mut app);
+    assert!(app.frame_accepted);
+    assert_eq!(format!("{:?}", app.c.get_view()), format!("{camera:?}"), "the finished render does not set the camera back to its own view");
+    //Once it has shown a frame, the next frame starts a render at the latest camera
+    app.fly_at(start + Duration::from_millis(300));
+    assert!(app.is_busy() && app.progress.as_ref().map(|progress| Arc::as_ptr(&progress.cancel)) != Some(first_job));
+    app.cancel_flight();
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
