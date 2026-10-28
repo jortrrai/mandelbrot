@@ -99,6 +99,25 @@ impl MandelbrotApp {
         });
     }
 
+    /// The form to save the current view as a point of interest, while it is open: a name (required) and a description (optional)
+    fn new_point_form(&mut self, ui: &mut egui::Ui) {
+        let Some((name, description)) = &mut self.new_point else { return };
+        let (mut save, mut cancel) = (false, false);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.add(egui::TextEdit::singleline(name).hint_text("Name (required)").desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::multiline(description).hint_text("Description (optional)").desired_rows(2).desired_width(f32::INFINITY));
+            ui.horizontal(|ui| {
+                save = ui.add_enabled(!name.trim().is_empty(), egui::Button::new("Save")).on_disabled_hover_text("A point of interest needs a name").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if save {
+            self.save_new_point();
+        } else if cancel {
+            self.new_point = None;
+        }
+    }
+
     /// The points of interest and the fields to go to a view by its numbers
     fn places_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -106,7 +125,11 @@ impl MandelbrotApp {
             if ui.button("Reload").on_hover_text(format!("Loads the .json files of {} again", self.points_folder.display())).clicked() {
                 self.load_points_of_interest(self.points_folder.clone());
             }
+            if ui.button("Save this view...").on_hover_text("Saves the current view as a new point of interest: its center, zoom, iterations, coloring and color channels").clicked() {
+                self.new_point = Some((String::new(), String::new()));
+            }
         });
+        self.new_point_form(ui);
         let frame = self.points_ui(ui);
         self.thumbs_visible.clone_from(&frame.visible);
         let ctx = ui.ctx().clone();

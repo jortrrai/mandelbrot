@@ -257,6 +257,36 @@ impl MandelbrotApp {
         self.points_folder = folder;
     }
 
+    /// Saves the current view as a new point of interest with the name and description of the form (see `controls::new_point_form`), in the folder of the list,
+    /// and loads the list again so it shows up (last). The location is the view, the iterations of its render, and the appearance as it is now.
+    pub(super) fn save_new_point(&mut self) {
+        let Some((name, description)) = self.new_point.take() else { return };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.new_point = Some((name, description));
+            return;
+        }
+        let center = self.c.center();
+        let coloring = if self.coloring_index == 0 { Coloring::Hsv } else { Coloring::Bernstein }; //See COLORING_FUNCTIONS
+        let point = PointOfInterest {
+            name: name.clone(),
+            description: description.trim().to_string(),
+            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations },
+            appearance: Some(points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(self.p.color_channel_mapping) }),
+            file_name: String::new(),
+        };
+        match points_of_interest::save_new(&self.points_folder, &point) {
+            Ok(file_name) => {
+                self.log(format!("Saved the view as the point of interest {name} ({file_name})"));
+                self.load_points_of_interest(self.points_folder.clone());
+            }
+            Err(err) => {
+                self.log(format!("Could not save the point of interest {name} in {}: {err}", self.points_folder.display()));
+                self.new_point = Some((name, description)); //Keep what was typed
+            }
+        }
+    }
+
     /// Flies to the point of interest at `index`, by the chosen route at the chosen pace (see `flight`); `fly` moves the view on every frame and arrives with `arrive_at`
     pub(super) fn go_to_point_of_interest(&mut self, index: usize) {
         let Some(point) = self.points.get(index).cloned() else { return };

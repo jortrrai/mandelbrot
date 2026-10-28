@@ -240,6 +240,64 @@ pub fn find_folder() -> PathBuf {
     }
 }
 
+/// The text of a point of interest file for `point`, in the format that `parse` reads (the description and the appearance are left out when there are none)
+///
+/// # Panics
+/// Never in practice: a point of interest is plain text and numbers, which always serialize
+pub fn to_json(point: &PointOfInterest) -> String {
+    let location = &point.location;
+    let mut file = serde_json::json!({
+        "format_version": 1,
+        "name": point.name,
+        "location": {
+            "center": { "real": location.real, "imaginary": location.imaginary },
+            "scale": location.scale,
+            "max_iterations": location.max_iterations,
+        },
+    });
+    if !point.description.is_empty() {
+        file["description"] = serde_json::Value::from(point.description.clone());
+    }
+    if let Some(appearance) = &point.appearance {
+        let mut fields = serde_json::Map::new();
+        if let Some(coloring) = appearance.coloring {
+            fields.insert(String::from("coloring"), serde_json::Value::from(coloring.key()));
+        }
+        if let Some(mapping) = appearance.color_channels {
+            fields.insert(String::from("color_channels"), serde_json::Value::from(format!("{mapping:?}")));
+        }
+        file["appearance"] = serde_json::Value::Object(fields);
+    }
+    serde_json::to_string_pretty(&file).expect("a point of interest is plain text and numbers, which always serialize") + "\n"
+}
+
+/// The file name for a new point of interest called `name` in a folder with the files `existing`.
+///
+/// It is the next number (two digits, after the highest number in the folder, so it is listed last), a `-` and the slugified name, made unique if needed.
+///
+/// # Panics
+/// Never: of the candidates, one more than there are existing files, one is always free
+pub fn new_file_name(existing: &[String], name: &str) -> String {
+    let number = existing.iter().filter_map(|file| file.split('-').next()?.parse::<u32>().ok()).max().map_or(0, |highest| highest + 1);
+    let slug = Some(slugify(name)).filter(|slug| !slug.is_empty()).unwrap_or_else(|| String::from("place"));
+    let base = format!("{number:02}-{slug}");
+    //One more candidate than there are files, so one of them is free
+    (1..=existing.len() + 1).map(|copy| if copy == 1 { format!("{base}.json") } else { format!("{base}-{copy}.json") }).find(|file| !existing.iter().any(|other| other.eq_ignore_ascii_case(file))).expect("a free name")
+}
+
+/// Saves `point` as a new file in `folder` (created if needed), see `new_file_name`; returns the name of the file
+///
+/// # Errors
+/// The folder cannot be read or created, or the file cannot be written
+pub fn save_new(folder: &Path, point: &PointOfInterest) -> std::io::Result<String> {
+    std::fs::create_dir_all(folder)?;
+    let existing: Vec<String> = std::fs::read_dir(folder)?.filter_map(|entry| entry.ok()?.file_name().into_string().ok()).collect();
+    let file_name = new_file_name(&existing, &point.name);
+    //create_new never overwrites a file that appeared in the meantime
+    std::io::Write::write_all(&mut std::fs::OpenOptions::new().write(true).create_new(true).open(folder.join(&file_name))?, to_json(point).as_bytes())?;
+    Ok(file_name)
+}
+
 /// The file name (without extension and without its number) for a name: lowercase letters and digits, other characters become a single `-`, apostrophes disappear.
 /// "Comet's Crown" gives "comets-crown".
 pub fn slugify(name: &str) -> String {
@@ -409,5 +467,34 @@ mod tests {
         let mut sorted: Vec<String> = report.points.iter().map(|p| p.file_name.to_lowercase()).collect();
         sorted.sort();
         assert_eq!(sorted, report.points.iter().map(|p| p.file_name.to_lowercase()).collect::<Vec<_>>(), "listed in alphabetical order of the file names");
+    }
+
+    #[test]
+    fn a_saved_point_reads_back_exactly() {
+        for (description, appearance) in [("", None), ("A spiral with a long arm.", Some(Appearance { coloring: Some(Coloring::Hsv), color_channels: Some(ColorChannelMapping::new("BGR").unwrap()) }))] {
+            let point = PointOfInterest {
+                name: String::from("Comet's Crown"),
+                description: String::from(description),
+                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376 },
+                appearance,
+                file_name: String::new(),
+            };
+            let (read, warnings) = parse(&to_json(&point), "test.json").unwrap();
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!((read.location.real.to_bits(), read.location.imaginary.to_bits(), read.location.scale.to_bits()), (point.location.real.to_bits(), point.location.imaginary.to_bits(), point.location.scale.to_bits()), "the view, bit for bit");
+            assert_eq!((read.name, read.description, read.location.max_iterations, read.appearance), (point.name.clone(), point.description.clone(), 65_376, point.appearance.clone()));
+        }
+    }
+
+    #[test]
+    fn a_new_file_gets_the_next_number_and_never_the_name_of_an_existing_file() {
+        let existing = [String::from("00-reset-view.json"), String::from("10-sunlit-reef.json"), String::from("notes.txt")];
+        assert_eq!(new_file_name(&existing, "My Place"), "11-my-place.json");
+        assert_eq!(new_file_name(&[], "My Place"), "00-my-place.json");
+        assert_eq!(new_file_name(&[String::from("00-my-place.json")], "My Place"), "01-my-place.json");
+        assert_eq!(new_file_name(&[String::from("x-my-place.json"), String::from("00-my-place.json")], "My Place"), "01-my-place.json");
+        assert_eq!(new_file_name(&existing, "!!!"), "11-place.json", "a name without letters or digits");
+        let taken = [String::from("Notes"), String::from("00-a.json")];
+        assert_eq!(new_file_name(&taken, "A"), "01-a.json");
     }
 }
