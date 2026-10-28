@@ -644,3 +644,14 @@ fn an_image_saved_with_the_gpu_has_the_pixels_of_one_saved_without_it() {
     render_complex_plane_into_buffer_with_gpu(&mut with, &c, &m, 3, TrueColor::new_from_bernstein_polynomials, Some(&gpu));
     assert_eq!(with.pixels, without.pixels);
 }
+
+/// The division of the running average by a multiplication is exactly the integer division for every sum of up to 65 samples
+#[test]
+fn the_divider_divides_exactly() {
+    for divisor in 1..=65_u32 {
+        let divide = super::progressive::divider(divisor);
+        for sum in 0..=255 * divisor {
+            assert_eq!(divide(sum), sum / divisor, "{sum} / {divisor}");
+        }
+    }
+}
