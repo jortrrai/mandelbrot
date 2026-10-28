@@ -159,7 +159,9 @@ pub struct MandelbrotApp {
     /// Whether the last render showed a full layer (not only a preview) of the view `shown_plane`
     layer_shown: bool,
     /// The message and the time of the last render during a gesture, until the full-quality render after the gesture starts, see `render_job`
-    settle: Option<(String, std::time::Instant)>,
+    settle: Option<(String, std::time::Instant, bool)>,
+    /// Where the samples of the last render arrive when its job stops, to continue them, see `render_job`
+    samples: Option<std::sync::mpsc::Receiver<crate::rendering::SampleState>>,
     /// Whether every pixel of the buffer has been rendered with the full supersampling amount, so a move can reuse it
     buffer_is_complete: bool,
     /// Messages from background tasks that do not change the view, e.g. saving an image
@@ -225,6 +227,7 @@ impl MandelbrotApp {
             first_layer_per_pixel: None,
             layer_shown: false,
             settle: None,
+            samples: None,
             buffer_is_complete: false,
             notices,
             notice_sender,

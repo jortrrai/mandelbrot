@@ -343,3 +343,197 @@ fn a_fast_render_skips_the_previews_and_a_cancelled_preview_cancels_the_render()
     let (reports, done) = preview_render(&c, &m, w, h, &region, &base, 2, Some(std::time::Duration::ZERO), &AtomicBool::new(true));
     assert!(!done && reports.is_empty());
 }
+
+/// Renders `samples` samples of plane `c` into `state`; cancels after `cancel_after_pass` passes, or in the middle of a pass once `cancel_after_pixels` pixels of it are done.
+/// Returns the colors of the last reported pass and whether the render completed.
+fn resumed(state: &mut SampleState, c: &ComplexPlane, m: &MandelbrotSet, samples: u8, adaptive: Option<AdaptiveSampling>, cancel_after_pass: Option<u8>, cancel_after_pixels: Option<usize>) -> (Vec<(u8, u8, u8)>, bool) {
+    let (w, h) = (state_width(c), state_height(c));
+    let cancel = AtomicBool::new(false);
+    let done = AtomicUsize::new(0);
+    let mut last = Vec::new();
+    let completed = std::thread::scope(|scope| {
+        if let Some(pixels) = cancel_after_pixels {
+            //Watches the progress of the pass and cancels in the middle of it
+            let (cancel, done) = (&cancel, &done);
+            scope.spawn(move || while !cancel.load(Ordering::Relaxed) {
+                if done.load(Ordering::Relaxed) >= pixels {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                std::hint::spin_loop();
+            });
+        }
+        let completed = Render::new(c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).resume(state).cancel_with(&cancel).count_pixels_in(&done).run(|colors, pass| {
+            last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
+            if cancel_after_pass == Some(pass) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        cancel.store(true, Ordering::Relaxed); //Stops the watcher
+        completed
+    });
+    (last, completed)
+}
+
+fn state_width(c: &ComplexPlane) -> usize {
+    (c.length_x / c.increment_x).round() as usize
+}
+
+fn state_height(c: &ComplexPlane) -> usize {
+    (c.length_y / c.increment_y).round() as usize
+}
+
+#[test]
+fn a_resumed_render_from_nothing_is_the_plain_render() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        let plain = adaptive_render(&c, &m, w, h, &ExposedRegion::full(w, h), &vec![TrueColor::new(0, 0, 0); w * h], 5, adaptive.as_ref(), &AtomicBool::new(false)).0;
+        let (colors, completed) = resumed(&mut SampleState::new(), &c, &m, 5, adaptive, None, None);
+        assert!(completed);
+        assert_eq!(colors, plain, "adaptive: {adaptive:?}");
+    }
+}
+
+#[test]
+fn an_interrupted_render_continues_where_it_stopped_and_gives_the_same_image() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        let (expected, _) = resumed(&mut SampleState::new(), &c, &m, 6, adaptive, None, None);
+        //Between passes, and in the middle of a pass (the watcher stops it after some pixels; where exactly does not matter)
+        for (after_pass, after_pixels) in [(Some(1), None), (Some(3), None), (None, Some(200)), (None, Some(1500))] {
+            let mut state = SampleState::new();
+            let (_, completed) = resumed(&mut state, &c, &m, 6, adaptive, after_pass, after_pixels);
+            assert!(!completed);
+            let partial: usize = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| usize::from(state.samples(x, y))).sum();
+            assert!(partial > 0, "the interrupted render kept its samples");
+            let (colors, completed) = resumed(&mut state, &c, &m, 6, adaptive, None, None);
+            assert!(completed);
+            assert_eq!(colors, expected, "adaptive {adaptive:?}, interrupted after pass {after_pass:?} / {after_pixels:?} pixels");
+        }
+    }
+}
+
+/// The colors after rendering `c` into a new state, interrupted after `interrupted_after` passes (or complete), then moving the view `rows_up` and `columns_right`
+/// and continuing to `samples` samples; and the moved plane with the state
+#[allow(clippy::too_many_arguments)] // A test helper: the settings of the two renders
+fn moved_render(c: &ComplexPlane, m: &MandelbrotSet, samples: u8, adaptive: Option<AdaptiveSampling>, interrupted_after: Option<u8>, rows_up: i16, columns_right: i16) -> (Vec<(u8, u8, u8)>, ComplexPlane, SampleState) {
+    let mut state = SampleState::new();
+    let _ = resumed(&mut state, c, m, samples, adaptive, interrupted_after, None);
+    let mut moved = c.clone();
+    translate_complex_plane_by_pixels(&mut moved, rows_up, columns_right);
+    let (colors, completed) = resumed(&mut state, &moved, m, samples, adaptive, None, None);
+    assert!(completed);
+    (colors, moved, state)
+}
+
+#[test]
+fn a_moved_view_keeps_the_samples_of_the_pixels_that_stay_visible() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let (complete, _) = resumed(&mut SampleState::new(), &c, &m, 4, None, None, None);
+    for interrupted_after in [None, Some(1), Some(2)] {
+        let mut state = SampleState::new();
+        let _ = resumed(&mut state, &c, &m, 4, None, interrupted_after, None);
+        let before = state.samples(10, 10);
+        //Move the view 5 columns to the right and 3 rows up: the content moves 5 columns left and 3 rows down
+        let mut moved = c.clone();
+        translate_complex_plane_by_pixels(&mut moved, 3, 5);
+        //A render that is cancelled before it starts only shifts the state: the pixels that stay visible keep their samples, the exposed ones have none
+        let cancelled = AtomicBool::new(true);
+        let _ = Render::new(&moved, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).resume(&mut state).cancel_with(&cancelled).run(|_, _| {});
+        assert_eq!(state.samples(10 - 5, 10 + 3), before);
+        let empty = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| state.samples(*x, *y) == 0).count();
+        assert_eq!(empty, 5 * h + 3 * w - 5 * 3, "only the exposed strips are empty");
+
+        //Continuing gives exactly the original complete image where the view overlaps, and exactly what a move after a complete render gives everywhere
+        let (colors, completed) = resumed(&mut state, &moved, &m, 4, None, None, None);
+        assert!(completed);
+        for y in 3..h {
+            for x in 0..w - 5 {
+                assert_eq!(colors[y * w + x], complete[(y - 3) * w + x + 5], "({x}, {y}), interrupted after {interrupted_after:?}");
+            }
+        }
+        assert_eq!(colors, moved_render(&c, &m, 4, None, None, 3, 5).0, "interrupted after {interrupted_after:?}");
+    }
+}
+
+#[test]
+fn with_adaptive_supersampling_an_interrupted_and_moved_render_matches_away_from_the_edges() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let adaptive = Some(AdaptiveSampling::default());
+    let (expected, _, expected_state) = moved_render(&c, &m, 8, adaptive, None, -4, -6);
+    let (colors, _, state) = moved_render(&c, &m, 8, adaptive, Some(4), -4, -6);
+    for y in 0..h {
+        for x in 0..w {
+            //The mask of a pixel at the edge can depend on a neighbor that moved out of the view (or was not there before the move); elsewhere the image is the same
+            if x >= 2 && y >= 2 && x + 2 < w && y + 2 < h {
+                assert_eq!(colors[y * w + x], expected[y * w + x], "({x}, {y})");
+                assert_eq!(state.samples(x, y), expected_state.samples(x, y), "({x}, {y})");
+            }
+        }
+    }
+}
+
+#[test]
+fn other_settings_or_a_zoom_start_over() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let mut state = SampleState::new();
+    let _ = resumed(&mut state, &c, &m, 3, None, None, None);
+    let other_limit = MandelbrotSet::new(301, 2.0);
+    let (colors, _) = resumed(&mut state, &c, &other_limit, 3, None, None, None);
+    assert_eq!(colors, resumed(&mut SampleState::new(), &c, &other_limit, 3, None, None, None).0, "another limit renders everything again");
+    let mut zoomed = c.clone();
+    zoomed.scale(0.5);
+    let (colors, _) = resumed(&mut state, &zoomed, &other_limit, 3, None, None, None);
+    assert_eq!(colors, resumed(&mut SampleState::new(), &zoomed, &other_limit, 3, None, None, None).0, "so does a zoom");
+}
+
+#[test]
+fn any_sequence_of_moves_and_interruptions_ends_in_the_complete_image() {
+    //Random sequences of moves (by up to 20 pixels each way) and interruptions (after a random pass, in the middle of a pass after a random amount of pixels, or none),
+    //ended by one render that completes. The result is compared with a render of the last view from nothing, with the same placement of the samples:
+    //every pixel has at least its samples, and a pixel with the same amount of samples has exactly the same color
+    let (w, h) = (48, 32);
+    let (c, m) = boundary_plane(w, h);
+    let mut random = 0x5EED_u64;
+    let mut next = |below: u64| {
+        random = splitmix64(random);
+        random % below
+    };
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        for sequence in 0..12 {
+            let mut state = SampleState::new();
+            let mut plane = c.clone();
+            for _ in 0..=next(5) {
+                let (after_pass, after_pixels) = match next(3) {
+                    0 => (Some(1 + next(5) as u8), None),
+                    1 => (None, Some(1 + next(1500) as usize)),
+                    _ => (None, None),
+                };
+                let _ = resumed(&mut state, &plane, &m, 6, adaptive, after_pass, after_pixels);
+                translate_complex_plane_by_pixels(&mut plane, next(41) as i16 - 20, next(41) as i16 - 20);
+            }
+            let (colors, completed) = resumed(&mut state, &plane, &m, 6, adaptive, None, None);
+            assert!(completed);
+            let mut fresh = state.emptied();
+            let (expected, _) = resumed(&mut fresh, &plane, &m, 6, adaptive, None, None);
+            let mut same = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let (has, needs) = (state.samples(x, y), fresh.samples(x, y));
+                    assert!(has >= needs, "sequence {sequence}, adaptive {adaptive:?}: ({x}, {y}) has {has} of its {needs} samples");
+                    if has == needs {
+                        assert_eq!(colors[y * w + x], expected[y * w + x], "sequence {sequence}, adaptive {adaptive:?}, ({x}, {y})");
+                        same += 1;
+                    }
+                }
+            }
+            if adaptive.is_none() {
+                assert_eq!(same, w * h, "without adaptive supersampling every pixel has exactly its samples");
+            }
+        }
+    }
+}

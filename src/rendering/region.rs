@@ -58,6 +58,13 @@ pub fn center_complex_plane_on(c: &mut ComplexPlane, new_center: &Complex) -> (i
     (i128::from(rows), i128::from(columns))
 }
 
+/// Moves the complex plane `c` up by `rows_up` and right by `columns_right` whole pixels (any distance), without rendering anything.
+///
+/// After the move the plane is the old plane shifted by whole pixels, see `pixel_shift`.
+pub fn move_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i64, columns_right: i64) {
+    c.translate(columns_right as f64 * c.increment_x, -(rows_up as f64) * c.increment_y);
+}
+
 /// Moves the complex plane `c` up by `rows_up` and right by `columns_right` pixels, without rendering anything.
 ///
 /// Each distance is taken modulo 256 pixels (`as u8`): a move of 256 pixels moves by 0 and one of 300 by 44. The window only moves by small steps.
@@ -65,4 +72,17 @@ pub fn translate_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i16, col
     let row_sign: f64 = if rows_up > 0 {-1.0} else {1.0};
     let column_sign: f64 = if columns_right > 0 {1.0} else {-1.0};
     c.translate(column_sign*c.pixels_to_real(columns_right.unsigned_abs() as u8), row_sign*c.pixels_to_imaginary(rows_up.unsigned_abs() as u8)); 
+}
+
+/// The shift of the buffer that turns the image of `shown` into the image of `wanted`, if `wanted` is `shown` moved by whole pixels.
+///
+/// The shift is `(rows_up, columns_right)` for [`crate::pixel_buffer::PixelBuffer::translate_buffer`]; `None` if the views differ in size or zoom. Unlike the move of one frame, this also covers several moves whose renders were interrupted.
+pub fn pixel_shift(shown: &ComplexPlane, wanted: &ComplexPlane) -> Option<(i128, i128)> {
+    //A move keeps the size of the pixels exactly (`ComplexPlane::translate` only adds to the bounds), a zoom or a resize changes it
+    let same_size = |a: f64, b: f64| a.to_bits() == b.to_bits();
+    let same_grid = same_size(shown.increment_x, wanted.increment_x) && same_size(shown.increment_y, wanted.increment_y) && same_size(shown.length_x, wanted.length_x) && same_size(shown.length_y, wanted.length_y);
+    let columns = (wanted.min_x - shown.min_x) / wanted.increment_x;
+    let rows_up = (shown.min_y - wanted.min_y) / wanted.increment_y;
+    let whole = |value: f64| (value - value.round()).abs() < 1e-6 && value.abs() < 1e9;
+    (same_grid && whole(columns) && whole(rows_up)).then(|| (rows_up.round() as i128, -(columns.round() as i128)))
 }

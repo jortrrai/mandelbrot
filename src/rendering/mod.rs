@@ -11,11 +11,13 @@ mod buffer;
 mod jitter;
 mod progressive;
 mod region;
+mod state;
 
 pub use adaptive::{adaptive_mask, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 pub use buffer::render_complex_plane_into_buffer;
 pub use progressive::{Render, PREVIEW_BLOCKS};
-pub use region::{center_complex_plane_on, translate_complex_plane_by_pixels, ExposedRegion};
+pub use region::{center_complex_plane_on, move_complex_plane_by_pixels, pixel_shift, translate_complex_plane_by_pixels, ExposedRegion};
+pub use state::SampleState;
 
 /// The amount of threads that rendering functions use: all logical CPU threads except one, which is left free for the rest of the system and the GUI, but at least one
 pub fn render_thread_count() -> usize {

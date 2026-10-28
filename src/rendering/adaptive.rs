@@ -32,6 +32,11 @@ fn color_distance(a: TrueColor, b: TrueColor) -> u32 {
 /// A pixel is marked when its two samples differ (`first` is the color of sample 0, `colors` the average of the uniform samples), or when it differs from any of its 8 neighbors.
 /// Then every marked pixel also marks its 8 neighbors, so a thin feature that only one of the first samples hit is covered on both sides.
 pub fn adaptive_mask(width: usize, height: usize, region: &ExposedRegion, first: &[TrueColor], colors: &[TrueColor], threshold: u32) -> Vec<bool> {
+    mask_where(width, height, &|x, y| region.contains(x, y), first, colors, threshold)
+}
+
+/// `adaptive_mask` for the pixels where `inside` is true, with `colors` the average of the uniform samples of every pixel (and the color of the pixels outside)
+pub(super) fn mask_where(width: usize, height: usize, inside: &(impl Fn(usize, usize) -> bool + Sync), first: &[TrueColor], colors: &[TrueColor], threshold: u32) -> Vec<bool> {
     let rows_per_chunk = height.div_ceil(render_thread_count()).max(1);
     let neighbors = |x: usize, y: usize| (y.saturating_sub(1)..=(y + 1).min(height - 1)).flat_map(move |ny| (x.saturating_sub(1)..=(x + 1).min(width - 1)).map(move |nx| ny * width + nx));
     //Rows are independent in both steps, so they are processed in parallel; the result does not depend on the split
@@ -42,7 +47,7 @@ pub fn adaptive_mask(width: usize, height: usize, region: &ExposedRegion, first:
                 for (row_in_chunk, row) in rows.chunks_mut(width).enumerate() {
                     let y = chunk * rows_per_chunk + row_in_chunk;
                     for (x, flag) in row.iter_mut().enumerate() {
-                        if !region.contains(x, y) {
+                        if !inside(x, y) {
                             continue;
                         }
                         let index = y * width + x;
@@ -60,7 +65,7 @@ pub fn adaptive_mask(width: usize, height: usize, region: &ExposedRegion, first:
                 for (row_in_chunk, row) in rows.chunks_mut(width).enumerate() {
                     let y = chunk * rows_per_chunk + row_in_chunk;
                     for (x, flag) in row.iter_mut().enumerate() {
-                        *flag = region.contains(x, y) && neighbors(x, y).any(|other| marked[other]);
+                        *flag = inside(x, y) && neighbors(x, y).any(|other| marked[other]);
                     }
                 }
             });

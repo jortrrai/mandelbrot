@@ -2,10 +2,11 @@
 
 use std::{thread, sync::{Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
 
-use super::adaptive::{adaptive_mask, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
+use super::adaptive::{mask_where, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 use super::jitter::sample_jitter;
 use super::region::ExposedRegion;
 use super::render_thread_count;
+use super::state::{SampleKey, SampleState, FOREIGN};
 use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, mandelbrot_set::{MandelbrotSet, LANES}};
 
 /// The largest `max_iterations` for which `Render::run` precomputes the color of every iteration count
@@ -40,12 +41,13 @@ pub struct Render<'a> {
     cancel: Option<&'a AtomicBool>,
     pixels_done: Option<&'a AtomicUsize>,
     preview: Option<Duration>,
+    state: Option<&'a mut SampleState>,
 }
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(u32, u32) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, state: None }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -99,6 +101,22 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// Continues the samples in `state` instead of starting from nothing: a pixel that already has samples only gets the samples it is missing.
+    ///
+    /// If the view is the view of the state moved by whole pixels, with the same size, iterations, palette and coloring, the samples are shifted along with the view
+    /// and only the newly visible pixels start empty; otherwise every pixel starts empty. The state is updated while the render runs, also when it is cancelled
+    /// (even within a pass), so the next render continues where this one stopped. The samples of a pixel are keyed by its position in the view of the first render
+    /// (see `SampleState`), so continued samples are exactly the samples of a render that was never interrupted.
+    ///
+    /// A pixel that has more samples than `supersampling` keeps them. With adaptive supersampling the extra samples go to the pixels that show detail in the current
+    /// view; a pixel near the edge that got extra samples because of a neighbor that has moved out of the view keeps them, so it can have more samples than in a fresh render.
+    /// Not combined with `only`.
+    #[must_use]
+    pub fn resume(mut self, state: &'a mut SampleState) -> Self {
+        self.state = Some(state);
+        self
+    }
+
     /// Runs the render. After every completed pass `on_pass` is called with the colors of the whole image (`width * height`, row by row), that is `base` with the region replaced
     /// by the running average of all samples so far, and the number of the pass (from 1).
     /// Returns `false` if the render was cancelled before all passes completed.
@@ -106,103 +124,207 @@ impl<'a> Render<'a> {
     /// # Panics
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview } = self;
-        let full_region = ExposedRegion::full(width, height);
-        let black = vec![TrueColor::new(0, 0, 0); width * height];
-        let (region, base) = exposed.unwrap_or((&full_region, &black));
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, state } = self;
         let (never_cancelled, own_counter) = (AtomicBool::new(false), AtomicUsize::new(0));
         let (cancel, pixels_done) = (cancel.unwrap_or(&never_cancelled), pixels_done.unwrap_or(&own_counter));
-        let adaptive = adaptive.as_ref();
-        assert_eq!(base.len(), width * height, "base should have a color for every pixel");
         let supersampling_amount = supersampling_amount.clamp(1, 64);
-        let amount_of_threads = render_thread_count();
-        let mut sums: Vec<[u32; 3]> = vec![[0; 3]; width * height];
-        let mut colors: Vec<TrueColor> = base.to_vec();
+        let adaptive = adaptive.filter(|_| supersampling_amount > ADAPTIVE_UNIFORM_SAMPLES);
+        let (region, base) = exposed.map_or((None, None), |(region, base)| (Some(region), Some(base)));
+        if let Some(base) = base {
+            assert_eq!(base.len(), width * height, "base should have a color for every pixel");
+        }
+        debug_assert!(state.is_none() || exposed.is_none(), "a resumed render renders every pixel that misses samples");
+        let mut state = state;
+        //Only a resumed state is kept after the render, so only then does every pixel need its count of samples updated
+        let track = state.is_some();
+        //How many pixels kept their samples; without them, the colors so far are the base and every pixel of the render is still empty
+        //Whether every pixel is still empty: a new state, or one that started over
+        let empty = state.as_mut().is_none_or(|state| state.prepare(c, width, height, SampleKey::new(m, coloring_function)));
+        let mut own_state = None;
+        let state: &mut SampleState = state.unwrap_or_else(|| own_state.insert(SampleState::for_one_render(width, height, region, base, adaptive.is_some())));
+        //Where the samples are placed: the view where the samples of the state started, or this view
+        let (anchor, origin) = (state.anchor.clone().unwrap_or_else(|| c.clone()), state.origin);
+        let mut colors: Vec<TrueColor> = base.map_or_else(|| vec![TrueColor::new(0, 0, 0); width * height], <[TrueColor]>::to_vec);
+        //How many pixels of the render have each amount of samples, to know how many pixels a pass computes
+        let mut pending = [0_usize; 66];
+        if empty {
+            pending[0] = region.map_or(width * height, |region| region.pixel_count(width, height));
+        } else {
+            pending = colors_of_kept_samples(state, &mut colors);
+        }
+        let total: usize = pending.iter().sum();
         //The color of a pixel only depends on its iteration count, which is at most `max_iterations`, so compute every color once
         let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| (0..=m.max_iterations).map(|iterations| m.color(coloring_function, iterations)).collect());
-        let adaptive = adaptive.filter(|_| supersampling_amount > ADAPTIVE_UNIFORM_SAMPLES);
         let color_of = |position: f64| m.interpolated_color(position, |iterations| color_table.as_ref().map_or_else(|| m.color(coloring_function, iterations), |table| table[iterations as usize]));
-        //The pixels whose first sample the previews computed already, empty without previews
+        //The pixels whose first sample the previews computed, empty without previews
         let mut has_first: Vec<bool> = Vec::new();
-        let mut precomputed = 0;
-        if let Some(worthwhile) = preview {
-            match render_previews(c, m, width, region, worthwhile, cancel, &color_of, &mut sums, &mut colors, &mut on_pass) {
-                Some((flags, count)) => (has_first, precomputed) = (flags, count),
+        if let Some(worthwhile) = preview.filter(|_| pending[0] > 0) {
+            match render_previews(&anchor, m, origin, worthwhile, cancel, &color_of, state, pending[0], &mut colors, &mut on_pass) {
+                Some((flags, count)) => {
+                    has_first = flags;
+                    pending[0] -= count;
+                    pending[1] += count;
+                }
                 None => return false,
             }
         }
-        let mut first_colors: Vec<TrueColor> = Vec::new();
         let mut mask: Option<Vec<bool>> = None;
+        let mut masked = [0_usize; 66];
         for sample in 0..supersampling_amount {
-            let skip_first = sample == 0 && !has_first.is_empty();
-            pixels_done.store(if skip_first { precomputed } else { 0 }, Ordering::Relaxed);
-            let divisor = u32::from(sample) + 1;
-            if let (Some(_), Some(mask)) = (adaptive, &mask) {
-                //The pixels that get no sample in this pass count as done
-                let skipped = (0..height).map(|y| (0..width).filter(|x| region.contains(*x, y) && !mask[y * width + x]).count()).sum();
-                pixels_done.store(skipped, Ordering::Relaxed);
-            }
-            let mask_ref = mask.as_deref();
-            let has_first = &has_first;
-            let rows = Mutex::new(sums.chunks_mut(width).zip(colors.chunks_mut(width)).enumerate());
-            thread::scope(|scope| {
-                for _ in 0..amount_of_threads {
-                    scope.spawn(|| loop {
-                        if cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let next_row = rows.lock().unwrap().next();
-                        let Some((y, (row, color_row))) = next_row else { return };
-                        let xs: Vec<usize> = (0..width).filter(|x| region.contains(*x, y) && mask_ref.is_none_or(|mask| mask[y * width + x]) && !(skip_first && has_first[y * width + x])).collect();
-                        positions(c, m, y, &xs, sample, |x, position| {
-                            let color = color_of(position);
-                            let sum = &mut row[x];
-                            sum[0] += u32::from(color.red);
-                            sum[1] += u32::from(color.green);
-                            sum[2] += u32::from(color.blue);
-                        });
-                        //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
-                        for x in &xs {
-                            let sum = row[*x];
-                            color_row[*x] = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
-                        }
-                        if skip_first && y % SMALLEST_BLOCK == 0 {
-                            //The first samples that the previews computed (top-left pixels of blocks): the color of the pixel itself, whether or not a preview showed it
-                            for x in (0..width).step_by(SMALLEST_BLOCK).filter(|x| has_first[y * width + x]) {
-                                color_row[x] = sum_color(row[x]);
-                            }
-                        }
-                        let done = xs.len();
-                        pixels_done.fetch_add(done, Ordering::Relaxed);
-                    });
+            let index = usize::from(sample);
+            if let Some(adaptive) = adaptive.filter(|_| sample == ADAPTIVE_UNIFORM_SAMPLES) {
+                //Every pixel has its uniform samples now: mark the pixels that need more, from the colors of their first two samples
+                let counts = &state.counts;
+                let new_mask = mask_where(width, height, &|x, y| counts[y * width + x] != FOREIGN, &state.first, &state.second, adaptive.threshold);
+                if track {
+                    for (count, _) in counts.iter().zip(&new_mask).filter(|(_, marked)| **marked) {
+                        masked[usize::from(*count).min(65)] += 1;
+                    }
+                } else {
+                    //Without counts every pixel of the render has the uniform samples now
+                    masked[index] = new_mask.iter().filter(|marked| **marked).count();
                 }
-            });
+                mask = Some(new_mask);
+            }
+            let eligible = if mask.is_some() { masked[index] } else { pending[index] };
+            //The pixels that get no sample in this pass count as done
+            pixels_done.store(total - eligible, Ordering::Relaxed);
+            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done) } else { 0 };
             if cancel.load(Ordering::Relaxed) {
                 return false;
             }
-            if let Some(adaptive) = adaptive {
-                if sample == 0 {
-                    first_colors.clone_from(&colors);
-                } else if sample + 1 == ADAPTIVE_UNIFORM_SAMPLES {
-                    mask = Some(adaptive_mask(width, height, region, &first_colors, &colors, adaptive.threshold));
-                }
+            pending[index] -= processed;
+            pending[index + 1] += processed;
+            if mask.is_some() {
+                masked[index] -= processed;
+                masked[index + 1] += processed;
             }
             on_pass(&colors, sample + 1);
         }
         true
-        }
     }
+}
+
+/// Pass `sample` of `Render::run`: takes sample `sample` (placed in `anchor`, see `positions`) of every pixel that has `sample` samples (and is marked by `mask`, if any), updates `state` and `colors`
+/// row by row on all threads, and returns how many pixels it sampled. A cancelled pass stops after the rows it started; those rows are complete in `state`.
+/// Without `track` (a state that is not kept) every pixel of the render has `sample` samples except the ones the previews computed, so the counts are not updated.
+#[allow(clippy::too_many_arguments)] // The state of `Render::run` that a pass shares
+fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
+    cancel: &AtomicBool, pixels_done: &AtomicUsize) -> usize {
+    let (width, height, origin) = (state.width, state.height, state.origin);
+    let processed = AtomicUsize::new(0);
+        let divisor = u32::from(sample) + 1;
+        let mask_ref = mask;
+        let skip_first = sample == 0 && !has_first.is_empty();
+        //The colors of the first two samples are only kept when they are needed (adaptive supersampling, a kept state); otherwise every row gets an empty slice
+        let (first_rows, second_rows) = (rows_or_empty(&mut state.first, width, height), rows_or_empty(&mut state.second, width, height));
+        let rows = Mutex::new(state.sums.chunks_mut(width).zip(state.counts.chunks_mut(width)).zip(first_rows).zip(second_rows).zip(colors.chunks_mut(width)).enumerate());
+        thread::scope(|scope| {
+            for _ in 0..render_thread_count() {
+                scope.spawn(|| loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let next_row = rows.lock().unwrap().next();
+                    let Some((y, ((((row, counts), first), second), color_row))) = next_row else { return };
+                    let xs: Vec<usize> = if track {
+                        (0..width).filter(|x| counts[*x] == sample && mask_ref.is_none_or(|mask| mask[y * width + x])).collect()
+                    } else {
+                        (0..width).filter(|x| counts[*x] != FOREIGN && mask_ref.is_none_or(|mask| mask[y * width + x]) && !(skip_first && has_first[y * width + x])).collect()
+                    };
+                    positions(c, m, y, &xs, sample, origin, |x, position| {
+                        let color = color_of(position);
+                        let sum = &mut row[x];
+                        if sample == 0 {
+                            //The first sample replaces the sum, so a state that starts over does not have to clear its sums
+                            *sum = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
+                        } else {
+                            sum[0] += u32::from(color.red);
+                            sum[1] += u32::from(color.green);
+                            sum[2] += u32::from(color.blue);
+                        }
+                    });
+                    //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
+                    for x in &xs {
+                        let sum = row[*x];
+                        let color = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
+                        color_row[*x] = color;
+                        if track {
+                            counts[*x] = sample + 1;
+                        }
+                        match sample {
+                            0 if !first.is_empty() => first[*x] = color,
+                            1 if !second.is_empty() => second[*x] = color,
+                            _ => {}
+                        }
+                    }
+                    if skip_first && y % SMALLEST_BLOCK == 0 {
+                        //The first samples that the previews computed (top-left pixels of blocks): the color of the pixel itself, whether or not a preview showed it
+                        for x in (0..width).step_by(SMALLEST_BLOCK).filter(|x| has_first[y * width + x]) {
+                            color_row[x] = sum_color(row[x]);
+                        }
+                    }
+                    processed.fetch_add(xs.len(), Ordering::Relaxed);
+                    pixels_done.fetch_add(xs.len(), Ordering::Relaxed);
+                });
+            }
+        });
+    processed.into_inner()
+}
 
 /// The color of the sum of one sample
 fn sum_color(sum: [u32; 3]) -> TrueColor {
     TrueColor::new(sum[0] as u8, sum[1] as u8, sum[2] as u8)
 }
 
-/// Computes the position (smooth iteration count) of sample `sample` of the pixels `xs` of row `y` and gives each to `sink`: `LANES` pixels at the same time, the remaining pixels one by one
-fn positions(c: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample: u8, mut sink: impl FnMut(usize, f64)) {
+/// Gives every pixel of `state` that has samples the average of its samples in `colors`, on all threads, and returns how many pixels of the render have each amount of samples
+fn colors_of_kept_samples(state: &SampleState, colors: &mut [TrueColor]) -> [usize; 66] {
+    let rows_per_chunk = state.height.div_ceil(render_thread_count()).max(1) * state.width;
+    let pending = Mutex::new([0_usize; 66]);
+    thread::scope(|scope| {
+        for (chunk, colors) in colors.chunks_mut(rows_per_chunk).enumerate() {
+            let pending = &pending;
+            scope.spawn(move || {
+                let start = chunk * rows_per_chunk;
+                let mut counted = [0_usize; 66];
+                for (offset, color) in colors.iter_mut().enumerate() {
+                    let count = state.counts[start + offset];
+                    if count != FOREIGN {
+                        counted[usize::from(count).min(65)] += 1;
+                        if count > 0 {
+                            *color = average(state.sums[start + offset], count);
+                        }
+                    }
+                }
+                let mut pending = pending.lock().unwrap();
+                for (total, count) in pending.iter_mut().zip(counted) {
+                    *total += count;
+                }
+            });
+        }
+    });
+    pending.into_inner().unwrap()
+}
+
+/// The rows of a `width` x `height` grid, or `height` empty rows if the grid is not kept (empty)
+fn rows_or_empty<T>(grid: &mut [T], width: usize, height: usize) -> Vec<&mut [T]> {
+    if grid.is_empty() { (0..height).map(|_| <&mut [T]>::default()).collect() } else { grid.chunks_mut(width).collect() }
+}
+
+/// The average color of `count` samples whose colors add up to `sum`
+fn average(sum: [u32; 3], count: u8) -> TrueColor {
+    let count = u32::from(count);
+    TrueColor::new((sum[0] / count) as u8, (sum[1] / count) as u8, (sum[2] / count) as u8)
+}
+
+/// Computes the position (smooth iteration count) of sample `sample` of the pixels `xs` of row `y` and gives each to `sink`: `LANES` pixels at the same time, the remaining pixels one by one.
+/// A pixel is pixel `(x + origin.0, y + origin.1)` of `anchor`, which places its samples and keys their jitter, see `SampleState`.
+fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample: u8, origin: (isize, isize), mut sink: impl FnMut(usize, f64)) {
+    let anchor_y = y.cast_signed() + origin.1;
     let sample_point = |x: usize| {
-        let (jitter_x, jitter_y) = sample_jitter(x, y, sample);
-        c.complex_from_pixel_plane(f64::from(x as u32) + jitter_x, f64::from(y as u32) + jitter_y)
+        let anchor_x = x.cast_signed() + origin.0;
+        let (jitter_x, jitter_y) = sample_jitter(anchor_x as usize, anchor_y as usize, sample);
+        anchor.complex_from_pixel_plane(anchor_x as f64 + jitter_x, anchor_y as f64 + jitter_y)
     };
     let (groups, remainder) = xs.as_chunks::<LANES>();
     for group in groups {
@@ -217,21 +339,21 @@ fn positions(c: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], sample
     }
 }
 
-/// The previews of [`Render::preview`]: computes the first sample of the top-left pixel of every block of each level into `sums`, and reports a level (filled into `colors`)
-/// when the rest of the first layer is expected to take longer than `worthwhile`. Returns which pixels have their first sample and how many, or `None` if cancelled.
+/// The previews of [`Render::preview`]: computes the first sample of the top-left pixel of every block of each level that has no samples yet into `state`, and reports
+/// a level (filled into `colors`) when the rest of the first layer (`empty` pixels without samples at the start) is expected to take longer than `worthwhile`.
+/// Returns which pixels got their first sample and how many, or `None` if cancelled.
 #[allow(clippy::too_many_arguments)] // The state of `Render::run` that the previews share
-fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, width: usize, region: &ExposedRegion, worthwhile: Duration, cancel: &AtomicBool, color_of: &(impl Fn(f64) -> TrueColor + Sync),
-    sums: &mut [[u32; 3]], colors: &mut [TrueColor], on_pass: &mut impl FnMut(&[TrueColor], u8)) -> Option<(Vec<bool>, usize)> {
-    let height = sums.len() / width;
-    let region_pixels = region.pixel_count(width, height);
-    let mut has_first = vec![false; sums.len()];
+fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), worthwhile: Duration, cancel: &AtomicBool, color_of: &(impl Fn(f64) -> TrueColor + Sync),
+    state: &mut SampleState, empty: usize, colors: &mut [TrueColor], on_pass: &mut impl FnMut(&[TrueColor], u8)) -> Option<(Vec<bool>, usize)> {
+    let width = state.width;
+    let mut has_first = vec![false; state.counts.len()];
     let mut precomputed = 0;
     let threads = render_thread_count();
     //The time the threads spent computing samples, without starting threads and waiting: on a fast view those would dominate the estimate
     let busy_nanos = AtomicU64::new(0);
     for block in PREVIEW_BLOCKS {
         let count = AtomicUsize::new(0);
-        let rows = Mutex::new(sums.chunks_mut(width).zip(has_first.chunks_mut(width)).enumerate().step_by(block));
+        let rows = Mutex::new(state.sums.chunks_mut(width).zip(state.counts.chunks_mut(width)).zip(rows_or_empty(&mut state.first, width, state.height)).zip(has_first.chunks_mut(width)).enumerate().step_by(block));
         thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| loop {
@@ -239,12 +361,16 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, width: usize, region: &E
                         return;
                     }
                     let next_row = rows.lock().unwrap().next();
-                    let Some((y, (row, has_row))) = next_row else { return };
+                    let Some((y, (((row, counts), first), has_row))) = next_row else { return };
                     let row_started = Instant::now();
-                    let xs: Vec<usize> = (0..width).step_by(block).filter(|x| region.contains(*x, y) && !has_row[*x]).collect();
-                    positions(c, m, y, &xs, 0, |x, position| {
+                    let xs: Vec<usize> = (0..width).step_by(block).filter(|x| counts[*x] == 0).collect();
+                    positions(c, m, y, &xs, 0, origin, |x, position| {
                         let color = color_of(position);
                         row[x] = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
+                        counts[x] = 1;
+                        if !first.is_empty() {
+                            first[x] = color;
+                        }
                         has_row[x] = true;
                     });
                     count.fetch_add(xs.len(), Ordering::Relaxed);
@@ -258,35 +384,30 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, width: usize, region: &E
         precomputed += count.into_inner();
         //The rest of the first layer, at the speed of the samples so far, on all threads
         let per_sample = busy_nanos.load(Ordering::Relaxed) as f64 / precomputed.max(1) as f64;
-        let remaining = Duration::from_secs_f64(per_sample * region_pixels.saturating_sub(precomputed) as f64 / threads as f64 / 1e9);
+        let remaining = Duration::from_secs_f64(per_sample * empty.saturating_sub(precomputed) as f64 / threads as f64 / 1e9);
         if remaining <= worthwhile {
             break;
         }
-        fill_blocks(width, region, block, sums, &has_first, colors);
+        fill_blocks(width, block, state, &has_first, colors);
         on_pass(colors, 0);
     }
     Some((has_first, precomputed))
 }
 
-/// Gives every pixel of `region` the color of the top-left pixel of its `block` x `block` block, if that pixel has its first sample
-fn fill_blocks(width: usize, region: &ExposedRegion, block: usize, sums: &[[u32; 3]], has_first: &[bool], colors: &mut [TrueColor]) {
+/// Gives every pixel without samples the color of the top-left pixel of its `block` x `block` block, if the previews computed that pixel
+fn fill_blocks(width: usize, block: usize, state: &SampleState, has_first: &[bool], colors: &mut [TrueColor]) {
     let rows = Mutex::new(colors.chunks_mut(width).enumerate());
     thread::scope(|scope| {
         for _ in 0..render_thread_count() {
             scope.spawn(|| loop {
                 let next_row = rows.lock().unwrap().next();
                 let Some((y, row)) = next_row else { return };
-                //The pixels of the region in this row are one run: the whole row, or the exposed columns
-                let (start, end) = if region.rows.contains(&y) { (0, width) } else { (region.columns.start.min(width), region.columns.end.min(width)) };
                 let top = (y - y % block) * width;
-                let mut x = start;
-                while x < end {
-                    let block_end = (x - x % block + block).min(end);
-                    let origin = top + x - x % block;
-                    if has_first[origin] {
-                        row[x..block_end].fill(sum_color(sums[origin]));
+                for (x, color) in row.iter_mut().enumerate() {
+                    let (index, origin) = (y * width + x, top + x - x % block);
+                    if has_first[origin] && (state.counts[index] == 0 || has_first[index]) {
+                        *color = sum_color(state.sums[origin]);
                     }
-                    x = block_end;
                 }
             });
         }

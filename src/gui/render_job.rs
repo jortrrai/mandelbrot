@@ -11,11 +11,10 @@ use crate::coloring::TrueColor;
 use crate::complex_plane::ComplexPlane;
 use crate::mandelbrot_set::MandelbrotSet;
 use crate::pixel_buffer::PixelBuffer;
-use crate::rendering::{self, ExposedRegion};
-use crate::rendering::Render;
+use crate::rendering::{self, Render};
 use eframe::egui;
 
-use super::{transform, MandelbrotApp};
+use super::MandelbrotApp;
 
 
 /// A preview of a new view is only shown if the first layer is expected to take longer than this, about a frame: a faster first layer is shown directly, see `Render::preview`
@@ -27,11 +26,12 @@ const GESTURE_PAUSE: Duration = Duration::from_millis(150);
 /// A message from a rendering job that runs on a background thread
 pub(super) enum JobMessage {
     /// An intermediate image: the running average of the first `pass` of `total` supersampling layers, or a low-resolution preview of the first layer when `pass` is 0
-    Pass { colors: Vec<TrueColor>, plane: ComplexPlane, pass: u8, total: u8, layer_time: Duration },
+    /// `whole` is true when the render started from nothing, so the pass covers the whole view (not only pixels that a move exposed)
+    Pass { colors: Vec<TrueColor>, plane: ComplexPlane, pass: u8, total: u8, layer_time: Duration, whole: bool },
     /// The iteration limit that auto iterations chose for the render, sent as soon as it is known, before the first layer is rendered
     Limit { max_iterations: u32, palette_scale: u32 },
-    /// The job has finished (or was cancelled), this is its final result
-    Done { c: ComplexPlane, p: PixelBuffer, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool },
+    /// The job has finished (or was cancelled), this is its final result; `reported` is whether it showed anything of `c` (otherwise `p` still shows the previous view)
+    Done { c: ComplexPlane, p: PixelBuffer, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool, reported: bool },
 }
 
 /// What the render progress bar shows: the time of every finished layer and how far the current layer is.
@@ -75,14 +75,13 @@ impl MandelbrotApp {
         loop {
             let Some(receiver) = &self.job else { return };
             match receiver.try_recv() {
-                Ok(JobMessage::Pass { colors, plane, pass, total, layer_time }) => {
+                Ok(JobMessage::Pass { colors, plane, pass, total, layer_time, whole }) => {
                     self.p.colors = colors;
                     self.shown_plane = plane;
                     self.texture_outdated = true;
                     self.layer_shown = pass > 0;
                     //A preview of the whole view is uploaded small and scaled up smoothly; a preview of a strip sits next to sharp pixels, so it stays sharp
-                    let whole_view = self.bars.as_ref().is_some_and(|bars| bars.pixels_total == self.p.pixel_plane.width * self.p.pixel_plane.height);
-                    self.preview_block = if pass == 0 && whole_view { rendering::PREVIEW_BLOCKS.get(self.previews_received).copied().unwrap_or(1) } else { 1 };
+                    self.preview_block = if pass == 0 && whole { rendering::PREVIEW_BLOCKS.get(self.previews_received).copied().unwrap_or(1) } else { 1 };
                     self.previews_received += usize::from(pass == 0);
                     if pass == 0 {
                         continue; //A preview is not a layer: the progress and the layer times are not changed
@@ -92,7 +91,8 @@ impl MandelbrotApp {
                         progress.total = total;
                     }
                     if let Some(bars) = &mut self.bars {
-                        if pass == 1 {
+                        if pass == 1 && whole {
+                            //Only a render of the whole view tells the time per pixel: a continued render only computes the pixels that miss samples
                             self.first_layer_per_pixel = Some(layer_time / u32::try_from(bars.pixels_total.max(1)).unwrap_or(u32::MAX));
                         }
                         bars.layer_times.push(layer_time);
@@ -105,7 +105,7 @@ impl MandelbrotApp {
                     self.m.palette_scale = Some(palette_scale);
                     self.limit_pending = false;
                 }
-                Ok(JobMessage::Done { c, p, m, message, elapsed, completed }) => {
+                Ok(JobMessage::Done { c, p, m, message, elapsed, completed, reported }) => {
                     self.job = None;
                     self.limit_pending = false;
                     self.m = m; //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept
@@ -116,7 +116,9 @@ impl MandelbrotApp {
                             bars.finished = Some((elapsed, completed));
                         }
                     }
-                    self.shown_plane = c.clone();
+                    if reported {
+                        self.shown_plane = c.clone();
+                    }
                     self.c = c;
                     self.p = p;
                     self.texture_outdated = true;
@@ -138,60 +140,63 @@ impl MandelbrotApp {
     /// Renders the complete view in the background, then logs `message` and the current view.
     /// Every supersampling layer is shown as soon as it is computed, see `rendering::Render`
     pub(super) fn render(&mut self, message: &str) {
-        self.start_render(message, None);
+        self.start_render(message, false);
     }
 
-    /// Renders the view after it was moved, then logs `message` and the current view. `shift` is the `(rows_up, columns_right)` to shift the pixel buffer with
-    /// `PixelBuffer::translate_buffer`: the old image is shifted and only the pixels that were exposed by the move are rendered, progressively.
-    /// If the buffer is not complete, because a render was interrupted or cancelled, or if the shift is too large, the complete view is rendered.
-    /// During a drag the image on the screen is always shifted, whatever its quality, by the distance between its view and the new one: the full-quality render follows when the drag stops.
-    pub(super) fn render_moved(&mut self, message: &str, shift: (i128, i128)) {
-        let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
-        let shift = if self.gesture_active { transform::pixel_shift(&self.shown_plane, &self.c) } else { (self.progress.is_none() && self.buffer_is_complete).then_some(shift) };
-        let strip = shift.and_then(|shift| ExposedRegion::from_shift(width, height, shift.0, shift.1).map(|region| (shift, region)));
-        self.start_render(message, strip);
+    /// Renders the view after it was moved by whole pixels (an arrow, a drag, centering on a click), then logs `message` and the current view.
+    /// The move keeps the iteration limit (also with auto iterations, once it is settled), so the render continues the samples of the last render, see `start_render_as`:
+    /// the pixels that stay visible keep every sample they have, also from a render that was interrupted, and only the missing samples are computed.
+    pub(super) fn render_moved(&mut self, message: &str) {
+        self.start_render(message, true);
     }
 
     /// After a drag or a wheel zoom, starts the full-quality render of the view as soon as the gesture stops or pauses for `GESTURE_PAUSE`
     pub(super) fn settle_gesture(&mut self, ctx: &egui::Context) {
-        let Some((_, changed)) = &self.settle else { return };
+        let Some((_, changed, _)) = &self.settle else { return };
         if let (true, Some(remaining)) = (self.gesture_active, GESTURE_PAUSE.checked_sub(changed.elapsed())) {
             ctx.request_repaint_after(remaining);
             return;
         }
-        if let Some((message, _)) = self.settle.take() {
-            self.start_render_as(&message, None, false);
+        if let Some((message, _, moved)) = self.settle.take() {
+            self.start_render_as(&message, moved, false);
         }
     }
 
-    /// Starts a render of the view on a background thread and logs `message` when it is done. With `strip` the old image is shifted and only the exposed region is rendered; otherwise everything is.
+    /// Starts a render of the view on a background thread and logs `message` when it is done; `moved` is whether the view was only moved, see `render_moved`.
     /// A render that is running is interrupted first. During a drag or a wheel zoom the render is quick, see `start_render_as`.
-    pub(super) fn start_render(&mut self, message: &str, strip: Option<((i128, i128), ExposedRegion)>) {
-        self.start_render_as(message, strip, self.gesture_active);
+    pub(super) fn start_render(&mut self, message: &str, moved: bool) {
+        self.start_render_as(message, moved, self.gesture_active);
     }
 
     /// Starts a render like `start_render`. With `during_gesture` it is a quick render for a view that is about to change again: previews and the first layer only, with
     /// the iteration limit of the image that is shown (no auto iterations probes); the full-quality render follows when the gesture stops, see `settle_gesture`.
-    fn start_render_as(&mut self, message: &str, strip: Option<((i128, i128), ExposedRegion)>, during_gesture: bool) {
+    ///
+    /// Every render continues the samples of the render before it (`SampleState`): the job waits for the state of the job it interrupts, which keeps everything that
+    /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
+    fn start_render_as(&mut self, message: &str, moved: bool, during_gesture: bool) {
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();
         self.history.record(&self.c);
         self.buffer_is_complete = false;
-        self.settle = during_gesture.then(|| (message.to_string(), Instant::now()));
+        self.settle = during_gesture.then(|| (message.to_string(), Instant::now(), moved));
+        //The samples of the last render, handed from job to job; this job hands its own on when it stops, finished or not
+        let previous_samples = self.samples.take();
+        let (samples_sender, samples_receiver) = mpsc::channel();
+        self.samples = Some(samples_receiver);
         //Whether the screen already shows a full layer of this view (e.g. the last render of a gesture): then previews would only make it coarser again
-        let layer_on_screen = self.layer_shown && transform::pixel_shift(&self.shown_plane, &self.c) == Some((0, 0));
+        let layer_on_screen = self.layer_shown && rendering::pixel_shift(&self.shown_plane, &self.c) == Some((0, 0));
         self.layer_shown = false;
         self.previews_received = 0;
         let (sender, receiver) = mpsc::channel();
         let (c, mut p) = (self.c.clone(), self.p.clone());
+        //A move keeps the iteration limit once it is settled; while the probes of the last render had not chosen it yet, the move chooses it like any render
+        let keeps_limit = (moved || during_gesture) && !self.limit_pending;
         let adaptive = self.adaptive_supersampling.then(rendering::AdaptiveSampling::default);
         let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
-        //The pixels of a buffer that was rendered with the other mode have another limit and palette, so they cannot be reused
-        let strip = strip.filter(|_| self.auto_iterations == self.m.palette_scale.is_some());
         //Publish the limit of the new render right away, before anything is rendered: the starting limit of the auto settings (cheap and deterministic), refined by the job as soon as its probes finish
         self.limit_pending = false;
         if self.auto_iterations {
-            if strip.is_none() && !during_gesture {
+            if !keeps_limit {
                 let initial = self.auto_settings.initial_limit(self.c.get_scale());
                 self.m.max_iterations = initial;
                 self.m.palette_scale = Some(initial);
@@ -205,7 +210,7 @@ impl MandelbrotApp {
         let supersampling_amount = if during_gesture { 1 } else { self.supersampling_amount };
         let coloring_function = self.coloring_function;
         let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
-        let pixels_total = strip.as_ref().map_or(width * height, |(_, region)| region.pixel_count(width, height));
+        let pixels_total = width * height;
         //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
         let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
         let preview = (!layer_on_screen && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
@@ -216,10 +221,12 @@ impl MandelbrotApp {
         let message = message.to_string();
         std::thread::spawn(move || {
             let started = Instant::now();
+            //Waits for the interrupted job to stop (it finishes the row it is on) and hand over its samples
+            let mut samples = previous_samples.and_then(|receiver| receiver.recv().ok()).unwrap_or_default();
             let mut message = message;
-            if auto_settings.is_some() && (strip.is_some() || during_gesture) {
-                //A move keeps the limit of the image that is being moved, so only the exposed strip is rendered; the limit is chosen again on zooms, jumps and setting changes.
-                //A gesture keeps it too, so the colors stay steady while the view changes; the full-quality render after the gesture chooses it
+            if auto_settings.is_some() && keeps_limit {
+                //A move keeps the limit of the image that is being moved, so the samples of the pixels that stay visible are reused; the limit is chosen again on zooms, jumps and setting changes.
+                //A gesture keeps it too, so the colors stay steady while the view changes; the full-quality render after a wheel zoom chooses it
             } else if let Some(settings) = &auto_settings {
                 //Choose the iteration limit for this zoom first; a cancelled choice cancels the render
                 match auto_iterations::choose_limit(&c, &m, width, height, settings, rendering::render_thread_count(), &thread_cancel) {
@@ -231,37 +238,38 @@ impl MandelbrotApp {
                         println!("{result:?}");
                     }
                     None => {
-                        let _ = sender.send(JobMessage::Done { c, p, m, message: String::from("Cancelled the rendering"), elapsed: started.elapsed(), completed: false });
+                        let _ = samples_sender.send(samples);
+                        let _ = sender.send(JobMessage::Done { c, p, m, message: String::from("Cancelled the rendering"), elapsed: started.elapsed(), completed: false, reported: false });
                         return;
                     }
                 }
             } else if auto_settings.is_none() {
                 m.palette_scale = None;
             }
-            let region = match strip {
-                Some((shift, region)) => {
-                    p.translate_buffer(shift.0, shift.1);
-                    region
-                }
-                None => ExposedRegion::full(width, height),
-            };
-            let base = p.colors.clone();
+            let kept = samples.prepare_for(&c, width, height, &m, coloring_function);
+            let whole = kept == 0;
+            if kept > 0 {
+                message = format!("{message} (continued the samples of {kept} pixels)");
+            }
             let mut layer_started = started;
-            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).only(&region, &base).preview(preview).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
+            let mut reported = false;
+            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 p.colors.copy_from_slice(colors);
+                reported = true;
                 if pass == 0 {
-                    let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO });
+                    let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole });
                     return;
                 }
                 let layer_time = layer_started.elapsed();
                 println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
-                let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time });
+                let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time, whole });
                 layer_started = Instant::now();
             });
+            let _ = samples_sender.send(samples); //To the next job, or kept for it if there is none yet
             p.update_pixels(); //The pixels of the last completed layer
             let message = if completed { message } else { String::from("Cancelled the rendering, showing the layers that were completed") };
-            let _ = sender.send(JobMessage::Done { c, p, m, message, elapsed: started.elapsed(), completed }); //The receiver is gone if the window was closed
+            let _ = sender.send(JobMessage::Done { c, p, m, message, elapsed: started.elapsed(), completed, reported }); //The receiver is gone if the window was closed
         });
         let now = Instant::now();
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
