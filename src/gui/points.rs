@@ -25,6 +25,55 @@ pub(super) struct PointFlight {
     pub(super) elapsed: Duration,
     pub(super) last_frame: Instant,
     pub(super) point: PointOfInterest,
+    /// With auto iterations: the limits of the frames on the way
+    pub(super) limits: Option<FlightLimits>,
+}
+
+/// The iteration limits of a flight with auto iterations: for every frame the zoom rule of the preset (`AutoIterationSettings::initial_limit`) times a factor.
+///
+/// The zoom rule is only the starting value of auto iterations: at a deep place the probes often raise the limit by a factor 10 or more. So the factor is what auto
+/// iterations chose at the start of the flight (its limit over the zoom rule there), and what the probes choose for the destination (run in the background when
+/// the flight starts), blended by the zoom between the two. A frame at the zoom of the start or the destination gets exactly that limit, so the arrival does not jump.
+pub(super) struct FlightLimits {
+    /// The scale and the factor at the start
+    start: (f64, f64),
+    /// The scale of the destination, and its factor once its probes are done
+    destination_scale: f64,
+    destination_factor: Option<f64>,
+    /// The limit that the probes choose for the destination, when they are done
+    pending: Option<std::sync::mpsc::Receiver<u32>>,
+}
+
+impl FlightLimits {
+    /// The limit for a frame at `scale`, with the zoom rule of `settings`
+    pub(super) fn limit_at(&mut self, scale: f64, settings: &crate::auto_iterations::AutoIterationSettings) -> u32 {
+        if let Some(limit) = self.pending.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
+            self.destination_factor = Some(f64::from(limit) / f64::from(settings.initial_limit(self.destination_scale)));
+            self.pending = None;
+        }
+        let (start_scale, start_factor) = self.start;
+        let factor = match self.destination_factor {
+            Some(destination_factor) => {
+                //How far the zoom is from the start to the destination (0 to 1, on a logarithmic scale): geometric between the two factors
+                let span = (self.destination_scale / start_scale).ln();
+                let t = if span.abs() < 1e-12 { 1.0 } else { ((scale / start_scale).ln() / span).clamp(0.0, 1.0) };
+                start_factor * (destination_factor / start_factor).powf(t)
+            }
+            None => start_factor,
+        };
+        (f64::from(settings.initial_limit(scale)) * factor).round().clamp(1.0, f64::from(u32::MAX)) as u32
+    }
+
+    /// Waits until the probes of the destination are done (in tests)
+    #[cfg(test)]
+    pub(super) fn wait_for_destination(&mut self) {
+        if let Some(limit) = self.pending.as_ref().and_then(|receiver| receiver.recv().ok()) {
+            //Put it back for the next frame to take
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let _ = sender.send(limit);
+            self.pending = Some(receiver);
+        }
+    }
 }
 
 
@@ -218,8 +267,31 @@ impl MandelbrotApp {
         let reset = Camera { x: reset_plane.center().x, y: reset_plane.center().y, scale: reset_plane.get_scale() };
         let flight = Flight::new(from, to, self.route, self.pace, reset);
         self.log(format!("Flying to {} ({}, {}, {:.1} s)", point.name, self.route.name(), self.pace.name(), flight.duration().as_secs_f64()));
-        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point });
+        let limits = self.auto_iterations.then(|| self.flight_limits(to));
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point, limits });
         self.frame_ready = true; //The view on the screen is where the flight starts
+    }
+
+    /// The limits of a flight to `destination` with auto iterations, see `FlightLimits`: the factor of the current view, and the probes of the destination started in the background
+    /// (on half the render threads, so the first frames of the flight still render), exactly as the render on arrival runs them
+    fn flight_limits(&self, destination: Camera) -> FlightLimits {
+        let start_scale = self.c.get_scale();
+        let start = (start_scale, f64::from(self.m.max_iterations) / f64::from(self.auto_settings.initial_limit(start_scale)));
+        let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
+        let mut plane = ComplexPlane::new(width, height);
+        plane.set_view(&destination.view());
+        let (settings, mut m) = (self.auto_settings.clone(), self.m.clone());
+        let destination_scale = plane.get_scale();
+        let initial = settings.initial_limit(destination_scale);
+        (m.max_iterations, m.palette_scale) = (initial, Some(initial));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let threads = (crate::rendering::render_thread_count() / 2).max(1);
+            if let Some(result) = crate::auto_iterations::choose_limit(&plane, &m, width, height, &settings, threads, &AtomicBool::new(false)) {
+                let _ = sender.send(result.limit); //The flight may be over already
+            }
+        });
+        FlightLimits { start, destination_scale, destination_factor: None, pending: Some(receiver) }
     }
 
     /// Stops the flight where it is (the Cancel button): the view stays, gets a full-quality render, and the controls are free again
@@ -267,10 +339,14 @@ impl MandelbrotApp {
         }
         self.c.set_view(&flight.flight.camera_at(elapsed).view());
         if self.auto_iterations {
-            //Auto iterations follow the zoom all the way: the limit (and the palette) for the zoom of this frame, by the zoom rule of the preset; the probes, which
-            //would cost a frame time of their own, refine it on arrival
-            let limit = self.auto_settings.initial_limit(self.c.get_scale());
-            (self.m.max_iterations, self.m.palette_scale) = (limit, Some(limit));
+            //Auto iterations follow the zoom all the way: the limit of this frame (see `FlightLimits`), and the palette of its zoom, which is what auto iterations uses
+            let scale = self.c.get_scale();
+            let palette = self.auto_settings.initial_limit(scale);
+            let limit = match &mut flight.limits {
+                Some(limits) => limits.limit_at(scale, &self.auto_settings),
+                None => palette,
+            };
+            (self.m.max_iterations, self.m.palette_scale) = (limit, Some(palette));
         }
         let all_layers = self.flight_rendering == super::flight::FlightRendering::SuperSampled;
         self.start_render_as(&format!("Flying to {}", flight.point.name), false, true, all_layers);
