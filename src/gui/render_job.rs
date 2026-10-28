@@ -20,8 +20,44 @@ use super::{MandelbrotApp, Readiness};
 /// A preview of a new view is only shown if the first layer is expected to take longer than this, about a frame: a faster first layer is shown directly, see `Render::preview`
 const PREVIEW_WORTHWHILE: Duration = Duration::from_millis(16);
 
+/// The GPU joins a pass of a render once the pass has run for this long, so passes that are fast on the CPU alone never wait for it, see `Render::gpu`
+const GPU_JOIN_AFTER: Duration = Duration::from_millis(8);
+
 /// The full-quality render after a drag or a wheel zoom starts when the gesture stops, or when it has not changed the view for this long (a mouse button held still)
 const GESTURE_PAUSE: Duration = Duration::from_millis(150);
+
+/// What a render is for, which decides its iteration limit, its layers, and whether the history records it
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RenderKind {
+    /// A view the window settles on: every layer, recorded in the history. With `moved` the view is the last view moved by whole pixels (an arrow, a drag,
+    /// centering on a click), so it keeps the iteration limit and continues the samples of the last render, see `render_moved`
+    Settled { moved: bool },
+    /// A frame of a drag or a wheel zoom, for a view that is about to change again: previews and the first layer only, with the iteration limit of the image that
+    /// is shown (no auto iterations probes); the full-quality render follows when the gesture stops, see `settle_gesture`
+    GestureFrame { moved: bool },
+    /// A frame of a flight to a point of interest: the iteration limit that the flight sets (see `points::fly_at`), every layer until the next frame interrupts it
+    FlightFrame,
+}
+
+impl RenderKind {
+    /// Whether the view is the last view moved by whole pixels
+    const fn moved(self) -> bool {
+        match self {
+            RenderKind::Settled { moved } | RenderKind::GestureFrame { moved } => moved,
+            RenderKind::FlightFrame => false,
+        }
+    }
+
+    /// Whether the view is about to change again (a frame of a gesture or a flight): not recorded in the history, with a steady iteration limit
+    const fn passing(self) -> bool {
+        !matches!(self, RenderKind::Settled { .. })
+    }
+
+    /// Whether every supersampling layer is rendered (all but the frames of a gesture, which render the first layer only)
+    const fn all_layers(self) -> bool {
+        !matches!(self, RenderKind::GestureFrame { .. })
+    }
+}
 
 /// A message from a rendering job that runs on a background thread
 pub(super) enum JobMessage {
@@ -71,6 +107,16 @@ impl MandelbrotApp {
     pub(super) fn poll_job(&mut self) {
         while let Ok(notice) = self.notices.try_recv() {
             self.log(notice);
+        }
+        if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
+            self.gpu_opening = None;
+            match opened {
+                Ok(gpu) => {
+                    self.log(format!("GPU: {}, checked against the CPU: it computes the same samples, bit for bit", gpu.name()));
+                    self.gpu = Some(Arc::new(gpu));
+                }
+                Err(reason) => self.log(format!("GPU not used: {reason}")),
+            }
         }
         loop {
             let Some(receiver) = &self.job else { return };
@@ -175,23 +221,22 @@ impl MandelbrotApp {
             return;
         }
         if let Some((message, _, moved)) = self.settle.take() {
-            self.start_render_as(&message, moved, false, true);
+            self.start_render_as(&message, RenderKind::Settled { moved });
         }
     }
 
     /// Starts a render of the view on a background thread and logs `message` when it is done; `moved` is whether the view was only moved, see `render_moved`.
     /// A render that is running is interrupted first. During a drag or a wheel zoom the render is quick, see `start_render_as`.
     pub(super) fn start_render(&mut self, message: &str, moved: bool) {
-        self.start_render_as(message, moved, self.gesture_active, !self.gesture_active);
+        self.start_render_as(message, if self.gesture_active { RenderKind::GestureFrame { moved } } else { RenderKind::Settled { moved } });
     }
 
-    /// Starts a render like `start_render`. With `during_gesture` it is a quick render for a view that is about to change again: previews and the first layer only, with
-    /// the iteration limit of the image that is shown (no auto iterations probes); the full-quality render follows when the gesture stops, see `settle_gesture`.
+    /// Starts a render like `start_render`, of the `kind` that says what it is for (see `RenderKind`).
     ///
     /// Every render continues the samples of the render before it (`SampleState`): the job waits for the state of the job it interrupts, which keeps everything that
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
-    /// With `all_layers` it renders every supersampling layer even during a gesture (a flight that shows only finished frames, see `flight::FlightRendering::SuperSampled`).
-    pub(super) fn start_render_as(&mut self, message: &str, moved: bool, during_gesture: bool, all_layers: bool) {
+    pub(super) fn start_render_as(&mut self, message: &str, kind: RenderKind) {
+        let (moved, during_gesture, all_layers) = (kind.moved(), kind.passing(), kind.all_layers());
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();
         (self.frame_ready, self.frame_accepted) = (false, false);
@@ -237,6 +282,7 @@ impl MandelbrotApp {
         //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
         let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
         let preview = (!layer_on_screen && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
+        let gpu = self.gpu.clone().filter(|_| self.use_gpu);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let pixels_done = Arc::new(AtomicUsize::new(0));
@@ -276,7 +322,7 @@ impl MandelbrotApp {
             }
             let mut layer_started = started;
             let mut reported = false;
-            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
+            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 p.colors.copy_from_slice(colors);
                 reported = true;
