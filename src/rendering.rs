@@ -688,4 +688,50 @@ mod tests {
         let (_, passes, done) = adaptive_render(&c, &m, w, h, &region, &base, 3, None, &AtomicBool::new(true));
         assert!(!done && passes == 0, "cancelling still works");
     }
+
+    #[test]
+    fn centering_and_moving_by_pixels_agree_with_the_shift_of_the_buffer() {
+        let mut plane = ComplexPlane::new(120, 80);
+        let start = plane.center();
+        //Moving up by 10 rows and right by 7 columns moves the center up (a larger imaginary part) and right
+        translate_complex_plane_by_pixels(&mut plane, 10, 0);
+        assert!((plane.center().y - (start.y + 10.0 * plane.increment_y)).abs() < 1e-12 && (plane.center().x - start.x).abs() < 1e-12);
+        translate_complex_plane_by_pixels(&mut plane, 0, 7);
+        assert!((plane.center().x - (start.x + 7.0 * plane.increment_x)).abs() < 1e-12);
+        translate_complex_plane_by_pixels(&mut plane, -10, 0);
+        translate_complex_plane_by_pixels(&mut plane, 0, -7);
+        assert!((plane.center().x - start.x).abs() < 1e-12 && (plane.center().y - start.y).abs() < 1e-12, "the moves are undone");
+
+        //Centering on the point under pixel (90, 25) returns the shift of the buffer: the content moves left and down. The pixel counts are truncated, not rounded, so a distance of
+        //30 pixels that is 29.999... in floating point shifts by 29 (an existing imprecision of one pixel, which is kept because the moves of the window depend on it)
+        let mut plane = ComplexPlane::new(120, 80);
+        let target = plane.complex_from_pixel_plane(90.0, 25.0);
+        let shift = center_complex_plane_on(&mut plane, &target);
+        assert_eq!(shift, (14, -29), "(rows_up, columns_right) of the content");
+        assert!((plane.center().x - target.x).abs() < 1e-12 && (plane.center().y - target.y).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_hash_behind_the_jitter_is_splitmix64() {
+        //The reference outputs of SplitMix64 (https://prng.di.unimi.it/splitmix64.c) for the seed 0: the first three values
+        assert_eq!(splitmix64(0), 0xE220_A839_7B1D_CDAF);
+        assert_eq!(splitmix64(0x9E37_79B9_7F4A_7C15), 0x6E78_9E6A_A1B9_65F4);
+        assert_eq!(splitmix64(0x3C6E_F372_FE94_F82A), 0x06C4_5D18_8009_454F);
+    }
+
+    #[test]
+    fn the_jitter_of_a_sample_never_changes() {
+        //Pinned bit for bit: only integer operations and an exact conversion of 53 bits, so the same on every platform. A change would change every supersampled image.
+        let expected = [
+            ((0, 0, 0), (0x3fc1_c13a_de1c_7e5c, 0x3fc0_983a_4555_6400)),
+            ((1, 0, 0), (0x3fe6_3140_5e8d_b1b0, 0x3fec_5032_bbbb_3dc9)),
+            ((0, 1, 0), (0x3fd1_396e_6040_319e, 0x3fea_3804_e0d0_f309)),
+            ((0, 0, 1), (0x3fc7_9953_c24b_633c, 0x3feb_3dde_fe0e_7a6f)),
+            ((1199, 799, 63), (0x3fef_65b3_3ab0_ce5b, 0x3fd0_f16b_7245_b4ae)),
+        ];
+        for ((x, y, sample), (jitter_x, jitter_y)) in expected {
+            let (actual_x, actual_y) = sample_jitter(x, y, sample);
+            assert_eq!((actual_x.to_bits(), actual_y.to_bits()), (jitter_x, jitter_y), "pixel ({x}, {y}), sample {sample}: {actual_x:?}, {actual_y:?}");
+        }
+    }
 }

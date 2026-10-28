@@ -117,3 +117,71 @@ impl PixelBuffer {
         writer.write_image_data(&data).unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 5 x 4 buffer in which every pixel has its own color, `(x, y)` encoded in the channels
+    fn numbered_buffer() -> PixelBuffer {
+        let mut buffer = PixelBuffer::new(PixelPlane::new(5, 4));
+        for y in 0..4 {
+            for x in 0..5 {
+                let index = buffer.point_to_index(x, y);
+                buffer.colors[index] = TrueColor::new(x as u8, y as u8, 99);
+            }
+        }
+        buffer.update_pixels();
+        buffer
+    }
+
+    fn color_at(buffer: &PixelBuffer, x: usize, y: usize) -> (u8, u8) {
+        let color = buffer.colors[buffer.point_to_index(x, y)];
+        (color.red, color.green)
+    }
+
+    #[test]
+    fn a_new_buffer_is_black_and_indexes_convert_both_ways() {
+        let buffer = PixelBuffer::new(PixelPlane::new(5, 4));
+        assert_eq!((buffer.colors.len(), buffer.pixels.len()), (20, 20));
+        assert!(buffer.colors.iter().all(|color| (color.red, color.green, color.blue) == (0, 0, 0)) && buffer.pixels.iter().all(|pixel| *pixel == 0));
+        for index in 0..20 {
+            let (x, y) = buffer.index_to_point(index);
+            assert_eq!(buffer.point_to_index(x, y), index);
+            assert!(x < 5 && y < 4);
+        }
+        assert_eq!(buffer.index_to_point(7), (2, 1));
+    }
+
+    #[test]
+    fn the_pixels_follow_the_colors_and_the_channel_mapping() {
+        let mut buffer = numbered_buffer();
+        assert_eq!(buffer.pixels[buffer.point_to_index(3, 2)], 0x0003_0263);
+        buffer.color_channel_mapping = ColorChannelMapping::BGR;
+        buffer.update_pixels();
+        assert_eq!(buffer.pixels[buffer.point_to_index(3, 2)], 0x0063_0203);
+    }
+
+    #[test]
+    fn shifting_the_buffer_moves_the_content_and_leaves_the_vacated_rows_and_columns_alone() {
+        //Content moves down when the view moves up, right when the view moves right
+        let mut buffer = numbered_buffer();
+        buffer.translate_buffer(1, 0);
+        assert_eq!(color_at(&buffer, 2, 1), (2, 0), "row 0 moved to row 1");
+        assert_eq!(color_at(&buffer, 4, 3), (4, 2));
+        assert_eq!(color_at(&buffer, 2, 0), (2, 0), "the vacated row 0 keeps its old colors, it has to be rendered again");
+
+        let mut buffer = numbered_buffer();
+        buffer.translate_buffer(0, -2);
+        assert_eq!(color_at(&buffer, 0, 3), (2, 3), "column 2 moved to column 0");
+        assert_eq!(color_at(&buffer, 2, 1), (4, 1));
+        assert_eq!(color_at(&buffer, 4, 2), (4, 2), "the vacated last columns are not touched");
+
+        let mut buffer = numbered_buffer();
+        buffer.translate_buffer(-2, 3);
+        assert_eq!(color_at(&buffer, 4, 0), (1, 2), "row 2 / column 1 moved up by 2 and right by 3");
+        assert_eq!(color_at(&buffer, 3, 1), (0, 3));
+        let pixels_follow = (0..20).all(|index| buffer.pixels[index] == (u32::from(buffer.colors[index].red) << 16) | (u32::from(buffer.colors[index].green) << 8) | u32::from(buffer.colors[index].blue));
+        assert!(pixels_follow, "colors and pixels are shifted together");
+    }
+}

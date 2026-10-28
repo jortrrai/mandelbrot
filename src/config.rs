@@ -91,3 +91,36 @@ impl fmt::Debug for Config {
         f.debug_struct("Config").field("window_width", &self.window_width).field("window_height", &self.window_height).field("max_iterations", &self.max_iterations).field("orbit_radius", &self.orbit_radius).field("supersampling_amount", &self.supersampling_amount).field("window_scale", &self.window_scale).field("image_width", &self.image_width).field("image_height", &self.image_height).finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build(arguments: &[&str]) -> Result<Config, String> {
+        Config::build(std::iter::once("mandelbrot").chain(arguments.iter().copied()).map(String::from))
+    }
+
+    #[test]
+    fn without_arguments_the_defaults_are_used() {
+        let config = build(&[]).unwrap();
+        assert_eq!((config.window_width, config.window_height, config.image_width, config.image_height), (1200, 800, 1200, 800));
+        assert_eq!((config.max_iterations, config.supersampling_amount), (1000, 1));
+        assert_eq!((config.orbit_radius, config.window_scale), (2.0, 1.0));
+    }
+
+    #[test]
+    fn every_argument_is_read_in_order_and_a_dash_means_the_default() {
+        let config = build(&["640", "-", "250", "4", "0.5"]).unwrap();
+        assert_eq!((config.image_width, config.image_height), (640, 800));
+        assert_eq!((config.window_width, config.window_height), (320, 400), "the window is scaled, the saved image is not");
+        assert_eq!((config.max_iterations, config.supersampling_amount, config.window_scale), (250, 4, 0.5));
+    }
+
+    #[test]
+    fn an_argument_that_cannot_be_parsed_is_reported_with_its_name() {
+        assert_eq!(build(&["abc"]).unwrap_err(), "invalid digit found in string for width argument");
+        assert!(build(&["10", "10", "x"]).unwrap_err().ends_with("for max_iterations argument"));
+        assert!(build(&["10", "10", "10", "300"]).unwrap_err().ends_with("for supersampling_amount argument"), "256 and more do not fit in a u8");
+        assert!(build(&["10", "10", "10", "1", "wide"]).unwrap_err().ends_with("for window_scale argument"));
+    }
+}
