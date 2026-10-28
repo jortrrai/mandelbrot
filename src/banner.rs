@@ -30,14 +30,6 @@ pub fn print_banner() {
     println!("{}", banner_text());
 }
 
-/// Prints a command info tip for the users benefit
-pub fn print_command_info() {
-    let tip = "Run Mandelbrot using:";
-    let command = "cargo run --release -- <width> <height> <max_iterations> <supersampling_amount> <window_scale>";
-    let command_info = "where <arg> means substitute with the value of arg\nuse '-' to use the default value of arg";
-    println!("{tip}\n\t{command}\n{command_info}\n");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

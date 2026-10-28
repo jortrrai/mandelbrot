@@ -35,7 +35,7 @@ struct LaneResult {
 }
 
 /// `iterate_lanes` checks whether every point has stopped after this many steps
-const CHECK_INTERVAL: u32 = 4;
+pub(crate) const CHECK_INTERVAL: u32 = 4;
 
 impl MandelbrotSet {
     /// Creates the set with `max_iterations` and `orbit_radius`; smooth coloring is on and there is no palette scale
@@ -229,13 +229,17 @@ impl MandelbrotSet {
     /// Like `iterate_lanes`, but returns the smooth color position of every point, see `iterate_smooth`; identical to it for every point
     pub fn iterate_lanes_smooth(&self, points: &[Complex; LANES]) -> [f64; LANES] {
         let result = self.iterate_lanes_smooth_dispatch(points);
-        std::array::from_fn(|lane| {
-            if result.escaped[lane] {
-                self.smooth_position(self.block_end(result.iterations[lane] + 1), (result.escape_x[lane], result.escape_y[lane]), &points[lane])
-            } else {
-                f64::from(result.iterations[lane])
-            }
-        })
+        std::array::from_fn(|lane| self.position_after_loop(result.iterations[lane], result.escaped[lane], (result.escape_x[lane], result.escape_y[lane]), &points[lane]))
+    }
+
+    /// The position of `c` from the outcome of the escape loop of the lockstep path (also the GPU's, see `rendering::gpu`): the iteration count, whether it escaped,
+    /// and `z` at the end of the block of `CHECK_INTERVAL` steps in which it escaped. With `smooth_coloring` an escaped point gets its smooth position, otherwise the count.
+    pub(crate) fn position_after_loop(&self, iterations: u32, escaped: bool, z_at_block_end: (f64, f64), c: &Complex) -> f64 {
+        if escaped && self.smooth_coloring {
+            self.smooth_position(self.block_end(iterations + 1), z_at_block_end, c)
+        } else {
+            f64::from(iterations)
+        }
     }
 
 

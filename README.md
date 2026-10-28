@@ -41,18 +41,9 @@ Then, in the root of the repository:
 ```
 cargo run --release
 ```
-The window can be given a size and some settings; use `-` for the default of an argument:
-```
-cargo run --release -- <width> <height> <max_iterations> <supersampling_amount> <window_scale>
-```
-| Argument | Default | Meaning |
-|---|---|---|
-| `width`, `height` | 1200, 800 | the size of the image in pixels, and the size of a saved image. Without them (or `window_scale`) the image follows the size of the window, see *Match the window size* below |
-| `max_iterations` | 1000 | the most iterations of a point |
-| `supersampling_amount` | 32 | samples per pixel (1 to 64) |
-| `window_scale` | 1.0 | the scale of the window relative to the image, e.g. `0.5` shows a 1920x1080 image in a 960x540 window |
+The program has no command-line arguments: the window starts with the defaults (a 1200 x 800 render that follows the size of the window, 1,000 iterations, 32x quality) and has controls for all of them.
 
-For example `cargo run --release -- 1920 1080 2000 4 0.5`. The terminal is only for developers: everything you need is in the window.
+The terminal is only for developers: everything you need is in the window.
 
 ## The window
 The fractal is on the left. On the right, from top to bottom, are the controls, the current view and the status.
@@ -62,14 +53,15 @@ The fractal is on the left. On the right, from top to bottom, are the controls, 
 - **Zoom in / Zoom out / Reset view**, and the *Zoom speed*. **Zoom in** is disabled when the 64-bit numbers of the renderer run out of precision (see the warning under *Current view*). **< Back / Forward >** walk through the views you visited (the last 200), like the history of a browser.
 - **Points of interest**: a list of named places with thumbnails (see below); *Reload* reads the folder again; *Restore the saved appearance* also applies the coloring and the color channels of a place.
 - **Flight**: clicking a place flies the view there with smooth panning and zooming (the path of van Wijk and Nuij, which zooms out to travel). The route is *Shortest route* (the default) or *Via reset* (out to the whole set first); the pace is *Fast* (the default), *Normal* or *Cinematic*. With auto iterations, the limit follows the zoom of every frame of the flight: between what auto iterations chose at the start and what it chooses for the place (worked out in the background when the flight starts), so the detail is right on the way and the arrival does not jump. Using any control or the mouse stops a flight where it is; while it flies, a progress bar shows how much of the way is covered, *Cancel* stops it there and *Skip* goes to the place at once. The rendering of a flight is *Best effort* (the camera follows the clock and the picture fills in), *Low res* (the default: the camera waits for a complete low-resolution frame of every view on the way), *Max quality* (it waits for a full-resolution frame: sharp, but it can crawl where the view is slow) or *Super sampled* (every view on the way gets all its supersampling layers, and the camera waits for the finished frame: the best picture, the slowest crawl).
+- **Use the GPU** (on when the computer has a suitable GPU): the GPU helps with the slow parts of a render, next to the CPU threads. It computes bit for bit the same samples as the CPU (checked when the window opens, see the status log), so the image is the same; a GPU without 64-bit shaders, or one that does not pass the check, is not used.
 - **Immersion**: the window never shows black where nothing is rendered yet. While you move the view, and during flights, the view only moves once the new view has at least a complete low-resolution frame. Off by default.
 - **Go to view**: type the `x`, `y` and `scale` of a view.
 - **Max. iterations**: the most iterations of a point. **Auto iterations** chooses it for the zoom of every render (on by default); its drop-down offers the presets *Performance*, *Balanced* (the default) and *High Detail*, and the fields below it are the settings of the preset. It is a heuristic on a sparse grid, not a proof: very narrow detail can be missed.
 - **Adaptive supersampling** (on by default): the first two samples of every pixel, the rest only where the picture shows detail (a heuristic; the same render can differ slightly from full supersampling).
-- **Match the window size**: the image is rendered with one pixel for every pixel of the area it is shown in, and rendered again (after the window has stayed the same size for a moment) when the window is resized. The view keeps its center and its zoom: a wider window shows the same part of the real axis, a taller one shows more of the imaginary axis. It is on by default, and off when the command line gives a `width`, `height` or `window_scale`.
+- **Match the window size**: the image is rendered with one pixel for every pixel of the area it is shown in, and rendered again (after the window has stayed the same size for a moment) when the window is resized. The view keeps its center and its zoom: a wider window shows the same part of the real axis, a taller one shows more of the imaginary axis. It is on by default.
 - **Quality (supersampling)**: samples per pixel, from 1x to 64x (32x by default).
 - **Coloring** (Bernstein polynomials or HSV) and **Color channels** (any of the 27 mappings such as `RGB` or `BGR`).
-- **Save Image** with its own *Saved image quality* and *Saved image size*: the command line size (the default), the size of the view, one of ten presets (HD 720p to 8K UHD, squares, portrait), a preset of your own, or *Custom size...* (16 to 16,384 pixels per side, at most 100 megapixels). Give a custom size a name and *Save as preset* to keep it in `resolution_presets.json` in your configuration folder (`~/.config/mandelbrot` on Linux). The PNG goes to the `saved` folder, with the view, the settings and the application in its metadata.
+- **Save Image** with its own *Saved image quality* and *Saved image size*: the default size (1200 x 800, selected at the start), the size of the view, one of ten presets (HD 720p to 8K UHD, squares, portrait), a preset of your own, or *Custom size...* (16 to 16,384 pixels per side, at most 100 megapixels). Give a custom size a name and *Save as preset* to keep it in `resolution_presets.json` in your configuration folder (`~/.config/mandelbrot` on Linux). The PNG goes to the `saved` folder, with the view, the settings and the application in its metadata.
 - Click the fractal to see the coordinates of a point in the status; right-click to center the view on it. **Scroll** over it to zoom in and out around the cursor (a notch is about 10%; zooming in stops at the precision limit), and **drag** it with the left button to move the view.
 
 **Current view**: the center (real and imaginary, with all digits) and the zoom (the magnification relative to the starting view). *Copy* puts the center and the scale on the clipboard.

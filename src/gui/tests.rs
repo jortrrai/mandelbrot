@@ -46,7 +46,7 @@ fn manual_app(config: &Config) -> MandelbrotApp {
 
 #[test]
 fn rendering_runs_in_the_background_and_updates_the_buffer() {
-    let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     assert!(app.is_busy(), "the initial render should run in the background");
     wait_for_job(&mut app);
@@ -63,7 +63,7 @@ fn rendering_runs_in_the_background_and_updates_the_buffer() {
 
 #[test]
 fn a_new_action_interrupts_a_progressive_render_and_starts_over() {
-    let config = Config::build(["mandelbrot", "64", "48", "50", "8"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 8);
     let mut app = MandelbrotApp::new(&config);
     assert!(app.progress.is_some());
     let first_cancel = Arc::clone(&app.progress.as_ref().unwrap().cancel);
@@ -85,7 +85,7 @@ fn a_new_action_interrupts_a_progressive_render_and_starts_over() {
 
 #[test]
 fn the_progress_bar_records_the_time_of_every_layer() {
-    let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 3);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
 
@@ -107,7 +107,7 @@ fn the_progress_bar_records_the_time_of_every_layer() {
 
 #[test]
 fn moving_reuses_the_old_image_and_only_renders_the_exposed_strip() {
-    let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 3);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     let old_pixels = app.p.pixels.clone();
@@ -125,7 +125,7 @@ fn moving_reuses_the_old_image_and_only_renders_the_exposed_strip() {
 
 #[test]
 fn moving_after_a_cancelled_render_continues_its_samples() {
-    let config = Config::build(["mandelbrot", "64", "48", "50", "6"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 6);
     let mut app = manual_app(&config);
     app.render("Again");
     app.progress.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
@@ -138,7 +138,7 @@ fn moving_after_a_cancelled_render_continues_its_samples() {
     assert!(app.log.last().unwrap().starts_with("Moved left 10 pixels (continued the samples of 2592 pixels) in "), "54 columns kept their samples: {:?}", app.log.last());
 }
 
-/// The image of `view` (the start view if `None`) after a complete render, then a move `rows_up` and `columns_right` (each at most 255)
+/// The image of `view` (the start view if `None`) after a complete render, then a move `rows_up` and `columns_right`
 fn moved_after_a_complete_render(config: &Config, view: Option<&View>, rows_up: i16, columns_right: i16) -> Vec<u32> {
     let mut app = manual_app(config);
     if let Some(view) = view {
@@ -155,7 +155,7 @@ fn moved_after_a_complete_render(config: &Config, view: Option<&View>, rows_up: 
 fn an_interrupted_render_keeps_its_completed_layers_when_the_view_moves() {
     //A finished render of 2 layers leaves exactly the samples of a render of 8 layers that was interrupted after 2 (the renderer tests also interrupt in the middle
     //of a layer); this way the test does not depend on catching a running render, which is slow on some machines and too fast on others
-    let config = Config::build(["mandelbrot", "96", "64", "300", "8"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(96, 64, 300, 8);
     let view = View::new(-0.7498100000000001, -0.020300000000000054, 0.004);
     let mut app = manual_app(&config);
     app.c.set_view(&view);
@@ -175,7 +175,7 @@ fn an_interrupted_render_keeps_its_completed_layers_when_the_view_moves() {
 
 #[test]
 fn centering_on_a_click_moves_by_whole_pixels_and_keeps_the_samples() {
-    let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 3);
     let mut app = manual_app(&config);
     let target = app.c.complex_from_pixel_plane(50.3, 10.6);
     app.handle_image_click(50.3, 10.6, true);
@@ -199,7 +199,7 @@ fn texture_bytes_equal_the_converted_pixels_for_all_mappings() {
 
 #[test]
 fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
-    let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 32);
     let mut app = manual_app(&config);
     assert_eq!(app.m.max_iterations, 50);
     assert_eq!(app.m.palette_scale, None, "manual mode colors exactly as before");
@@ -239,7 +239,7 @@ fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
 
 #[test]
 fn moving_after_turning_auto_off_does_not_reuse_an_auto_colored_buffer() {
-    let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     app.auto_iterations = true;
     app.render("auto");
@@ -253,7 +253,7 @@ fn moving_after_turning_auto_off_does_not_reuse_an_auto_colored_buffer() {
 
 #[test]
 fn presets_and_adaptive_supersampling_toggle_independently_of_auto_iterations() {
-    let config = Config::build(["mandelbrot", "64", "48", "50", "4"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 4);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     assert_eq!(app.auto_preset, AutoPreset::Balanced, "Balanced is the default");
@@ -293,7 +293,7 @@ fn presets_and_adaptive_supersampling_toggle_independently_of_auto_iterations() 
 
 #[test]
 fn selecting_a_preset_shows_its_limit_immediately_and_stale_renders_cannot_overwrite_it() {
-    let config = Config::build(["mandelbrot", "64", "48", "50", "2"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 2);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     app.c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.000064));
@@ -348,7 +348,7 @@ fn controls_texts(app: &mut MandelbrotApp) -> Vec<String> {
 
 #[test]
 fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering_controls() {
-    let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     let texts = controls_texts(&mut app);
@@ -362,7 +362,7 @@ fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering
 
 fn app_with_points(files: &[(&str, &str)]) -> (MandelbrotApp, std::path::PathBuf) {
     static NEXT_FOLDER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 3);
     let mut app = manual_app(&config);
     let folder = std::env::temp_dir().join(format!("mandelbrot-gui-poi-{}-{}", std::process::id(), NEXT_FOLDER.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&folder);
@@ -379,7 +379,7 @@ const HSV_BGR_PLACE: &str = r#"{ "format_version": 1, "name": "Test Place", "loc
 
 #[test]
 fn the_application_lists_the_points_of_interest_of_the_folder_at_startup() {
-    let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     assert_eq!(app.points.len(), 11, "the reset view and the ten former views are found without a list of file names in the code");
@@ -487,7 +487,7 @@ fn the_zoom_is_an_ordinary_number_in_the_readable_range_and_scientific_only_beyo
 
 #[test]
 fn the_current_view_section_is_above_the_status_and_follows_the_navigation() {
-    let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     let positions = side_panel_positions(&mut app);
@@ -659,7 +659,7 @@ fn click_side_panel(app: &mut MandelbrotApp, ctx: &egui::Context, position: egui
 
 #[test]
 fn the_copy_button_asks_for_the_center_and_scale_with_all_digits_to_be_copied() {
-    let config = Config::build(["mandelbrot", "64", "48", "50"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     app.c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002));
@@ -709,10 +709,10 @@ fn save_and_read_size(app: &mut MandelbrotApp) -> (u32, u32) {
 #[test]
 fn the_saved_image_has_the_size_that_is_chosen_for_it() {
     use super::save_size::SaveSizeChoice;
-    let config = Config::build(["mandelbrot", "64", "48", "50", "1"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 1);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
-    assert_eq!(save_and_read_size(&mut app), (64, 48), "the command line size is the default");
+    assert_eq!(save_and_read_size(&mut app), (64, 48), "the default size is the default");
     app.save_size.choice = SaveSizeChoice::Preset(String::from("HD 720p"));
     //A preset needs a render of its own, since the buffer shows another size
     assert_eq!(save_and_read_size(&mut app), (1280, 720));
@@ -732,10 +732,10 @@ fn the_saved_image_has_the_size_that_is_chosen_for_it() {
 #[test]
 fn the_render_size_follows_the_window_and_keeps_the_view() {
     let ctx = egui::Context::default();
-    let config = Config::build(["mandelbrot"].map(String::from).into_iter()).unwrap();
+    let config = Config::default();
     assert!(config.fit_window);
     let mut app = manual_app(&config);
-    assert_eq!(app.view_resolution(), Resolution::new(1200, 800), "the first render has the size of the command line");
+    assert_eq!(app.view_resolution(), Resolution::new(1200, 800), "the first render has the default size");
     app.c.set_view(&View::new(-0.7498, 0.0203, 0.064));
     app.render("Went to a view");
     wait_for_job(&mut app);
@@ -769,9 +769,9 @@ fn the_render_size_follows_the_window_and_keeps_the_view() {
 }
 
 #[test]
-fn a_size_on_the_command_line_is_kept_until_the_window_is_followed_on_request() {
+fn a_fixed_size_is_kept_until_the_window_is_followed_on_request() {
     let ctx = egui::Context::default();
-    let config = Config::build(["mandelbrot", "64", "48"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 1000, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     app.fit_to_window(&ctx, egui::vec2(500.0, 400.0));
@@ -788,7 +788,7 @@ fn a_size_on_the_command_line_is_kept_until_the_window_is_followed_on_request() 
 
 #[test]
 fn back_and_forward_return_to_the_views_that_were_visited() {
-    let config = Config::build(["mandelbrot", "120", "80"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(120, 80, 1000, 32);
     let mut app = manual_app(&config);
     assert!(!app.history.can_go_back(), "the start is the only view");
     let (start_center, start_scale) = (app.c.center(), app.c.get_scale());
@@ -844,7 +844,7 @@ fn image_frame(app: &mut MandelbrotApp, ctx: &egui::Context, width: f32, height:
 #[test]
 fn dragging_moves_the_view_and_the_wheel_zooms_around_the_cursor() {
     let ctx = egui::Context::default();
-    let config = Config::build(["mandelbrot", "120", "80"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(120, 80, 1000, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     let pointer = |position: egui::Pos2| egui::Event::PointerMoved(position);
@@ -883,13 +883,13 @@ fn dragging_moves_the_view_and_the_wheel_zooms_around_the_cursor() {
 
 #[test]
 fn the_last_image_follows_a_new_view_until_the_render_of_that_view_arrives() {
-    let config = Config::build(["mandelbrot", "120", "80", "100", "1"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(120, 80, 100, 1);
     let mut app = manual_app(&config);
     let full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     assert_eq!(super::transform::shown_fraction(&app.shown_plane, &app.c), full);
 
     //Move 12 columns to the right: until the new render shows a layer, the old image is drawn 12 columns (a tenth of the image) to the left
-    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 12);
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, 12);
     app.render_moved("Moved");
     let moved = super::transform::shown_fraction(&app.shown_plane, &app.c);
     assert!((moved.min.x + 0.1).abs() < 1e-5 && moved.min.y.abs() < 1e-5, "{moved:?}");
@@ -901,7 +901,7 @@ fn the_last_image_follows_a_new_view_until_the_render_of_that_view_arrives() {
 #[test]
 fn a_wheel_zoom_renders_quickly_with_a_steady_limit_and_the_full_quality_follows_when_it_stops() {
     let ctx = egui::Context::default();
-    let config = Config::build(["mandelbrot", "120", "80", "100", "6"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(120, 80, 100, 6);
     let mut app = MandelbrotApp::new(&config); //Auto iterations and adaptive supersampling are on by default
     wait_for_job(&mut app);
     let limit = app.m.max_iterations;
@@ -930,13 +930,13 @@ fn a_wheel_zoom_renders_quickly_with_a_steady_limit_and_the_full_quality_follows
 
 #[test]
 fn a_drag_shifts_the_shown_image_even_when_its_render_was_interrupted() {
-    let config = Config::build(["mandelbrot", "120", "80", "100", "4"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(120, 80, 100, 4);
     let mut app = manual_app(&config);
     app.gesture_active = true;
-    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 5);
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, 5);
     app.render_moved("Moved by dragging");
     //The next frame of the drag interrupts that render: its samples go on to the next render, which shifts them by the second move
-    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 2, 4);
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 2, 4);
     app.render_moved("Moved by dragging");
     wait_for_job(&mut app);
 
@@ -966,7 +966,7 @@ fn a_coarse_preview_is_uploaded_with_one_texel_per_block_centered_on_its_pixel()
 
 #[test]
 fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives() {
-    let config = Config::build(["mandelbrot", "64", "40", "100", "1"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 40, 100, 1);
     let mut app = manual_app(&config);
     let ctx = egui::Context::default();
     //Stand in for a render job of the whole view that reports three previews and a layer
@@ -986,7 +986,7 @@ fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives()
 }
 
 #[test]
-fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace_with_quick_frames() {
+fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     assert_eq!((app.route, app.pace, app.flight_rendering), (super::flight::Route::Shortest, super::flight::Pace::Fast, super::flight::FlightRendering::LowRes), "the defaults, for speed");
     (app.route, app.pace, app.flight_rendering) = (super::flight::Route::ViaReset, super::flight::Pace::Cinematic, super::flight::FlightRendering::BestEffort);
@@ -1000,13 +1000,13 @@ fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace_with_quick_frames(
     let (started, duration) = app.flight.as_ref().map(|flight| (flight.last_frame, flight.flight.duration())).unwrap();
     assert!(duration >= Duration::from_secs(2), "{duration:?}");
 
-    //A frame on the way: a quick render (the first layer only), and no full-quality render while the flight goes on
+    //A frame on the way renders towards the full quality (as many layers as it gets before the next frame), and no other render starts while the flight goes on
     app.fly_at(started + duration / 3);
     assert!(app.flight.is_some());
-    assert_eq!(app.bars.as_ref().unwrap().total_layers, 1);
+    assert_eq!(app.bars.as_ref().unwrap().total_layers, app.supersampling_amount);
     wait_for_job(&mut app);
     app.settle_gesture(&ctx);
-    assert!(!app.is_busy(), "the full-quality render waits for the arrival");
+    assert!(!app.is_busy(), "the arrival renders the place itself");
     let scale = app.c.get_scale();
     assert!(scale > 0.05 && scale <= 1.0 + 1e-9, "a third of the way via reset, the view is zoomed out: {scale}");
 
@@ -1035,7 +1035,7 @@ fn any_other_action_stops_a_flight_where_it_is() {
     app.fly_at(started + Duration::from_secs(60));
     let mut expected = app.c.clone();
     expected.set_view(&on_the_way);
-    crate::rendering::translate_complex_plane_by_pixels(&mut expected, 10, 0);
+    crate::rendering::move_complex_plane_by_pixels(&mut expected, 10, 0);
     assert!((app.c.center().y - expected.center().y).abs() < 1e-12, "the view stays where the flight stopped, moved up");
     let _ = std::fs::remove_dir_all(folder);
 }
@@ -1067,7 +1067,7 @@ fn cancel_stops_a_flight_where_it_is_and_skip_goes_to_the_place_at_once() {
 
 #[test]
 fn immersion_holds_the_view_until_the_new_view_has_a_complete_frame() {
-    let config = Config::build(["mandelbrot", "64", "48", "50", "2"].map(String::from).into_iter()).unwrap();
+    let config = Config::sized(64, 48, 50, 2);
     let mut app = manual_app(&config);
     let full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     //Best effort: the old image moves along at once, with black where the exposed strip is not rendered yet
@@ -1279,4 +1279,47 @@ fn the_current_view_can_be_saved_as_a_point_of_interest() {
     assert_eq!((saved.location.max_iterations, saved.description.as_str()), (app.m.max_iterations, ""));
     assert!(folder.join("00-my-place.json").exists());
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_best_effort_flight_does_not_interrupt_a_render_that_has_not_shown_anything() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::BestEffort;
+    app.go_to_point_of_interest(0);
+    let start = app.flight.as_ref().unwrap().last_frame;
+    app.fly_at(start + Duration::from_millis(100));
+    let first_job = app.progress.as_ref().map(|progress| Arc::as_ptr(&progress.cancel)).unwrap();
+    let first_view = app.c.get_view();
+    //The next frame comes before the render has shown anything: the camera moves on, the render goes on
+    app.fly_at(start + Duration::from_millis(200));
+    assert_ne!(format!("{:?}", app.c.get_view()), format!("{first_view:?}"), "the camera follows the clock");
+    assert_eq!(app.progress.as_ref().map(|progress| Arc::as_ptr(&progress.cancel)), Some(first_job), "the render that has not shown anything is not interrupted");
+    let camera = app.c.get_view();
+    wait_for_job(&mut app);
+    assert!(app.frame_accepted);
+    assert_eq!(format!("{:?}", app.c.get_view()), format!("{camera:?}"), "the finished render does not set the camera back to its own view");
+    //Once it has shown a frame, the next frame starts a render at the latest camera
+    app.fly_at(start + Duration::from_millis(300));
+    assert!(app.is_busy() && app.progress.as_ref().map(|progress| Arc::as_ptr(&progress.cancel)) != Some(first_job));
+    app.cancel_flight();
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn every_kind_of_render_decides_its_layers_its_limit_and_its_history() {
+    use super::render_job::RenderKind;
+    let config = Config::sized(64, 48, 50, 4);
+    let mut app = manual_app(&config);
+    let history = app.history.len();
+    for (kind, layers, recorded) in [(RenderKind::Settled { moved: false }, 4, true), (RenderKind::GestureFrame { moved: true }, 1, false), (RenderKind::FlightFrame, 4, false)] {
+        app.c.scale(0.9);
+        let before = app.history.len();
+        app.start_render_as("A render", kind);
+        assert_eq!(app.bars.as_ref().unwrap().total_layers, layers, "{kind:?}");
+        assert_eq!(app.history.len() > before, recorded, "{kind:?}");
+        assert_eq!(app.settle.is_some(), kind != RenderKind::Settled { moved: false }, "{kind:?}: a passing frame leaves a render to settle on");
+        wait_for_job(&mut app);
+    }
+    assert_eq!(app.history.len(), history + 1);
 }
