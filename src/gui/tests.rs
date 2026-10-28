@@ -713,3 +713,46 @@ fn a_size_on_the_command_line_is_kept_until_the_window_is_followed_on_request() 
     let clicked = app.c.complex_from_pixel_plane(250.0, 200.0);
     assert!((clicked.x - center.x).abs() < app.c.increment_x && (clicked.y - center.y).abs() < app.c.increment_y);
 }
+
+#[test]
+fn back_and_forward_return_to_the_views_that_were_visited() {
+    let config = Config::build(["mandelbrot", "120", "80"].map(String::from).into_iter()).unwrap();
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    assert!(!app.history.can_go_back(), "the start is the only view");
+    let (start_center, start_scale) = (app.c.center(), app.c.get_scale());
+    app.c.set_view(&View::new(-0.75, 0.1, 0.5));
+    app.render("Went to a view");
+    wait_for_job(&mut app);
+    app.c.scale(0.5);
+    app.render("Zoomed in");
+    wait_for_job(&mut app);
+    app.max_iterations_input = 300;
+    app.m.max_iterations = 300;
+    app.render("Set max. iterations to 300"); //The same view again: no new entry
+    wait_for_job(&mut app);
+    assert_eq!(app.history.len(), 3);
+
+    app.go_back();
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.5).abs() < 1e-12 && (app.c.center().x + 0.75).abs() < 1e-12);
+    assert!(app.log.iter().any(|message| message.starts_with("Went back to the previous view in ")));
+    app.go_back();
+    wait_for_job(&mut app);
+    assert_eq!((app.c.center().x, app.c.get_scale()), (start_center.x, start_scale));
+    assert!(!app.history.can_go_back() && app.history.can_go_forward());
+    app.go_forward();
+    wait_for_job(&mut app);
+    app.go_forward();
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.25).abs() < 1e-12 && !app.history.can_go_forward());
+    assert_eq!(app.history.len(), 3, "walking through the history adds nothing to it");
+
+    //After a resize of the window, an old view is shown at the new size
+    app.resize_view(Resolution::new(90, 90));
+    wait_for_job(&mut app);
+    app.go_back();
+    wait_for_job(&mut app);
+    assert_eq!(app.view_resolution(), Resolution::new(90, 90));
+    assert!((app.c.get_scale() - 0.5).abs() < 1e-12);
+}

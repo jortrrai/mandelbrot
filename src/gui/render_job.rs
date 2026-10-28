@@ -132,6 +132,7 @@ impl MandelbrotApp {
     pub(super) fn start_render(&mut self, message: &str, strip: Option<((i128, i128), ExposedRegion)>) {
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();
+        self.history.record(&self.c);
         self.buffer_is_complete = false;
         let (sender, receiver) = mpsc::channel();
         let (c, mut p) = (self.c.clone(), self.p.clone());
