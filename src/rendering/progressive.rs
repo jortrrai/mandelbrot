@@ -43,12 +43,14 @@ pub struct Render<'a> {
     state: Option<&'a mut SampleState>,
     gpu: Option<(&'a GpuIterator, Duration)>,
     gpu_samples: Option<&'a AtomicUsize>,
+    /// How many CPU threads take rows of a pass (all render threads; none in a test where the GPU computes every sample)
+    cpu_threads: usize,
 }
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(u32, u32) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, state: None, gpu: None, gpu_samples: None }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, state: None, gpu: None, gpu_samples: None, cpu_threads: render_thread_count() }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -126,6 +128,15 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// Without CPU threads in the passes, so the GPU computes every sample (with `gpu`): to test that whole renders by the GPU are the CPU's, which a share that
+    /// depends on the timing of the threads cannot show reliably
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn on_the_gpu_only(mut self) -> Self {
+        self.cpu_threads = 0;
+        self
+    }
+
     /// Adds the number of samples that the GPU computed to `gpu_samples`
     #[must_use]
     pub fn count_gpu_samples_in(mut self, gpu_samples: &'a AtomicUsize) -> Self {
@@ -140,7 +151,8 @@ impl<'a> Render<'a> {
     /// # Panics
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, state, gpu, gpu_samples } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, state, gpu, gpu_samples, cpu_threads } = self;
+        debug_assert!(cpu_threads > 0 || gpu.is_some(), "a render without CPU threads needs the GPU");
         let own_gpu_samples = AtomicUsize::new(0);
         let gpu_samples = gpu_samples.unwrap_or(&own_gpu_samples);
         let (never_cancelled, own_counter) = (AtomicBool::new(false), AtomicUsize::new(0));
@@ -210,9 +222,9 @@ impl<'a> Render<'a> {
             pixels_done.store(total - eligible, Ordering::Relaxed);
             //The GPU only for a pass that is expected to be slow, from the time per sample of the pass before (unknown for the first pass: then the join delay decides)
             let expected = time_per_sample.map(|per_sample| per_sample * u32::try_from(eligible).unwrap_or(u32::MAX));
-            let pass_gpu = gpu.filter(|_| expected.is_none_or(|expected| expected > GPU_WORTHWHILE)).map(|(gpu, join_after)| (gpu, join_after, gpu_samples));
+            let pass_gpu = gpu.filter(|_| cpu_threads == 0 || expected.is_none_or(|expected| expected > GPU_WORTHWHILE)).map(|(gpu, join_after)| (gpu, join_after, gpu_samples));
             let pass_started = Instant::now();
-            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu) } else { 0 };
+            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
             if processed > 0 {
                 time_per_sample = Some(pass_started.elapsed() / u32::try_from(processed).unwrap_or(u32::MAX));
             }
@@ -241,7 +253,7 @@ impl<'a> Render<'a> {
 /// If the GPU fails, its rows are computed on the CPU and the GPU is not used for the rest of the pass.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The state of `Render::run` that a pass shares; the CPU threads and the GPU worker share its closures
 fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
-    cancel: &AtomicBool, pixels_done: &AtomicUsize, gpu: Option<(&GpuIterator, Duration, &AtomicUsize)>) -> usize {
+    cancel: &AtomicBool, pixels_done: &AtomicUsize, gpu: Option<(&GpuIterator, Duration, &AtomicUsize)>, cpu_threads: usize) -> usize {
     let (width, height, origin) = (state.width, state.height, state.origin);
     let started = Instant::now();
     let processed = AtomicUsize::new(0);
@@ -303,7 +315,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     let (first_rows, second_rows) = (rows_or_empty(&mut state.first, width, height), rows_or_empty(&mut state.second, width, height));
     let rows = Mutex::new(state.sums.chunks_mut(width).zip(state.counts.chunks_mut(width)).zip(first_rows).zip(second_rows).zip(colors.chunks_mut(width)).enumerate());
     thread::scope(|scope| {
-        for _ in 0..render_thread_count() {
+        for _ in 0..cpu_threads {
             scope.spawn(|| loop {
                 if cancel.load(Ordering::Relaxed) {
                     return;
