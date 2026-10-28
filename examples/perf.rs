@@ -5,6 +5,7 @@
 use std::time::{Duration, Instant};
 
 use mandelbrot::coloring::{ColorChannelMapping, TrueColor};
+use mandelbrot::complex::Complex;
 use mandelbrot::complex_plane::{ComplexPlane, View};
 use mandelbrot::mandelbrot_set::MandelbrotSet;
 use mandelbrot::pixel_buffer::PixelBuffer;
@@ -184,6 +185,39 @@ fn main() {
             rendering::move_complex_plane_by_pixels(&mut plane, if up { 10 } else { -10 }, 0);
             Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).resume(&mut state).run(|colors, _| { std::hint::black_box(colors.to_vec()); });
         }));
+    }
+
+    //The GPU (`rendering::gpu`) against the CPU's lockstep loop on all render threads: the positions of one sample of every pixel, bit for bit the same
+    if filter.as_ref().is_none_or(|f| "gpu".contains(f.as_str())) {
+        match rendering::gpu::GpuIterator::new() {
+            Err(reason) => println!("gpu: not available ({reason})"),
+            Ok(gpu) => {
+                println!("gpu: {}", gpu.name());
+                for (name, view, max_iterations) in [("default view", View::new(-0.75, 0.0, 1.0), 1000), ("seahorse", View::new(-0.7498100000000001, -0.020300000000000054, 0.000064), 5000), ("deep", View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-10), 20000)] {
+                    let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+                    c.set_view(&view);
+                    let m = MandelbrotSet::new(max_iterations, 2.0);
+                    let points: Vec<Complex> = (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| (x, y))).map(|(x, y)| c.complex_from_pixel_plane(x as f64 + 0.5, y as f64 + 0.5)).collect();
+                    let cpu = |points: &[Complex]| {
+                        let mut out = vec![0.0; points.len()];
+                        let rows = std::sync::Mutex::new(out.chunks_mut(WIDTH).zip(points.chunks(WIDTH)));
+                        std::thread::scope(|scope| for _ in 0..rendering::render_thread_count() { scope.spawn(|| loop {
+                            let next = rows.lock().unwrap().next();
+                            let Some((row, row_points)) = next else { return };
+                            let (groups, rest) = row_points.as_chunks::<4>();
+                            for (index, group) in groups.iter().enumerate() { row[index * 4..index * 4 + 4].copy_from_slice(&m.position_lanes(group)); }
+                            for (offset, point) in rest.iter().enumerate() { row[groups.len() * 4 + offset] = m.position(point); }
+                        }); });
+                        out
+                    };
+                    let (on_cpu, on_gpu) = (cpu(&points), gpu.positions(&m, &points).expect("the GPU"));
+                    let same = on_cpu.iter().zip(&on_gpu).all(|(a, b)| a.to_bits() == b.to_bits());
+                    summarize(&format!("{name} ({max_iterations} it), CPU all threads"), time_runs(runs, || { std::hint::black_box(cpu(&points)); }));
+                    summarize(&format!("{name} ({max_iterations} it), GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points).expect("the GPU")); }));
+                    println!("{:<44} the same positions bit for bit: {same}", "");
+                }
+            }
+        }
     }
 
     //Saving at another size than the window renders the whole image into a buffer in one go

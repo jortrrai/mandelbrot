@@ -8,6 +8,7 @@
 
 mod adaptive;
 mod buffer;
+pub mod gpu;
 mod jitter;
 mod progressive;
 mod region;
