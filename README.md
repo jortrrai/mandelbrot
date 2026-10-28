@@ -11,7 +11,7 @@
  / _ \/ // / / // / _ \/ __/ __/     '-v-'    Claude Code, beep boop
 /_.__/\_, /  \___/\___/_/  \__/       /|_|\
      /___/
-                                 v0.2.0
+                                 v0.3.0
 ```
 
 A Mandelbrot set viewer written in Rust, with a graphical window: explore the set, zoom, jump to named places, and save images. The same view and settings always render exactly the same image.
