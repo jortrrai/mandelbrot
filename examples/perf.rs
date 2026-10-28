@@ -171,7 +171,7 @@ fn main() {
         summarize("window move 10 rows (4x): old strip render", time_runs(runs, || {
             up = !up;
             let rows: i16 = if up { 10 } else { -10 };
-            rendering::translate_complex_plane_by_pixels(&mut plane, rows, 0);
+            rendering::move_complex_plane_by_pixels(&mut plane, i64::from(rows), 0);
             buffer.translate_buffer(i128::from(rows), 0);
             let region = rendering::ExposedRegion::from_shift(WIDTH, HEIGHT, i128::from(rows), 0).unwrap();
             let base = buffer.colors.clone();
@@ -181,7 +181,7 @@ fn main() {
         Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).resume(&mut state).run(|_, _| {});
         summarize("window move 10 rows (4x): continued samples", time_runs(runs, || {
             up = !up;
-            rendering::translate_complex_plane_by_pixels(&mut plane, if up { 10 } else { -10 }, 0);
+            rendering::move_complex_plane_by_pixels(&mut plane, if up { 10 } else { -10 }, 0);
             Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).resume(&mut state).run(|colors, _| { std::hint::black_box(colors.to_vec()); });
         }));
     }

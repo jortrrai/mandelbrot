@@ -241,25 +241,25 @@ fn smooth_rendering_is_deterministic_and_progressive_passes_are_all_reported() {
 }
 
 #[test]
-fn centering_and_moving_by_pixels_agree_with_the_shift_of_the_buffer() {
+fn moving_by_pixels_agrees_with_the_shift_of_the_buffer_at_any_distance() {
     let mut plane = ComplexPlane::new(120, 80);
     let start = plane.center();
     //Moving up by 10 rows and right by 7 columns moves the center up (a larger imaginary part) and right
-    translate_complex_plane_by_pixels(&mut plane, 10, 0);
+    move_complex_plane_by_pixels(&mut plane, 10, 0);
     assert!((plane.center().y - (start.y + 10.0 * plane.increment_y)).abs() < 1e-12 && (plane.center().x - start.x).abs() < 1e-12);
-    translate_complex_plane_by_pixels(&mut plane, 0, 7);
+    move_complex_plane_by_pixels(&mut plane, 0, 7);
     assert!((plane.center().x - (start.x + 7.0 * plane.increment_x)).abs() < 1e-12);
-    translate_complex_plane_by_pixels(&mut plane, -10, 0);
-    translate_complex_plane_by_pixels(&mut plane, 0, -7);
+    move_complex_plane_by_pixels(&mut plane, -10, 0);
+    move_complex_plane_by_pixels(&mut plane, 0, -7);
     assert!((plane.center().x - start.x).abs() < 1e-12 && (plane.center().y - start.y).abs() < 1e-12, "the moves are undone");
 
-    //Centering on the point under pixel (90, 25) returns the shift of the buffer: the content moves left and down. The pixel counts are truncated, not rounded, so a distance of
-    //30 pixels that is 29.999... in floating point shifts by 29 (an existing imprecision of one pixel, which is kept because the moves of the window depend on it)
-    let mut plane = ComplexPlane::new(120, 80);
-    let target = plane.complex_from_pixel_plane(90.0, 25.0);
-    let shift = center_complex_plane_on(&mut plane, &target);
-    assert_eq!(shift, (14, -29), "(rows_up, columns_right) of the content");
-    assert!((plane.center().x - target.x).abs() < 1e-12 && (plane.center().y - target.y).abs() < 1e-12);
+    //Any distance: the old helper took it modulo 256 pixels, so 300 moved by 44
+    for (rows_up, columns_right) in [(300, -1000), (-256, 256), (3, 255)] {
+        let start = ComplexPlane::new(1200, 800);
+        let mut moved = start.clone();
+        move_complex_plane_by_pixels(&mut moved, rows_up, columns_right);
+        assert_eq!(pixel_shift(&start, &moved), Some((i128::from(rows_up), -i128::from(columns_right))), "the content moves the other way");
+    }
 }
 
 #[test]
@@ -421,7 +421,7 @@ fn moved_render(c: &ComplexPlane, m: &MandelbrotSet, samples: u8, adaptive: Opti
     let mut state = SampleState::new();
     let _ = resumed(&mut state, c, m, samples, adaptive, interrupted_after, None);
     let mut moved = c.clone();
-    translate_complex_plane_by_pixels(&mut moved, rows_up, columns_right);
+    move_complex_plane_by_pixels(&mut moved, i64::from(rows_up), i64::from(columns_right));
     let (colors, completed) = resumed(&mut state, &moved, m, samples, adaptive, None, None);
     assert!(completed);
     (colors, moved, state)
@@ -438,7 +438,7 @@ fn a_moved_view_keeps_the_samples_of_the_pixels_that_stay_visible() {
         let before = state.samples(10, 10);
         //Move the view 5 columns to the right and 3 rows up: the content moves 5 columns left and 3 rows down
         let mut moved = c.clone();
-        translate_complex_plane_by_pixels(&mut moved, 3, 5);
+        move_complex_plane_by_pixels(&mut moved, 3, 5);
         //A render that is cancelled before it starts only shifts the state: the pixels that stay visible keep their samples, the exposed ones have none
         let cancelled = AtomicBool::new(true);
         let _ = Render::new(&moved, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).resume(&mut state).cancel_with(&cancelled).run(|_, _| {});
@@ -514,7 +514,7 @@ fn any_sequence_of_moves_and_interruptions_ends_in_the_complete_image() {
                     _ => (None, None),
                 };
                 let _ = resumed(&mut state, &plane, &m, 6, adaptive, after_pass, after_pixels);
-                translate_complex_plane_by_pixels(&mut plane, next(41) as i16 - 20, next(41) as i16 - 20);
+                move_complex_plane_by_pixels(&mut plane, next(41).cast_signed() - 20, next(41).cast_signed() - 20);
             }
             let (colors, completed) = resumed(&mut state, &plane, &m, 6, adaptive, None, None);
             assert!(completed);
@@ -547,7 +547,7 @@ fn a_preview_of_the_strip_a_move_exposed_has_no_gaps() {
     //Moves that expose strips at every edge, some not aligned to the 8 x 8 blocks of the coarsest preview
     for (rows_up, columns_right) in [(0, 5), (0, -5), (3, 0), (-3, 0), (2, -7)] {
         let mut moved = state.plane().unwrap().clone();
-        translate_complex_plane_by_pixels(&mut moved, rows_up, columns_right);
+        move_complex_plane_by_pixels(&mut moved, i64::from(rows_up), i64::from(columns_right));
         let mut previews = Vec::new();
         let completed = Render::new(&moved, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(2).resume(&mut state).preview(Some(std::time::Duration::ZERO)).run(|colors, pass| {
             if pass == 0 {

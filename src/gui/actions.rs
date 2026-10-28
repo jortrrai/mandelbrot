@@ -24,7 +24,7 @@ impl MandelbrotApp {
 
     /// Moves the view by `rows_up` rows and `columns_right` columns of pixels (`name` is the direction, for the status log), and renders the exposed strip
     pub(super) fn translate(&mut self, name: &str, rows_up: i16, columns_right: i16) {
-        rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
+        rendering::move_complex_plane_by_pixels(&mut self.c, i64::from(rows_up), i64::from(columns_right));
         //Moving the view to the right moves the content of the buffer to the left
         self.render_moved(&format!("Moved {name} {} pixels", self.vars.translation_amount));
     }

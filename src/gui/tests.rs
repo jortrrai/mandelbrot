@@ -138,7 +138,7 @@ fn moving_after_a_cancelled_render_continues_its_samples() {
     assert!(app.log.last().unwrap().starts_with("Moved left 10 pixels (continued the samples of 2592 pixels) in "), "54 columns kept their samples: {:?}", app.log.last());
 }
 
-/// The image of `view` (the start view if `None`) after a complete render, then a move `rows_up` and `columns_right` (each at most 255)
+/// The image of `view` (the start view if `None`) after a complete render, then a move `rows_up` and `columns_right`
 fn moved_after_a_complete_render(config: &Config, view: Option<&View>, rows_up: i16, columns_right: i16) -> Vec<u32> {
     let mut app = manual_app(config);
     if let Some(view) = view {
@@ -889,7 +889,7 @@ fn the_last_image_follows_a_new_view_until_the_render_of_that_view_arrives() {
     assert_eq!(super::transform::shown_fraction(&app.shown_plane, &app.c), full);
 
     //Move 12 columns to the right: until the new render shows a layer, the old image is drawn 12 columns (a tenth of the image) to the left
-    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 12);
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, 12);
     app.render_moved("Moved");
     let moved = super::transform::shown_fraction(&app.shown_plane, &app.c);
     assert!((moved.min.x + 0.1).abs() < 1e-5 && moved.min.y.abs() < 1e-5, "{moved:?}");
@@ -933,10 +933,10 @@ fn a_drag_shifts_the_shown_image_even_when_its_render_was_interrupted() {
     let config = Config::sized(120, 80, 100, 4);
     let mut app = manual_app(&config);
     app.gesture_active = true;
-    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 5);
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, 5);
     app.render_moved("Moved by dragging");
     //The next frame of the drag interrupts that render: its samples go on to the next render, which shifts them by the second move
-    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 2, 4);
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 2, 4);
     app.render_moved("Moved by dragging");
     wait_for_job(&mut app);
 
@@ -1035,7 +1035,7 @@ fn any_other_action_stops_a_flight_where_it_is() {
     app.fly_at(started + Duration::from_secs(60));
     let mut expected = app.c.clone();
     expected.set_view(&on_the_way);
-    crate::rendering::translate_complex_plane_by_pixels(&mut expected, 10, 0);
+    crate::rendering::move_complex_plane_by_pixels(&mut expected, 10, 0);
     assert!((app.c.center().y - expected.center().y).abs() < 1e-12, "the view stays where the flight stopped, moved up");
     let _ = std::fs::remove_dir_all(folder);
 }
