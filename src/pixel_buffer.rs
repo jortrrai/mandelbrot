@@ -45,7 +45,7 @@ impl PixelBuffer {
 
     ///Converts a `TrueColor` vector to minifb compatible u32 pixel values
     pub fn colors_to_pixels(colors: &[TrueColor], color_channel_mapping: &ColorChannelMapping) -> Vec<u32> {
-        let mapping = color_channel_mapping.get_r_g_b_mapping(); //Resolve the mapping once for the whole conversion, not once per pixel
+        let mapping = color_channel_mapping.sources(); //Get the channels once for the whole conversion, not once per pixel
         colors.iter().map(|x| x.to_32_bit_resolved(mapping)).collect()
     }
 
@@ -108,11 +108,11 @@ impl PixelBuffer {
         let color_channel_mapping_text = format!("{:?}", self.color_channel_mapping);
         encoder.add_text_chunk(String::from("color_channel_mapping"), color_channel_mapping_text).unwrap();
         let mut data: Vec<u8> = Vec::new();
-        let (r_map, g_map, b_map) = self.color_channel_mapping.get_r_g_b_mapping();
+        let [r_source, g_source, b_source] = self.color_channel_mapping.sources();
         for color in &self.colors {
-            data.push(color.get_color(r_map));
-            data.push(color.get_color(g_map));
-            data.push(color.get_color(b_map));
+            data.push(color.channel(r_source));
+            data.push(color.channel(g_source));
+            data.push(color.channel(b_source));
         }
         let mut writer = encoder.write_header().unwrap();
         writer.write_image_data(&data).unwrap();

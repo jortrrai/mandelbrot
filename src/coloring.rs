@@ -6,114 +6,86 @@ use angular_units::Deg;
 use num::traits::Pow;
 use prisma::{Hsv, Rgb, FromColor};
 
-/// How the channels of a color are placed in a pixel.
+/// One of the three channels of a color
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    /// The red channel
+    Red,
+    /// The green channel
+    Green,
+    /// The blue channel
+    Blue,
+}
+
+impl Channel {
+    /// The channel that the letter `R`, `G` or `B` names (not case-insensitive: use upper case)
+    fn from_letter(letter: char) -> Option<Channel> {
+        match letter {
+            'R' => Some(Channel::Red),
+            'G' => Some(Channel::Green),
+            'B' => Some(Channel::Blue),
+            _ => None,
+        }
+    }
+
+    /// The letter that names the channel: `R`, `G` or `B`
+    pub fn letter(self) -> char {
+        match self {
+            Channel::Red => 'R',
+            Channel::Green => 'G',
+            Channel::Blue => 'B',
+        }
+    }
+
+    /// The position of the channel in `[red, green, blue]`
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// How the channels of a color are placed in a pixel: which channel of the color the red, the green and the blue channel of the pixel take.
 ///
-/// The first letter of a variant names the channel that the red channel of the pixel takes, the second letter the channel of the green channel, the third letter the channel of the blue channel.
-/// For example `ColorChannelMapping::BGR` means that red takes the value of blue, green the value of green and blue the value of red (B => R, G => G, R => B).
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum ColorChannelMapping {
-    /// Red takes the blue channel, green the blue channel and blue the blue channel
-    BBB,
-    /// Red takes the blue channel, green the blue channel and blue the green channel
-    BBG,
-    /// Red takes the blue channel, green the blue channel and blue the red channel
-    BBR,
-    /// Red takes the blue channel, green the green channel and blue the blue channel
-    BGB,
-    /// Red takes the blue channel, green the green channel and blue the green channel
-    BGG,
-    /// Red takes the blue channel, green the green channel and blue the red channel
-    BGR,
-    /// Red takes the blue channel, green the red channel and blue the blue channel
-    BRB,
-    /// Red takes the blue channel, green the red channel and blue the green channel
-    BRG,
-    /// Red takes the blue channel, green the red channel and blue the red channel
-    BRR,
-    /// Red takes the green channel, green the blue channel and blue the blue channel
-    GBB,
-    /// Red takes the green channel, green the blue channel and blue the green channel
-    GBG,
-    /// Red takes the green channel, green the blue channel and blue the red channel
-    GBR,
-    /// Red takes the green channel, green the green channel and blue the blue channel
-    GGB,
-    /// Red takes the green channel, green the green channel and blue the green channel
-    GGG,
-    /// Red takes the green channel, green the green channel and blue the red channel
-    GGR,
-    /// Red takes the green channel, green the red channel and blue the blue channel
-    GRB,
-    /// Red takes the green channel, green the red channel and blue the green channel
-    GRG,
-    /// Red takes the green channel, green the red channel and blue the red channel
-    GRR,
-    /// Red takes the red channel, green the blue channel and blue the blue channel
-    RBB,
-    /// Red takes the red channel, green the blue channel and blue the green channel
-    RBG,
-    /// Red takes the red channel, green the blue channel and blue the red channel
-    RBR,
-    /// Red takes the red channel, green the green channel and blue the green channel
-    RGG,
-    /// Red takes the red channel, green the green channel and blue the red channel
-    RGR,
-    /// Red takes the red channel, green the red channel and blue the blue channel
-    RRB,
-    /// Red takes the red channel, green the red channel and blue the green channel
-    RRG,
-    /// Red takes the red channel, green the red channel and blue the red channel
-    RRR,
-    /// Every channel keeps its own value (the identity)
-    RGB,
+/// It is written as three letters: the first names the channel that the red channel of the pixel takes, the second the channel of the green channel, the third the channel of the blue channel.
+/// For example `BGR` means that red takes the value of blue, green the value of green and blue the value of red (B => R, G => G, R => B).
+/// Any three of `R`, `G` and `B` are allowed (27 mappings), also a channel that is used twice or not at all, such as `RRG`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ColorChannelMapping {
+    sources: [Channel; 3],
 }
 
 impl ColorChannelMapping {
+    /// Every channel keeps its own value (the identity)
+    pub const RGB: ColorChannelMapping = ColorChannelMapping { sources: [Channel::Red, Channel::Green, Channel::Blue] };
+    /// Red takes the blue channel, green the green channel and blue the red channel
+    pub const BGR: ColorChannelMapping = ColorChannelMapping { sources: [Channel::Blue, Channel::Green, Channel::Red] };
+
     /// Parses a mapping such as "RGB" or "bgr" (case-insensitive)
     /// # Errors
     /// Returns an error message if `r_g_b` is not three characters from `R`, `G` and `B`
-    pub fn new(r_g_b: &str) -> Result<ColorChannelMapping,String> {
-        match &r_g_b.to_uppercase()[..] {
-            "BBB" => Ok(ColorChannelMapping::BBB),
-            "BBG" => Ok(ColorChannelMapping::BBG),
-            "BBR" => Ok(ColorChannelMapping::BBR),
-            "BGB" => Ok(ColorChannelMapping::BGB),
-            "BGG" => Ok(ColorChannelMapping::BGG),
-            "BGR" => Ok(ColorChannelMapping::BGR),
-            "BRB" => Ok(ColorChannelMapping::BRB),
-            "BRG" => Ok(ColorChannelMapping::BRG),
-            "BRR" => Ok(ColorChannelMapping::BRR),
-            "GBB" => Ok(ColorChannelMapping::GBB),
-            "GBG" => Ok(ColorChannelMapping::GBG),
-            "GBR" => Ok(ColorChannelMapping::GBR),
-            "GGB" => Ok(ColorChannelMapping::GGB),
-            "GGG" => Ok(ColorChannelMapping::GGG),
-            "GGR" => Ok(ColorChannelMapping::GGR),
-            "GRB" => Ok(ColorChannelMapping::GRB),
-            "GRG" => Ok(ColorChannelMapping::GRG),
-            "GRR" => Ok(ColorChannelMapping::GRR),
-            "RBB" => Ok(ColorChannelMapping::RBB),
-            "RBG" => Ok(ColorChannelMapping::RBG),
-            "RBR" => Ok(ColorChannelMapping::RBR),
-            "RGG" => Ok(ColorChannelMapping::RGG),
-            "RGR" => Ok(ColorChannelMapping::RGR),
-            "RRB" => Ok(ColorChannelMapping::RRB),
-            "RRG" => Ok(ColorChannelMapping::RRG),
-            "RRR" => Ok(ColorChannelMapping::RRR),
-            "RGB" => Ok(ColorChannelMapping::RGB),
-            _ => Err(String::from("Invalid r_g_b string, should be a string of length three with characters 'R', 'G' or 'B'"))
+    pub fn new(r_g_b: &str) -> Result<ColorChannelMapping, String> {
+        let letters: Vec<Channel> = r_g_b.to_uppercase().chars().map_while(Channel::from_letter).collect();
+        match <[Channel; 3]>::try_from(letters) {
+            Ok(sources) if r_g_b.chars().count() == 3 => Ok(ColorChannelMapping { sources }),
+            _ => Err(String::from("Invalid r_g_b string, should be a string of length three with characters 'R', 'G' or 'B'")),
         }
     }
-    ///Returns (x,y,z) where x,y,z ∈ {'R', 'G', 'B'}
-    pub fn get_r_g_b_mapping(&self) -> (char,char,char) {
-        let r_g_b = self.to_string().chars().collect::<Vec<char>>();
-        (r_g_b[0],r_g_b[1],r_g_b[2])
+
+    /// The channels that the red, green and blue channel of a pixel take, in that order
+    pub fn sources(&self) -> [Channel; 3] {
+        self.sources
+    }
+}
+
+impl fmt::Debug for ColorChannelMapping {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let [red, green, blue] = self.sources;
+        write!(f, "{}{}{}", red.letter(), green.letter(), blue.letter())
     }
 }
 
 impl fmt::Display for ColorChannelMapping {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", *self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -146,26 +118,22 @@ impl TrueColor {
     /// The upper 8-bits are ignored, the next 8-bits are for the red channel, the next 8-bits
     /// afterwards for the green channel, and the lower 8-bits for the blue channel.
     pub fn to_32_bit(&self, mapping: &ColorChannelMapping) -> u32 {
-        self.to_32_bit_resolved(mapping.get_r_g_b_mapping())
+        self.to_32_bit_resolved(mapping.sources())
     }
 
-    /// Same as `to_32_bit`, but takes an already resolved `ColorChannelMapping::get_r_g_b_mapping()`,
-    /// so a conversion of many colors only has to resolve the mapping once.
-    pub(crate) fn to_32_bit_resolved(self, (r_map, g_map, b_map): (char, char, char)) -> u32 {
-        let (r, g, b) = (u32::from(self.get_color(r_map)), u32::from(self.get_color(g_map)), u32::from(self.get_color(b_map)));
+    /// Same as `to_32_bit`, but takes the channels of the mapping (`ColorChannelMapping::sources`) already,
+    /// so a conversion of many colors only has to get them once.
+    pub(crate) fn to_32_bit_resolved(self, [r_source, g_source, b_source]: [Channel; 3]) -> u32 {
+        let (r, g, b) = (u32::from(self.channel(r_source)), u32::from(self.channel(g_source)), u32::from(self.channel(b_source)));
         (r << 16) | (g << 8) | b
     }
 
-    /// The value of the channel `color`, which is `'R'`, `'G'` or `'B'`
-    /// # Panics
-    /// If `color` is another character
-    pub fn get_color(&self, color: char) -> u8 {
-        assert!(color == 'R' || color == 'G' || color == 'B', "Error: color should be equal to R, G, or B, color = {}",color);
-        match color {
-            'R' => self.red,
-            'G' => self.green,
-            'B' => self.blue,
-            _ => 0,
+    /// The value of the channel `channel`
+    pub fn channel(&self, channel: Channel) -> u8 {
+        match channel {
+            Channel::Red => self.red,
+            Channel::Green => self.green,
+            Channel::Blue => self.blue,
         }
     }
 
@@ -277,7 +245,7 @@ mod tests {
                 let n: Vec<char> = name.chars().collect();
                 let expected = (channel(n[0]) << 16) | (channel(n[1]) << 8) | channel(n[2]);
                 assert_eq!(color.to_32_bit(&mapping), expected, "{name} {r},{g},{b}");
-                assert_eq!(color.to_32_bit_resolved(mapping.get_r_g_b_mapping()), expected);
+                assert_eq!(color.to_32_bit_resolved(mapping.sources()), expected);
             }
         }
     }
@@ -298,7 +266,8 @@ mod tests {
             assert_eq!(format!("{:?}", ColorChannelMapping::new(&name.to_lowercase()).unwrap()), name);
             assert_eq!(ColorChannelMapping::new(name).unwrap().to_string(), name);
             assert_eq!(name.parse::<ColorChannelMapping>().unwrap(), ColorChannelMapping::new(name).unwrap());
-            assert_eq!(ColorChannelMapping::new(name).unwrap().get_r_g_b_mapping(), (name.chars().next().unwrap(), name.chars().nth(1).unwrap(), name.chars().nth(2).unwrap()));
+            let letters: Vec<char> = ColorChannelMapping::new(name).unwrap().sources().iter().map(|channel| channel.letter()).collect();
+            assert_eq!(letters, name.chars().collect::<Vec<char>>());
         }
         for invalid in ["", "RG", "RGBA", "XYZ", "R G"] {
             assert!(ColorChannelMapping::new(invalid).is_err(), "{invalid:?}");
@@ -318,7 +287,7 @@ mod tests {
     #[test]
     fn the_channels_of_a_color_are_found_by_letter() {
         let color = TrueColor::new(1, 2, 3);
-        assert_eq!((color.get_color('R'), color.get_color('G'), color.get_color('B')), (1, 2, 3));
+        assert_eq!((color.channel(Channel::Red), color.channel(Channel::Green), color.channel(Channel::Blue)), (1, 2, 3));
         assert_eq!(color.to_32_bit(&ColorChannelMapping::RGB), 0x0001_0203);
         assert_eq!(color.to_32_bit(&ColorChannelMapping::BGR), 0x0003_0201);
     }
@@ -348,4 +317,26 @@ mod tests {
         near(TrueColor::new_from_hsv_colors(999, 1000), (253, 0, 255));
         near(TrueColor::new_from_hsv_colors(1000, 1000), (0, 0, 0));
     }
+
+    #[test]
+    fn the_named_mappings_equal_the_parsed_ones_and_the_error_message_is_unchanged() {
+        assert_eq!(ColorChannelMapping::RGB, ColorChannelMapping::new("RGB").unwrap());
+        assert_eq!(ColorChannelMapping::BGR, ColorChannelMapping::new("bgr").unwrap());
+        assert_ne!(ColorChannelMapping::RGB, ColorChannelMapping::BGR);
+        assert_eq!(ColorChannelMapping::new("XYZ").unwrap_err(), "Invalid r_g_b string, should be a string of length three with characters 'R', 'G' or 'B'");
+        for invalid in ["RGBX", "xRGB", "R\u{df}G", "\u{ff21}GB"] {
+            assert!(ColorChannelMapping::new(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn channels_have_a_letter_and_a_position() {
+        for (channel, letter, index) in [(Channel::Red, 'R', 0), (Channel::Green, 'G', 1), (Channel::Blue, 'B', 2)] {
+            assert_eq!((channel.letter(), channel.index()), (letter, index));
+            assert_eq!(Channel::from_letter(letter), Some(channel));
+        }
+        assert_eq!(Channel::from_letter('r'), None, "the letters are upper case; ColorChannelMapping::new converts the case");
+        assert_eq!(Channel::from_letter('X'), None);
+    }
 }
+

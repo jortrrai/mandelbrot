@@ -26,7 +26,7 @@ use std::time::Duration;
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 
 use crate::auto_iterations::{AutoIterationSettings, AutoPreset};
-use crate::coloring::{ColorChannelMapping, TrueColor};
+use crate::coloring::{Channel, ColorChannelMapping, TrueColor};
 use crate::complex_plane::ComplexPlane;
 use crate::mandelbrot_set::MandelbrotSet;
 use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
@@ -48,9 +48,7 @@ const COLOR_CHANNEL_MAPPINGS: [&str; 27] = [
 
 /// Converts colors to RGB bytes for a texture, applying the color channel mapping while converting; the same colors as `PixelBuffer::colors_to_pixels`
 fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: ColorChannelMapping) -> Vec<u8> {
-    let (red, green, blue) = mapping.get_r_g_b_mapping();
-    let channel_index = |channel: char| match channel { 'R' => 0, 'G' => 1, _ => 2 };
-    let (red, green, blue) = (channel_index(red), channel_index(green), channel_index(blue));
+    let [red, green, blue] = mapping.sources().map(Channel::index);
     let mut rgb: Vec<u8> = Vec::with_capacity(colors.len() * 3);
     for color in colors {
         let channels = [color.red, color.green, color.blue];
