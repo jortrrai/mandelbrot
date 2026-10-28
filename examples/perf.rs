@@ -82,7 +82,7 @@ fn main() {
     println!("CPU: {cpu}, render threads: {}, image: {WIDTH}x{HEIGHT}, runs: {runs} after {WARMUP_RUNS} warmup runs", rendering::render_thread_count());
     println!("The checksums identify the rendered image, they should not change between versions that render the same image.\n");
 
-    for workload in workloads().iter().filter(|w| filter.as_ref().map_or(true, |f| w.name.contains(f.as_str()))) {
+    for workload in workloads().iter().filter(|w| filter.as_ref().is_none_or(|f| w.name.contains(f.as_str()))) {
         for (coloring_name, coloring_function) in [("bernstein", TrueColor::new_from_bernstein_polynomials as fn(u32, u32) -> TrueColor), ("hsv", TrueColor::new_from_hsv_colors)] {
             let label = format!("render {} ({coloring_name}, {} it, {}x)", workload.name, workload.max_iterations, workload.supersampling_amount);
             let checksum = checksum(&render(workload, coloring_function));
@@ -95,7 +95,7 @@ fn main() {
     }
 
     //What the window does after every layer of a progressive render (on the render thread): copy the layer into the buffer, convert it to pixels, and copy both to send them to the window
-    if filter.as_ref().map_or(true, |f| "gui-layers".contains(f.as_str())) {
+    if filter.as_ref().is_none_or(|f| "gui-layers".contains(f.as_str())) {
         let workload = &workloads()[1]; //default view, 4 layers
         let mut c = ComplexPlane::new(WIDTH, HEIGHT);
         c.set_view(&workload.view);
@@ -120,7 +120,7 @@ fn main() {
     }
 
     //Saving at another size than the window renders the whole image into a buffer in one go
-    if filter.as_ref().map_or(true, |f| "save-path".contains(f.as_str())) {
+    if filter.as_ref().is_none_or(|f| "save-path".contains(f.as_str())) {
         let workload = &workloads()[1]; //default view
         let mut c = ComplexPlane::new(WIDTH, HEIGHT);
         c.set_view(&workload.view);
@@ -132,7 +132,7 @@ fn main() {
     }
 
     //Shifting the pixel buffer, which is what a move does before rendering the exposed strip
-    if filter.as_ref().map_or(true, |f| "shift".contains(f.as_str())) {
+    if filter.as_ref().is_none_or(|f| "shift".contains(f.as_str())) {
         let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
         buffer.colors = render(&workloads()[0], TrueColor::new_from_bernstein_polynomials);
         buffer.update_pixels();
@@ -146,7 +146,7 @@ fn main() {
     }
 
     //Color conversion of a whole buffer, including resolving the channel mapping
-    if filter.as_ref().map_or(true, |f| "conversion".contains(f.as_str())) {
+    if filter.as_ref().is_none_or(|f| "conversion".contains(f.as_str())) {
         let colors = render(&workloads()[0], TrueColor::new_from_bernstein_polynomials);
         let mapping = ColorChannelMapping::RGB;
         let pixels = PixelBuffer::colors_to_pixels(&colors, &mapping);

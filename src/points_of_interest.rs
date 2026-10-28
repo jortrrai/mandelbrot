@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn a_valid_file_is_parsed_and_unknown_fields_are_ignored() {
         let (point, warnings) = parse(VALID, "test.json").unwrap();
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(point.name, "Test Place");
         assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200 });
         let appearance = point.appearance.unwrap();
@@ -392,7 +392,7 @@ mod tests {
             assert!(file.starts_with(&format!("{index}-")), "the number of the file is its place, counting from 0");
             assert_eq!(point.name, name);
             assert_eq!(format!("{index}-{}", slugify(&point.name)), file, "the file is named after its number and the display name");
-            assert!(!point.description.is_empty());
+            assert_ne!(point.description, "");
             assert_eq!((point.location.real.to_bits(), point.location.imaginary.to_bits(), point.location.scale.to_bits()), (real.to_bits(), imaginary.to_bits(), scale.to_bits()), "{file}");
             assert!(MAX_ITERATIONS_RANGE.contains(&point.location.max_iterations));
             let appearance = point.appearance.as_ref().expect("the default appearance is written out");
