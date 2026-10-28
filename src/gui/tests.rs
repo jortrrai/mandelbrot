@@ -1186,25 +1186,44 @@ fn a_super_sampled_flight_renders_every_layer_of_every_frame() {
 }
 
 #[test]
-fn with_auto_iterations_the_limit_follows_the_zoom_of_every_frame_of_a_flight() {
+fn with_auto_iterations_the_limit_follows_the_zoom_of_a_flight_and_reaches_the_limit_of_the_destination() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     app.auto_iterations = true;
     app.flight_rendering = super::flight::FlightRendering::BestEffort;
     app.render("Auto iterations");
     wait_for_job(&mut app);
+    let start_limit = app.m.max_iterations;
     app.go_to_point_of_interest(0);
+    app.flight.as_mut().unwrap().limits.as_mut().unwrap().wait_for_destination();
+    //What auto iterations chooses at the destination (the render on arrival runs exactly this)
+    let location = &app.points[0].location;
+    let mut destination = ComplexPlane::new(64, 48);
+    destination.set_view(&View::new(location.real, location.imaginary, location.scale));
+    let mut m = app.m.clone();
+    let initial = app.auto_settings.initial_limit(destination.get_scale());
+    (m.max_iterations, m.palette_scale) = (initial, Some(initial));
+    let destination_limit = crate::auto_iterations::choose_limit(&destination, &m, 64, 48, &app.auto_settings, 2, &std::sync::atomic::AtomicBool::new(false)).unwrap().limit;
+    assert!(destination_limit > initial, "the probes raise the limit above the zoom rule here: {destination_limit} > {initial}");
+
     let start = app.flight.as_ref().unwrap().last_frame;
     let duration = app.flight.as_ref().unwrap().flight.duration();
     let mut limits = Vec::new();
-    for step in 1..=4 {
-        app.fly_at(start + duration.mul_f64(f64::from(step) / 5.0));
-        let expected = app.auto_settings.initial_limit(app.c.get_scale());
-        assert_eq!((app.m.max_iterations, app.m.palette_scale), (expected, Some(expected)), "frame {step} at scale {}", app.c.get_scale());
-        limits.push(app.m.max_iterations);
+    for share in [0.2, 0.4, 0.6, 0.8, 0.9999] {
+        app.fly_at(start + duration.mul_f64(share));
+        let scale = app.c.get_scale();
+        assert_eq!(app.m.palette_scale, Some(app.auto_settings.initial_limit(scale)), "the palette of the zoom, as auto iterations uses it");
+        limits.push((scale, app.m.max_iterations));
         wait_for_job(&mut app);
-        assert_eq!(app.m.max_iterations, expected, "the frame is rendered with it");
+        assert_eq!(app.m.max_iterations, limits.last().unwrap().1, "the frame is rendered with it");
     }
-    assert!(limits.windows(2).all(|pair| pair[0] <= pair[1]) && limits[0] < limits[3], "zooming in raises the limit: {limits:?}");
+    assert!(limits.windows(2).all(|pair| pair[0].1 <= pair[1].1), "zooming in raises the limit: {limits:?}");
+    let (last_scale, last_limit) = *limits.last().unwrap();
+    assert!((last_scale / destination.get_scale() - 1.0).abs() < 0.01 && (f64::from(last_limit) / f64::from(destination_limit) - 1.0).abs() < 0.02, "near the destination the limit is the destination's: {last_limit} for {destination_limit}");
+    assert!(f64::from(limits[0].1) >= f64::from(start_limit) * 0.99, "and it starts from the limit of the start: {limits:?}, {start_limit}");
+
+    //The arrival: the same limit, no jump
+    finish_flight(&mut app);
+    assert_eq!(app.m.max_iterations, destination_limit);
     let _ = std::fs::remove_dir_all(folder);
 }
 
@@ -1212,5 +1231,27 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_every_frame_of_a_flight() 
 fn every_point_of_interest_shows_its_zoom_in_the_list() {
     let (app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     assert_eq!(super::points::point_zoom_text(&app.points[0]), "Zoom \u{d7}15,625", "scale 0.000064");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn the_markers_of_the_points_of_interest_are_at_their_locations_and_only_inside_the_view() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    assert!(!app.show_points, "off by default");
+    let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(640.0, 480.0));
+    //The default view: the place is inside it, at the pixel of its location
+    let markers = super::points::marker_positions(&app.points, &app.c, rect);
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].0, "Test Place");
+    let location = &app.points[0].location;
+    let pixel = |plane: &ComplexPlane, position: egui::Pos2| {
+        let (x, y) = (f64::from((position.x - rect.min.x) / rect.width()) * 64.0, f64::from((position.y - rect.min.y) / rect.height()) * 48.0);
+        plane.complex_from_pixel_plane(x, y)
+    };
+    let at = pixel(&app.c, markers[0].1);
+    assert!((at.x - location.real).abs() < 1e-5 && (at.y - location.imaginary).abs() < 1e-5, "{at:?}");
+    //A view far away from it: no marker
+    app.c.set_view(&View::new(0.3, 0.6, 0.01));
+    assert_eq!(super::points::marker_positions(&app.points, &app.c, rect).len(), 0);
     let _ = std::fs::remove_dir_all(folder);
 }

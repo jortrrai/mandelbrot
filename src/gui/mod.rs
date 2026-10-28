@@ -135,6 +135,8 @@ pub struct MandelbrotApp {
     thumbs_visible: Vec<u64>,
     /// Whether going to a point of interest also restores the appearance saved in its file (the coloring and the color channels); off by default
     restore_appearance: bool,
+    /// Whether the saved points of interest are marked on the view at their locations, with their names (off by default)
+    show_points: bool,
     /// How a flight to a point of interest goes (the shortest route by default) and how fast (fast by default), and the flight that is under way, see `flight`
     route: flight::Route,
     pace: flight::Pace,
@@ -225,6 +227,7 @@ impl MandelbrotApp {
             thumbs_visible: Vec::new(),
             points_folder: std::path::PathBuf::new(),
             restore_appearance: false,
+            show_points: false,
             route: flight::Route::Shortest,
             pace: flight::Pace::Fast,
             flight: None,
@@ -314,6 +317,9 @@ impl MandelbrotApp {
         //The image of the last render, at its place in the current view (the whole rectangle when they are the same view, or when the view is held, see `drawn_fraction`)
         let target = transform::rect_of(self.drawn_fraction(), rect);
         ui.painter_at(rect).image(texture.id(), target, self.texture_uv, Color32::WHITE);
+        if self.show_points {
+            points::draw_markers(&ui.painter_at(rect), &points::marker_positions(&self.points, self.displayed_plane(), rect));
+        }
         self.handle_image_pointer(ui, &response, size);
         available
     }
