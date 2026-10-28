@@ -58,6 +58,15 @@ impl SampleState {
         SampleState::default()
     }
 
+    /// A state of the same view, settings and sample placement without any samples: rendering it gives the image that this state would have if it had never been
+    /// interrupted or moved, to compare with in tests
+    #[cfg(test)]
+    pub(super) fn emptied(&self) -> SampleState {
+        let mut empty = self.clone();
+        empty.counts.fill(0);
+        empty
+    }
+
     /// How many samples the pixel `(x, y)` has
     pub fn samples(&self, x: usize, y: usize) -> u8 {
         self.counts.get(y * self.width + x).copied().unwrap_or(0)

@@ -490,3 +490,50 @@ fn other_settings_or_a_zoom_start_over() {
     let (colors, _) = resumed(&mut state, &zoomed, &other_limit, 3, None, None, None);
     assert_eq!(colors, resumed(&mut SampleState::new(), &zoomed, &other_limit, 3, None, None, None).0, "so does a zoom");
 }
+
+#[test]
+fn any_sequence_of_moves_and_interruptions_ends_in_the_complete_image() {
+    //Random sequences of moves (by up to 20 pixels each way) and interruptions (after a random pass, in the middle of a pass after a random amount of pixels, or none),
+    //ended by one render that completes. The result is compared with a render of the last view from nothing, with the same placement of the samples:
+    //every pixel has at least its samples, and a pixel with the same amount of samples has exactly the same color
+    let (w, h) = (48, 32);
+    let (c, m) = boundary_plane(w, h);
+    let mut random = 0x5EED_u64;
+    let mut next = |below: u64| {
+        random = splitmix64(random);
+        random % below
+    };
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        for sequence in 0..12 {
+            let mut state = SampleState::new();
+            let mut plane = c.clone();
+            for _ in 0..=next(5) {
+                let (after_pass, after_pixels) = match next(3) {
+                    0 => (Some(1 + next(5) as u8), None),
+                    1 => (None, Some(1 + next(1500) as usize)),
+                    _ => (None, None),
+                };
+                let _ = resumed(&mut state, &plane, &m, 6, adaptive, after_pass, after_pixels);
+                translate_complex_plane_by_pixels(&mut plane, next(41) as i16 - 20, next(41) as i16 - 20);
+            }
+            let (colors, completed) = resumed(&mut state, &plane, &m, 6, adaptive, None, None);
+            assert!(completed);
+            let mut fresh = state.emptied();
+            let (expected, _) = resumed(&mut fresh, &plane, &m, 6, adaptive, None, None);
+            let mut same = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let (has, needs) = (state.samples(x, y), fresh.samples(x, y));
+                    assert!(has >= needs, "sequence {sequence}, adaptive {adaptive:?}: ({x}, {y}) has {has} of its {needs} samples");
+                    if has == needs {
+                        assert_eq!(colors[y * w + x], expected[y * w + x], "sequence {sequence}, adaptive {adaptive:?}, ({x}, {y})");
+                        same += 1;
+                    }
+                }
+            }
+            if adaptive.is_none() {
+                assert_eq!(same, w * h, "without adaptive supersampling every pixel has exactly its samples");
+            }
+        }
+    }
+}

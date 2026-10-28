@@ -143,6 +143,49 @@ fn main() {
         }
     }
 
+    //What the window does: one sample state that every render continues (`Render::resume`), next to the plain render and the old strip render of a move
+    if filter.as_ref().is_none_or(|f| "window-state".contains(f.as_str())) {
+        let m = MandelbrotSet::new(1000, 2.0);
+        let coloring = TrueColor::new_from_bernstein_polynomials as fn(u32, u32) -> TrueColor;
+        let views = [View::new(-0.75, 0.0, 1.0), View::new(-0.75, 0.0, 0.9)].map(|view| {
+            let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+            c.set_view(&view);
+            c
+        });
+        //A zoom: the state starts over, in the memory of the last render
+        let mut zoom = 0;
+        summarize("window zoom (1x): plain render", time_runs(runs, || {
+            zoom += 1;
+            Render::new(&views[zoom % 2], &m, WIDTH, HEIGHT, coloring).run(|colors, _| { std::hint::black_box(colors.to_vec()); });
+        }));
+        let mut state = rendering::SampleState::new();
+        summarize("window zoom (1x): render with a sample state", time_runs(runs, || {
+            zoom += 1;
+            Render::new(&views[zoom % 2], &m, WIDTH, HEIGHT, coloring).resume(&mut state).run(|colors, _| { std::hint::black_box(colors.to_vec()); });
+        }));
+        //Moves of 10 rows, up and down in turn, after a complete render
+        let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
+        Render::new(&views[0], &m, WIDTH, HEIGHT, coloring).supersampling(4).run(|colors, _| buffer.colors.copy_from_slice(colors));
+        let mut plane = views[0].clone();
+        let mut up = false;
+        summarize("window move 10 rows (4x): old strip render", time_runs(runs, || {
+            up = !up;
+            let rows: i16 = if up { 10 } else { -10 };
+            rendering::translate_complex_plane_by_pixels(&mut plane, rows, 0);
+            buffer.translate_buffer(i128::from(rows), 0);
+            let region = rendering::ExposedRegion::from_shift(WIDTH, HEIGHT, i128::from(rows), 0).unwrap();
+            let base = buffer.colors.clone();
+            Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).only(&region, &base).run(|colors, _| { buffer.colors.copy_from_slice(colors); std::hint::black_box(colors.to_vec()); });
+        }));
+        let mut plane = views[0].clone();
+        Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).resume(&mut state).run(|_, _| {});
+        summarize("window move 10 rows (4x): continued samples", time_runs(runs, || {
+            up = !up;
+            rendering::translate_complex_plane_by_pixels(&mut plane, if up { 10 } else { -10 }, 0);
+            Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).resume(&mut state).run(|colors, _| { std::hint::black_box(colors.to_vec()); });
+        }));
+    }
+
     //Saving at another size than the window renders the whole image into a buffer in one go
     if filter.as_ref().is_none_or(|f| "save-path".contains(f.as_str())) {
         let workload = &workloads()[1]; //default view

@@ -64,7 +64,7 @@ impl MandelbrotApp {
             let rows_up = whole_pixels(drag.y, &mut self.drag_remainder.1, points_per_pixel);
             if columns != 0 || rows_up != 0 {
                 rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns);
-                self.render_moved("Moved by dragging", (i128::from(rows_up), -i128::from(columns)));
+                self.render_moved("Moved by dragging");
             }
         } else {
             self.drag_remainder = (0.0, 0.0);
