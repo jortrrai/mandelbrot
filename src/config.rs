@@ -32,13 +32,15 @@ pub struct Config {
     pub image_height: usize,
     /// Whether the window starts with the render size following the size of the window (always, except in tests that need a fixed small size)
     pub fit_window: bool,
+    /// Whether the window opens the GPU to help with rendering (always, except in tests, which then stay quick)
+    pub gpu: bool,
 }
 
 
 impl Default for Config {
     /// The settings the window starts with
     fn default() -> Config {
-        Config { window_width: WIDTH, window_height: HEIGHT, max_iterations: MAX_ITERATIONS, orbit_radius: ORBIT_RADIUS, supersampling_amount: SUPERSAMPLING_AMOUNT, image_width: WIDTH, image_height: HEIGHT, fit_window: true }
+        Config { window_width: WIDTH, window_height: HEIGHT, max_iterations: MAX_ITERATIONS, orbit_radius: ORBIT_RADIUS, supersampling_amount: SUPERSAMPLING_AMOUNT, image_width: WIDTH, image_height: HEIGHT, fit_window: true, gpu: true }
     }
 }
 
@@ -47,7 +49,7 @@ impl Config {
     /// for tests that need a small, fast window
     #[cfg(test)]
     pub(crate) fn sized(width: usize, height: usize, max_iterations: u32, supersampling_amount: u8) -> Config {
-        Config { window_width: width, window_height: height, image_width: width, image_height: height, max_iterations, supersampling_amount, fit_window: false, ..Config::default() }
+        Config { window_width: width, window_height: height, image_width: width, image_height: height, max_iterations, supersampling_amount, fit_window: false, gpu: false, ..Config::default() }
     }
 }
 
@@ -61,6 +63,7 @@ mod tests {
         assert_eq!((config.window_width, config.window_height, config.image_width, config.image_height), (1200, 800, 1200, 800));
         assert_eq!((config.max_iterations, config.supersampling_amount, config.orbit_radius), (1000, 32, 2.0));
         assert!(config.fit_window, "the render size follows the window");
+        assert!(config.gpu, "the window opens the GPU");
     }
 
     #[test]
@@ -68,5 +71,6 @@ mod tests {
         let config = Config::sized(64, 48, 50, 3);
         assert_eq!((config.window_width, config.window_height, config.image_width, config.image_height, config.max_iterations, config.supersampling_amount), (64, 48, 64, 48, 50, 3));
         assert!(!config.fit_window);
+        assert!(!config.gpu, "tests do not open the GPU");
     }
 }
