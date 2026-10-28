@@ -15,7 +15,7 @@ use crate::rendering::{self, ExposedRegion};
 use crate::rendering::Render;
 use eframe::egui;
 
-use super::{transform, MandelbrotApp};
+use super::MandelbrotApp;
 
 
 /// A preview of a new view is only shown if the first layer is expected to take longer than this, about a frame: a faster first layer is shown directly, see `Render::preview`
@@ -147,7 +147,7 @@ impl MandelbrotApp {
     /// During a drag the image on the screen is always shifted, whatever its quality, by the distance between its view and the new one: the full-quality render follows when the drag stops.
     pub(super) fn render_moved(&mut self, message: &str, shift: (i128, i128)) {
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
-        let shift = if self.gesture_active { transform::pixel_shift(&self.shown_plane, &self.c) } else { (self.progress.is_none() && self.buffer_is_complete).then_some(shift) };
+        let shift = if self.gesture_active { rendering::pixel_shift(&self.shown_plane, &self.c) } else { (self.progress.is_none() && self.buffer_is_complete).then_some(shift) };
         let strip = shift.and_then(|shift| ExposedRegion::from_shift(width, height, shift.0, shift.1).map(|region| (shift, region)));
         self.start_render(message, strip);
     }
@@ -179,7 +179,7 @@ impl MandelbrotApp {
         self.buffer_is_complete = false;
         self.settle = during_gesture.then(|| (message.to_string(), Instant::now()));
         //Whether the screen already shows a full layer of this view (e.g. the last render of a gesture): then previews would only make it coarser again
-        let layer_on_screen = self.layer_shown && transform::pixel_shift(&self.shown_plane, &self.c) == Some((0, 0));
+        let layer_on_screen = self.layer_shown && rendering::pixel_shift(&self.shown_plane, &self.c) == Some((0, 0));
         self.layer_shown = false;
         self.previews_received = 0;
         let (sender, receiver) = mpsc::channel();

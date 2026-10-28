@@ -23,18 +23,6 @@ pub(super) fn shown_rect(shown: &ComplexPlane, wanted: &ComplexPlane, image_rect
     egui::Rect::from_min_max(image_rect.lerp_inside(fraction.min.to_vec2()), image_rect.lerp_inside(fraction.max.to_vec2()))
 }
 
-/// The shift of the buffer that turns the image of `shown` into the image of `wanted`, as `(rows_up, columns_right)` for `PixelBuffer::translate_buffer`,
-/// if `wanted` is `shown` moved by whole pixels (the same size and zoom); `None` otherwise. Unlike the move of one frame, this also covers several moves whose renders were interrupted.
-pub(super) fn pixel_shift(shown: &ComplexPlane, wanted: &ComplexPlane) -> Option<(i128, i128)> {
-    //A move keeps the size of the pixels exactly (`ComplexPlane::translate` only adds to the bounds), a zoom or a resize changes it
-    let same_size = |a: f64, b: f64| a.to_bits() == b.to_bits();
-    let same_grid = same_size(shown.increment_x, wanted.increment_x) && same_size(shown.increment_y, wanted.increment_y) && same_size(shown.length_x, wanted.length_x) && same_size(shown.length_y, wanted.length_y);
-    let columns = (wanted.min_x - shown.min_x) / wanted.increment_x;
-    let rows_up = (shown.min_y - wanted.min_y) / wanted.increment_y;
-    let whole = |value: f64| (value - value.round()).abs() < 1e-6 && value.abs() < 1e9;
-    (same_grid && whole(columns) && whole(rows_up)).then(|| (rows_up.round() as i128, -(columns.round() as i128)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,13 +86,13 @@ mod tests {
         let old = plane();
         let mut new = old.clone();
         rendering::translate_complex_plane_by_pixels(&mut new, 3, -7);
-        assert_eq!(pixel_shift(&old, &new), Some((3, 7)), "the same shift that a drag gives `render_moved`");
+        assert_eq!(rendering::pixel_shift(&old, &new), Some((3, 7)), "the same shift that a drag gives `render_moved`");
         rendering::translate_complex_plane_by_pixels(&mut new, -10, 25);
-        assert_eq!(pixel_shift(&old, &new), Some((-7, -18)));
-        assert_eq!(pixel_shift(&old, &old), Some((0, 0)));
+        assert_eq!(rendering::pixel_shift(&old, &new), Some((-7, -18)));
+        assert_eq!(rendering::pixel_shift(&old, &old), Some((0, 0)));
         let mut zoomed = old.clone();
         zoomed.scale(0.9);
-        assert_eq!(pixel_shift(&old, &zoomed), None, "a zoom is not a shift");
-        assert_eq!(pixel_shift(&old, &old.resized(1300, 800)), None, "neither is a resize");
+        assert_eq!(rendering::pixel_shift(&old, &zoomed), None, "a zoom is not a shift");
+        assert_eq!(rendering::pixel_shift(&old, &old.resized(1300, 800)), None, "neither is a resize");
     }
 }
