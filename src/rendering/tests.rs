@@ -571,3 +571,19 @@ fn a_preview_of_the_strip_a_move_exposed_has_no_gaps() {
         }
     }
 }
+
+#[test]
+fn a_color_table_built_on_all_threads_is_the_table_of_one_thread() {
+    for coloring in [TrueColor::new_from_bernstein_polynomials as fn(u32, u32) -> TrueColor, TrueColor::new_from_hsv_colors] {
+        for (limit, palette) in [(100, None), (40_000, Some(2043)), (65_376, Some(2043)), (200_000, None)] {
+            let mut m = MandelbrotSet::new(limit, 2.0);
+            m.palette_scale = palette;
+            let table = super::progressive::color_table(&m, coloring);
+            assert_eq!(table.len(), limit as usize + 1);
+            assert!(table.iter().enumerate().all(|(iterations, color)| {
+                let expected = m.color(coloring, iterations as u32);
+                (color.red, color.green, color.blue) == (expected.red, expected.green, expected.blue)
+            }), "limit {limit}");
+        }
+    }
+}

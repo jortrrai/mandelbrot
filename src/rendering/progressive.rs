@@ -152,7 +152,7 @@ impl<'a> Render<'a> {
         }
         let total: usize = pending.iter().sum();
         //The color of a pixel only depends on its iteration count, which is at most `max_iterations`, so compute every color once
-        let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| (0..=m.max_iterations).map(|iterations| m.color(coloring_function, iterations)).collect());
+        let color_table: Option<Vec<TrueColor>> = (m.max_iterations <= MAX_COLOR_TABLE_ITERATIONS).then(|| color_table(m, coloring_function));
         let color_of = |position: f64| m.interpolated_color(position, |iterations| color_table.as_ref().map_or_else(|| m.color(coloring_function, iterations), |table| table[iterations as usize]));
         //The pixels whose first sample the previews computed, empty without previews
         let mut has_first: Vec<bool> = Vec::new();
@@ -270,6 +270,31 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
             }
         });
     processed.into_inner()
+}
+
+/// Large color tables are built on all render threads. Starting the threads costs about 0.17 ms, so below this many entries one thread is as fast or faster
+/// (measured: 20,000 Bernstein entries take 0.08 ms on one thread and 0.18 ms on all; at 65,376 entries both take about 0.2 ms)
+const PARALLEL_COLOR_TABLE_ENTRIES: usize = 50_000;
+
+/// The color of every iteration count from 0 to `max_iterations` of `m`. Every entry is independent of the others, so the table is the same however it is split.
+/// Measured on 16 threads, one thread and all threads: 65,376 HSV entries 0.75 and 0.23 ms; 200,000 entries 0.64 and 0.24 ms (Bernstein), 2.45 and 0.45 ms (HSV).
+pub(super) fn color_table(m: &MandelbrotSet, coloring_function: fn(u32, u32) -> TrueColor) -> Vec<TrueColor> {
+    let entries = m.max_iterations as usize + 1;
+    if entries < PARALLEL_COLOR_TABLE_ENTRIES {
+        return (0..=m.max_iterations).map(|iterations| m.color(coloring_function, iterations)).collect();
+    }
+    let mut table = vec![TrueColor::new(0, 0, 0); entries];
+    let chunk = entries.div_ceil(render_thread_count());
+    thread::scope(|scope| {
+        for (index, part) in table.chunks_mut(chunk).enumerate() {
+            scope.spawn(move || {
+                for (offset, color) in part.iter_mut().enumerate() {
+                    *color = m.color(coloring_function, (index * chunk + offset) as u32);
+                }
+            });
+        }
+    });
+    table
 }
 
 /// The color of the sum of one sample
