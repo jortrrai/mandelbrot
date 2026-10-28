@@ -820,3 +820,110 @@ fn dragging_moves_the_view_and_the_wheel_zooms_around_the_cursor() {
     let after = app.c.complex_from_pixel_plane(100.0, 20.0);
     assert!((after.x - under_cursor.x).abs() < 1e-9 && (after.y - under_cursor.y).abs() < 1e-9, "{after:?} {under_cursor:?}");
 }
+
+#[test]
+fn the_last_image_follows_a_new_view_until_the_render_of_that_view_arrives() {
+    let config = Config::build(["mandelbrot", "120", "80", "100", "1"].map(String::from).into_iter()).unwrap();
+    let mut app = manual_app(&config);
+    let full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    assert_eq!(super::transform::shown_fraction(&app.shown_plane, &app.c), full);
+
+    //Move 12 columns to the right: until the new render shows a layer, the old image is drawn 12 columns (a tenth of the image) to the left
+    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 12);
+    app.render_moved("Moved", (0, -12));
+    let moved = super::transform::shown_fraction(&app.shown_plane, &app.c);
+    assert!((moved.min.x + 0.1).abs() < 1e-5 && moved.min.y.abs() < 1e-5, "{moved:?}");
+    wait_for_job(&mut app);
+    let after = super::transform::shown_fraction(&app.shown_plane, &app.c);
+    assert!((after.min - full.min).length() < 1e-5 && (after.max - full.max).length() < 1e-5, "the rendered image fills the view again: {after:?}");
+}
+
+#[test]
+fn a_wheel_zoom_renders_quickly_with_a_steady_limit_and_the_full_quality_follows_when_it_stops() {
+    let ctx = egui::Context::default();
+    let config = Config::build(["mandelbrot", "120", "80", "100", "6"].map(String::from).into_iter()).unwrap();
+    let mut app = MandelbrotApp::new(&config); //Auto iterations and adaptive supersampling are on by default
+    wait_for_job(&mut app);
+    let limit = app.m.max_iterations;
+
+    //Zooming with the wheel: the first layer only, with the limit of the image that is shown
+    app.gesture_active = true;
+    app.c.scale(0.5);
+    app.render("Zoomed in with the wheel");
+    assert_eq!(app.bars.as_ref().unwrap().total_layers, 1);
+    assert!(!app.limit_pending);
+    wait_for_job(&mut app);
+    assert_eq!(app.m.max_iterations, limit, "no auto iterations probes during the gesture");
+    assert!(!app.buffer_is_complete, "the image of a gesture does not have the full quality");
+    app.settle_gesture(&ctx);
+    assert!(!app.is_busy(), "the full-quality render waits while the gesture goes on");
+
+    //The wheel stops: the full-quality render starts, chooses the limit again, and shows no previews over the layer that is on the screen
+    app.gesture_active = false;
+    app.settle_gesture(&ctx);
+    assert!(app.is_busy() && app.settle.is_none());
+    assert_eq!(app.bars.as_ref().unwrap().total_layers, 6);
+    wait_for_job(&mut app);
+    assert!(app.buffer_is_complete);
+    assert!(app.log.last().unwrap().starts_with("Zoomed in with the wheel (auto iterations: limit "), "{:?}", app.log.last());
+}
+
+#[test]
+fn a_drag_shifts_the_shown_image_even_when_its_render_was_interrupted() {
+    let config = Config::build(["mandelbrot", "120", "80", "100", "4"].map(String::from).into_iter()).unwrap();
+    let mut app = manual_app(&config);
+    app.gesture_active = true;
+    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 5);
+    app.render_moved("Moved by dragging", (0, -5));
+    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 5 * 80, "the first move renders its strip");
+    //The next frame of the drag interrupts that render: the image on the screen is still the old one, so the strip covers both moves
+    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 2, 4);
+    app.render_moved("Moved by dragging", (2, -4));
+    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 9 * 80 + 2 * 120 - 9 * 2, "9 columns and 2 rows, the old image shifted");
+    wait_for_job(&mut app);
+
+    //The drag stops: the whole view is rendered with the full quality, and equals a render of that view from scratch
+    app.gesture_active = false;
+    app.settle_gesture(&egui::Context::default());
+    wait_for_job(&mut app);
+    assert!(app.buffer_is_complete);
+    let mut direct = PixelBuffer::new(PixelPlane::new(120, 80));
+    crate::rendering::render_complex_plane_into_buffer(&mut direct, &app.c, &app.m, 4, app.coloring_function);
+    assert!(app.p.colors.iter().zip(&direct.colors).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "the settled image is the image of the view");
+}
+
+#[test]
+fn a_coarse_preview_is_uploaded_with_one_texel_per_block_centered_on_its_pixel() {
+    let (width, height, block) = (10, 6, 4);
+    let colors: Vec<TrueColor> = (0..width * height).map(|i| TrueColor::new(i as u8, 0, 0)).collect();
+    let (image, uv) = coarse_texture(&colors, ColorChannelMapping::RGB, width, height, block);
+    assert_eq!(image.size, [3, 2], "the last blocks are partial");
+    assert_eq!(image.pixels[1].r(), 4, "texel (1, 0) is the color of pixel (4, 0)");
+    assert_eq!(image.pixels[3 + 2].r(), (4 * width + 8) as u8, "texel (2, 1) is pixel (8, 4)");
+    //Drawn over the whole image, the center of pixel 4 (x = 4.5) shows the center of texel 1, and the center of row 4 the center of texel row 1
+    let u = |x: f32| uv.min.x + (uv.max.x - uv.min.x) * x / width as f32;
+    let v = |y: f32| uv.min.y + (uv.max.y - uv.min.y) * y / height as f32;
+    assert!((u(4.5) - 1.5 / 3.0).abs() < 1e-6 && (u(0.5) - 0.5 / 3.0).abs() < 1e-6, "{uv:?}");
+    assert!((v(4.5) - 1.5 / 2.0).abs() < 1e-6, "{uv:?}");
+}
+
+#[test]
+fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives() {
+    let config = Config::build(["mandelbrot", "64", "40", "100", "1"].map(String::from).into_iter()).unwrap();
+    let mut app = manual_app(&config);
+    let ctx = egui::Context::default();
+    //Stand in for a render job of the whole view that reports three previews and a layer
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.job = Some(receiver);
+    app.previews_received = 0;
+    let colors = app.p.colors.clone();
+    let mut sizes = Vec::new();
+    for pass in [0, 0, 0, 1] {
+        sender.send(JobMessage::Pass { colors: colors.clone(), plane: app.c.clone(), pass, total: 1, layer_time: Duration::ZERO }).unwrap();
+        app.poll_job();
+        app.update_texture(&ctx);
+        sizes.push((app.preview_block, app.texture.as_ref().unwrap().size()));
+    }
+    assert_eq!(sizes, [(8, [8, 5]), (4, [16, 10]), (2, [32, 20]), (1, [64, 40])]);
+    assert_eq!(app.texture_uv, FULL_TEXTURE);
+}

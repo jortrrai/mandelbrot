@@ -285,3 +285,61 @@ fn the_jitter_of_a_sample_never_changes() {
         assert_eq!((actual_x.to_bits(), actual_y.to_bits()), (jitter_x, jitter_y), "pixel ({x}, {y}), sample {sample}: {actual_x:?}, {actual_y:?}");
     }
 }
+
+/// Every image that a render reported, with its pass number
+type Reports = Vec<(u8, Vec<(u8, u8, u8)>)>;
+
+/// Renders with or without previews; returns every reported image with its pass number, and whether the render completed
+#[allow(clippy::too_many_arguments)] // A test helper: the arguments are the settings of one render, like `adaptive_render`
+fn preview_render(c: &ComplexPlane, m: &MandelbrotSet, w: usize, h: usize, region: &ExposedRegion, base: &[TrueColor], samples: u8, preview: Option<std::time::Duration>, cancel: &AtomicBool) -> (Reports, bool) {
+    let mut reports = Vec::new();
+    let adaptive = Some(AdaptiveSampling::default());
+    let done = Render::new(c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).only(region, base).preview(preview).cancel_with(cancel).run(|colors, pass| reports.push((pass, colors.iter().map(|c| (c.red, c.green, c.blue)).collect())));
+    (reports, done)
+}
+
+#[test]
+fn previews_do_not_change_the_layers_and_come_coarse_to_fine_before_them() {
+    let (w, h) = (61, 37); //Not a multiple of the block sizes
+    let (c, m) = boundary_plane(w, h);
+    let never = AtomicBool::new(false);
+    let base = vec![TrueColor::new(9, 9, 9); w * h];
+    for region in [ExposedRegion::full(w, h), ExposedRegion::from_shift(w, h, 5, -11).unwrap()] {
+        let (plain, done) = preview_render(&c, &m, w, h, &region, &base, 4, None, &never);
+        assert!(done);
+        //A zero threshold reports every level
+        let (with_previews, done) = preview_render(&c, &m, w, h, &region, &base, 4, Some(std::time::Duration::ZERO), &never);
+        assert!(done);
+        let passes: Vec<u8> = with_previews.iter().map(|(pass, _)| *pass).collect();
+        assert_eq!(passes, [0, 0, 0, 1, 2, 3, 4]);
+        assert_eq!(with_previews[3..], plain[..], "the layers are identical with and without previews");
+
+        //In a preview, a block shows the first sample of its top-left pixel: exactly the color of that pixel in the first layer. Pixels outside the region keep the base
+        let first_layer = &plain[0].1;
+        for (level, block) in [8, 4, 2].into_iter().enumerate() {
+            let preview = &with_previews[level].1;
+            for y in 0..h {
+                for x in 0..w {
+                    let (ox, oy) = (x - x % block, y - y % block);
+                    let expected = if !region.contains(x, y) { (9, 9, 9) } else if region.contains(ox, oy) { first_layer[oy * w + ox] } else { preview[y * w + x] };
+                    assert_eq!(preview[y * w + x], expected, "block {block}, pixel ({x}, {y})");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_fast_render_skips_the_previews_and_a_cancelled_preview_cancels_the_render() {
+    let (w, h) = (64, 48);
+    let (c, m) = boundary_plane(w, h);
+    let base = vec![TrueColor::new(0, 0, 0); w * h];
+    let region = ExposedRegion::full(w, h);
+    //A tiny image is much faster than an hour: no previews, the same layers
+    let (reports, done) = preview_render(&c, &m, w, h, &region, &base, 2, Some(std::time::Duration::from_secs(3600)), &AtomicBool::new(false));
+    assert!(done);
+    assert_eq!(reports.iter().map(|(pass, _)| *pass).collect::<Vec<u8>>(), [1, 2]);
+    assert_eq!(reports, preview_render(&c, &m, w, h, &region, &base, 2, None, &AtomicBool::new(false)).0);
+    let (reports, done) = preview_render(&c, &m, w, h, &region, &base, 2, Some(std::time::Duration::ZERO), &AtomicBool::new(true));
+    assert!(!done && reports.is_empty());
+}
