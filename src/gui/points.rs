@@ -77,27 +77,59 @@ impl FlightLimits {
 }
 
 
-/// Where the points of interest are on the screen when the view `plane` fills `image_rect`: the name and the position of every point inside the image
-pub(super) fn marker_positions(points: &[PointOfInterest], plane: &ComplexPlane, image_rect: egui::Rect) -> Vec<(String, egui::Pos2)> {
+/// The colors of depth, from the shallowest place of the list to the deepest: cool to hot, so a glance tells shallow (fast) from deep (slow)
+const DEPTH_COLORS: [(u8, u8, u8); 4] = [(80, 150, 255), (60, 205, 170), (255, 190, 60), (255, 85, 75)];
+
+/// How deep the places of the list are compared with each other: the zoom of every place on a log scale between the shallowest and the deepest place
+pub(super) struct DepthScale {
+    shallowest: f64,
+    deepest: f64,
+}
+
+impl DepthScale {
+    /// The scale of the places `points`
+    pub(super) fn of(points: &[PointOfInterest]) -> DepthScale {
+        let depths = points.iter().map(|point| -point.location.scale.ln());
+        DepthScale { shallowest: depths.clone().fold(f64::INFINITY, f64::min), deepest: depths.fold(f64::NEG_INFINITY, f64::max) }
+    }
+
+    /// The color of the depth of `point`: the first of `DEPTH_COLORS` for the shallowest place (and when all places are equally deep), the last for the deepest,
+    /// and a blend of the two nearest colors in between
+    pub(super) fn color(&self, point: &PointOfInterest) -> Color32 {
+        let range = self.deepest - self.shallowest;
+        let t = if range > 0.0 { ((-point.location.scale.ln() - self.shallowest) / range).clamp(0.0, 1.0) } else { 0.0 };
+        let at = t * (DEPTH_COLORS.len() - 1) as f64;
+        let (index, weight) = ((at.floor() as usize).min(DEPTH_COLORS.len() - 2), at - at.floor().min((DEPTH_COLORS.len() - 2) as f64));
+        let (from, to) = (DEPTH_COLORS[index], DEPTH_COLORS[index + 1]);
+        let mix = |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * weight).round() as u8;
+        Color32::from_rgb(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+    }
+}
+
+/// Where the points of interest are on the screen when the view `plane` fills `image_rect`: the name, the position and the depth color (see `DepthScale`) of every
+/// point inside the image
+pub(super) fn marker_positions(points: &[PointOfInterest], plane: &ComplexPlane, image_rect: egui::Rect) -> Vec<(String, egui::Pos2, Color32)> {
     let (width, height) = ((plane.length_x / plane.increment_x).round(), (plane.length_y / plane.increment_y).round());
+    let depth = DepthScale::of(points);
     points.iter().filter_map(|point| {
         //The pixel of the point (see `ComplexPlane::complex_from_pixel_plane`: the screen y is the negative of the imaginary part)
         let x = (point.location.real - plane.min_x) / plane.increment_x;
         let y = (-point.location.imaginary - plane.min_y) / plane.increment_y;
         let position = image_rect.lerp_inside(egui::vec2((x / width) as f32, (y / height) as f32));
-        image_rect.contains(position).then(|| (point.name.clone(), position))
+        image_rect.contains(position).then(|| (point.name.clone(), position, depth.color(point)))
     }).collect()
 }
 
-/// Draws the markers of `marker_positions`: small, semi-transparent circles with a soft glow and the names next to them, subtle so they do not hide the fractal
-pub(super) fn draw_markers(painter: &egui::Painter, markers: &[(String, egui::Pos2)]) {
-    let glow = |alpha: u8| Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
-    for (name, position) in markers {
+/// Draws the markers of `marker_positions`: small, semi-transparent circles with a soft glow in the color of their depth and the names next to them, subtle so they
+/// do not hide the fractal
+pub(super) fn draw_markers(painter: &egui::Painter, markers: &[(String, egui::Pos2, Color32)]) {
+    for (name, position, color) in markers {
+        let glow = |alpha: u8| Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
         //The glow: wide, faint circles around a small core
-        for (radius, alpha) in [(10.0, 10), (7.0, 18), (5.0, 30)] {
+        for (radius, alpha) in [(10.0, 12), (7.0, 22), (5.0, 36)] {
             painter.circle_filled(*position, radius, glow(alpha));
         }
-        painter.circle_filled(*position, 3.0, glow(150));
+        painter.circle_filled(*position, 3.0, glow(210));
         painter.circle_stroke(*position, 3.0, egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 90)));
         //The name, with a faint shadow so it can be read on light and dark parts of the fractal
         let (anchor, font) = (*position + egui::vec2(9.0, -1.0), egui::FontId::proportional(12.0));
@@ -206,6 +238,7 @@ impl MandelbrotApp {
     /// so the work does not depend on how many points there are.
     pub(super) fn points_ui(&mut self, ui: &mut egui::Ui) -> PointsFrame {
         let mut frame = PointsFrame::default();
+        let depth = DepthScale::of(&self.points);
         let (width, height) = (thumbnails::THUMBNAIL_WIDTH as f32, thumbnails::thumbnail_height(self.p.pixel_plane.width, self.p.pixel_plane.height) as f32);
         egui::ScrollArea::vertical().id_salt("points_of_interest_list").max_height(POINT_ROW_HEIGHT * POINT_ROWS_SHOWN).auto_shrink([false, true]).show_rows(ui, POINT_ROW_HEIGHT, self.points.len(), |ui, rows| {
             for index in rows {
@@ -235,8 +268,8 @@ impl MandelbrotApp {
                     }
                 }
                 painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 2.0), egui::Align2::LEFT_TOP, &point.name, egui::FontId::proportional(14.0), ui.visuals().strong_text_color());
-                //The zoom of the place, before it is clicked: a deep place can take long to render
-                painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 22.0), egui::Align2::LEFT_TOP, point_zoom_text(point), egui::FontId::proportional(12.0), ui.visuals().weak_text_color());
+                //The zoom of the place, before it is clicked: a deep place can take long to render. Its color is its depth among the places, see `DepthScale`
+                painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 22.0), egui::Align2::LEFT_TOP, point_zoom_text(point), egui::FontId::proportional(12.0), depth.color(point));
                 let response = if point.description.is_empty() { response } else { response.on_hover_text(&point.description) };
                 if response.clicked() {
                     frame.chosen = Some(index);

@@ -1235,6 +1235,24 @@ fn every_point_of_interest_shows_its_zoom_in_the_list() {
 }
 
 #[test]
+fn the_depth_color_runs_from_cool_for_the_shallowest_place_to_hot_for_the_deepest() {
+    let config = Config::sized(64, 48, 50, 32);
+    let app = MandelbrotApp::new(&config);
+    let depth = super::points::DepthScale::of(&app.points);
+    let colors: Vec<egui::Color32> = app.points.iter().map(|point| depth.color(point)).collect();
+    //The list is sorted by zoom: the reset view first (blue), the deepest place last (red)
+    assert_eq!(colors[0], egui::Color32::from_rgb(80, 150, 255));
+    assert_eq!(*colors.last().unwrap(), egui::Color32::from_rgb(255, 85, 75));
+    //Places of a different zoom get different colors, places of the same zoom the same color
+    for (a, b) in app.points.iter().zip(&colors).zip(app.points.iter().zip(&colors).skip(1)) {
+        assert_eq!(a.0.location.scale.to_bits() == b.0.location.scale.to_bits(), a.1 == b.1, "{} and {}", a.0.name, b.0.name);
+    }
+    //A single place, or places that are all equally deep, are the shallowest color
+    let single = super::points::DepthScale::of(&app.points[..1]);
+    assert_eq!(single.color(&app.points[0]), egui::Color32::from_rgb(80, 150, 255));
+}
+
+#[test]
 fn the_markers_of_the_points_of_interest_are_at_their_locations_and_only_inside_the_view() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     assert!(!app.show_points, "off by default");
