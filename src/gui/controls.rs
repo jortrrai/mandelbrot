@@ -12,7 +12,29 @@ impl MandelbrotApp {
     /// Draws the controls: moving, zooming, the places, the iterations, the quality, the colors and saving. A control that changes the view or the settings starts a new render
     pub(super) fn controls_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Controls");
+        self.move_controls(ui);
 
+        ui.separator();
+        self.zoom_controls(ui);
+
+        ui.separator();
+        self.places_controls(ui);
+
+        ui.separator();
+        self.render_settings_controls(ui);
+
+        ui.separator();
+        self.color_controls(ui);
+
+        ui.separator();
+        self.save_controls(ui);
+
+        ui.separator();
+        ui.label("Click the fractal to see a point's coordinates, right-click to center the view on it.");
+    }
+
+    /// The buttons that move the view, and the size of a step
+    fn move_controls(&mut self, ui: &mut egui::Ui) {
         ui.label("Move");
         egui::Grid::new("move_grid").show(ui, |ui| {
             ui.label("");
@@ -35,8 +57,10 @@ impl MandelbrotApp {
             ui.label("Move step (pixels):");
             ui.add(egui::DragValue::new(&mut self.vars.translation_amount).range(1..=255));
         });
+    }
 
-        ui.separator();
+    /// The buttons that zoom, reset the view and set the zoom speed
+    fn zoom_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button("Zoom in").clicked() {
                 self.c.scale(self.vars.scaling_factor());
@@ -55,8 +79,10 @@ impl MandelbrotApp {
             ui.label("Zoom speed (1 = fastest, 9 = slowest):");
             ui.add(egui::DragValue::new(&mut self.vars.scale_numerator).range(1.0..=9.0).speed(0.1).max_decimals(0));
         });
+    }
 
-        ui.separator();
+    /// The points of interest and the fields to go to a view by its numbers
+    fn places_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Points of interest:");
             if ui.button("Reload").on_hover_text(format!("Loads the .json files of {} again", self.points_folder.display())).clicked() {
@@ -79,8 +105,10 @@ impl MandelbrotApp {
                 self.go_to_view();
             }
         });
+    }
 
-        ui.separator();
+    /// The maximum iterations (manual or automatic, with its presets), adaptive supersampling and the quality of the window
+    fn render_settings_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Max. iterations:");
             let response = ui.add_enabled(!self.auto_iterations, egui::DragValue::new(&mut self.max_iterations_input).range(1..=1_000_000).speed(10.0));
@@ -143,8 +171,10 @@ impl MandelbrotApp {
                 self.render(&format!("Set the supersampling to {}x", self.supersampling_amount));
             }
         });
+    }
 
-        ui.separator();
+    /// The coloring and the color channel mapping
+    fn color_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Coloring:");
             egui::ComboBox::from_id_salt("coloring").selected_text(COLORING_FUNCTIONS[self.coloring_index].0).show_ui(ui, |ui| {
@@ -177,8 +207,10 @@ impl MandelbrotApp {
                 }
             });
         });
+    }
 
-        ui.separator();
+    /// Saving the image, with the quality of the saved image
+    fn save_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Save Image");
         ui.horizontal(|ui| {
             ui.label("Saved image quality:");
@@ -187,7 +219,5 @@ impl MandelbrotApp {
         if ui.button("Save image").clicked() {
             self.save_image();
         }
-        ui.separator();
-        ui.label("Click the fractal to see a point's coordinates, right-click to center the view on it.");
     }
 }
