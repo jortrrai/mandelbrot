@@ -32,7 +32,7 @@ impl MandelbrotApp {
     /// Saves the current view as an image on its own background thread. This does not interrupt a running render;
     /// while one runs, the buffer only holds a partially refined image, so the image is rendered again for saving.
     pub(super) fn save_image(&mut self) {
-        let resolution = match self.save_size.resolve(self.command_line_resolution(), self.view_resolution()) {
+        let resolution = match self.save_size.resolve(self.default_save_resolution(), self.view_resolution()) {
             Ok(resolution) => resolution,
             Err(reason) => {
                 self.log(format!("Could not save the image: {reason}"));
@@ -88,8 +88,8 @@ impl MandelbrotApp {
         self.render(message);
     }
 
-    /// The image size of the command line, see `Config::image_width`
-    pub(super) fn command_line_resolution(&self) -> Resolution {
+    /// The default size of a saved image, see `Config::image_width`
+    pub(super) fn default_save_resolution(&self) -> Resolution {
         Resolution::new(self.config.image_width, self.config.image_height)
     }
 

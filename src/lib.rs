@@ -7,7 +7,7 @@
 //! * [`rendering`]: the progressive and adaptive renderers that turn a view into colors.
 //! * [`auto_iterations`], [`thumbnails`], [`points_of_interest`]: the automatic iteration limit, the thumbnails and the named places.
 //! * [`resolution`]: the image resolutions: built-in presets, the custom presets of the user and the file that keeps them.
-//! * [`gui`]: the window. [`config`] reads the command line, [`interaction`] holds the move and zoom steps.
+//! * [`gui`]: the window. [`config`] holds the settings the window starts with, [`interaction`] holds the move and zoom steps.
 //!
 //! The same view and settings always render the same image: the supersampling jitter is a hash of the pixel and the sample, never random.
 #![warn(
@@ -78,7 +78,6 @@ const COLOR_CHANNEL_MAPPING: ColorChannelMapping = ColorChannelMapping::RGB;
 /// Returns an Error if the GUI window cannot be created or the GUI event loop fails
 pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     banner::print_banner();
-    banner::print_command_info();
 
     let app = gui::MandelbrotApp::new(config);
     let options = eframe::NativeOptions {

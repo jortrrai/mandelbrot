@@ -313,11 +313,11 @@ impl MandelbrotApp {
 
     /// The list with the size of the saved image, the fields of a custom size and the buttons that keep it as a preset
     fn save_size_controls(&mut self, ui: &mut egui::Ui) {
-        let (command_line, view) = (self.command_line_resolution(), self.view_resolution());
+        let (default_size, view) = (self.default_save_resolution(), self.view_resolution());
         ui.horizontal(|ui| {
             ui.label("Saved image size:");
-            egui::ComboBox::from_id_salt("save_size").selected_text(self.save_size.selected_text(command_line, view)).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::CommandLine, format!("Command line ({command_line})"));
+            egui::ComboBox::from_id_salt("save_size").selected_text(self.save_size.selected_text(default_size, view)).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::Standard, format!("Default ({default_size})"));
                 ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::View, format!("Same as the view ({view})"));
                 ui.separator();
                 for preset in self.save_size.all_presets() {
@@ -329,7 +329,7 @@ impl MandelbrotApp {
                 ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::Custom, "Custom size...");
             });
         });
-        match self.save_size.resolve(command_line, view) {
+        match self.save_size.resolve(default_size, view) {
             Ok(resolution) => ui.label(format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6)),
             Err(reason) => ui.colored_label(egui::Color32::from_rgb(230, 70, 60), reason),
         };
