@@ -541,6 +541,30 @@ mod tests {
         }
     }
 
+    /// The loops that are compiled with AVX2 are the same code as the generic loops that CPUs without AVX2 (and other architectures) run: this checks that they give the same bits.
+    /// It can only compare them on a CPU that has AVX2, where `iterate_lanes_*` picks the AVX2 loops; elsewhere both sides are the generic loop and the test passes trivially.
+    #[test]
+    fn the_avx2_loops_give_bit_identical_results_to_the_generic_loops() {
+        let points = test_points();
+        let mut compared = 0;
+        for max_iterations in [1, 7, 300, 2000] {
+            let m = MandelbrotSet::new(max_iterations, 2.0);
+            for group in points.as_chunks::<LANES>().0 {
+                let group: [Complex; LANES] = std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y));
+                assert_eq!(m.iterate_lanes_plain(&group), m.iterate_lanes_plain_generic(&group), "{group:?}");
+                let dispatched = m.iterate_lanes_smooth_dispatch(&group);
+                let mut generic = LaneResult { iterations: [0; LANES], escaped: [false; LANES], escape_x: [0.0; LANES], escape_y: [0.0; LANES] };
+                m.iterate_lanes_smooth_generic(&group, &mut generic);
+                assert_eq!((dispatched.iterations, dispatched.escaped), (generic.iterations, generic.escaped), "{group:?}");
+                for lane in 0..LANES {
+                    assert_eq!((dispatched.escape_x[lane].to_bits(), dispatched.escape_y[lane].to_bits()), (generic.escape_x[lane].to_bits(), generic.escape_y[lane].to_bits()), "{group:?}");
+                }
+                compared += 1;
+            }
+        }
+        assert!(compared > 100, "{compared} groups were compared");
+    }
+
     #[test]
     fn smooth_position_is_continuous_where_the_integer_count_jumps() {
         let m = MandelbrotSet::new(1000, 2.0);
