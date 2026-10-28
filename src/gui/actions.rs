@@ -26,7 +26,7 @@ impl MandelbrotApp {
     pub(super) fn translate(&mut self, name: &str, rows_up: i16, columns_right: i16) {
         rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
         //Moving the view to the right moves the content of the buffer to the left
-        self.render_moved(&format!("Moved {name} {} pixels", self.vars.translation_amount), (i128::from(rows_up), -i128::from(columns_right)));
+        self.render_moved(&format!("Moved {name} {} pixels", self.vars.translation_amount));
     }
 
     /// Saves the current view as an image on its own background thread. This does not interrupt a running render;
@@ -43,7 +43,7 @@ impl MandelbrotApp {
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
         let (c, p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
         let (image_supersampling_amount, coloring_function) = (self.image_supersampling_amount, self.coloring_function);
-        let buffer_is_complete = self.progress.is_none() && !self.adaptive_supersampling; //An adaptively sampled buffer is not a full-quality image of the saved quality
+        let buffer_is_complete = self.buffer_is_complete && self.progress.is_none() && !self.adaptive_supersampling; //An interrupted, cancelled or adaptively sampled buffer is not a full-quality image of the saved quality
         let sender = self.notice_sender.clone();
         std::thread::spawn(move || {
             let view = c.get_view();
@@ -114,8 +114,12 @@ impl MandelbrotApp {
     pub(super) fn handle_image_click(&mut self, x: f32, y: f32, centering: bool) {
         let complex = self.c.complex_from_pixel_plane(x.into(), y.into());
         if centering {
-            let shift = rendering::center_complex_plane_on(&mut self.c, &complex);
-            self.render_moved(&format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y), shift);
+            //Moves by whole pixels, so the samples of the pixels that stay visible are kept: the clicked point ends up within half a pixel of the center
+            let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
+            let columns_right = (x - width / 2.0).round() as i64;
+            let rows_up = (height / 2.0 - y).round() as i64;
+            rendering::move_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
+            self.render_moved(&format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y));
         } else {
             self.log(format!("Clicked pixel ({}, {}) = complex point ({:.10}, {:.10})", x as usize, y as usize, complex.x, complex.y));
         }

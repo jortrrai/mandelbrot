@@ -91,7 +91,7 @@ fn the_progress_bar_records_the_time_of_every_layer() {
     assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 0, "the move starts a new bar");
     wait_for_job(&mut app);
     assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 3, "every layer of the move is rendered and timed");
-    assert!(app.log.last().unwrap().starts_with("Moved up 10 pixels in"));
+    assert!(app.log.last().unwrap().starts_with("Moved up 10 pixels (continued the samples of "), "{:?}", app.log.last());
 }
 
 #[test]
@@ -102,8 +102,8 @@ fn moving_reuses_the_old_image_and_only_renders_the_exposed_strip() {
     let old_pixels = app.p.pixels.clone();
 
     app.translate("up", 10, 0); //The content of the buffer moves down by 10 rows
-    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 10 * 64, "only the exposed top strip should be rendered");
     wait_for_job(&mut app);
+    assert!(app.log.last().unwrap().starts_with("Moved up 10 pixels (continued the samples of 2432 pixels) in "), "only the exposed top strip is rendered: {:?}", app.log.last());
 
     assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 3, "every layer of the strip is rendered progressively");
     for y in 10..48 {
@@ -113,17 +113,71 @@ fn moving_reuses_the_old_image_and_only_renders_the_exposed_strip() {
 }
 
 #[test]
-fn moving_after_a_cancelled_render_renders_everything() {
+fn moving_after_a_cancelled_render_continues_its_samples() {
     let config = Config::build(["mandelbrot", "64", "48", "50", "6"].map(String::from).into_iter()).unwrap();
-    let mut app = MandelbrotApp::new(&config);
+    let mut app = manual_app(&config);
+    app.render("Again");
     app.progress.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
     wait_for_job(&mut app);
     assert!(!app.buffer_is_complete, "a cancelled render leaves a partially refined buffer");
 
     app.translate("left", 0, -10);
-    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 64 * 48, "a partially refined buffer cannot be reused");
     wait_for_job(&mut app);
     assert!(app.buffer_is_complete);
+    assert!(app.log.last().unwrap().starts_with("Moved left 10 pixels (continued the samples of 2592 pixels) in "), "54 columns kept their samples: {:?}", app.log.last());
+}
+
+/// The image of `view` (the start view if `None`) after a complete render, then a move `rows_up` and `columns_right` (each at most 255)
+fn moved_after_a_complete_render(config: &Config, view: Option<&View>, rows_up: i16, columns_right: i16) -> Vec<u32> {
+    let mut app = manual_app(config);
+    if let Some(view) = view {
+        app.c.set_view(view);
+        app.render("The view");
+        wait_for_job(&mut app);
+    }
+    app.translate("somewhere", rows_up, columns_right);
+    wait_for_job(&mut app);
+    app.p.pixels.clone()
+}
+
+#[test]
+fn an_interrupted_render_keeps_its_completed_layers_when_the_view_moves() {
+    //A slow render, so it can be caught between its layers
+    let config = Config::build(["mandelbrot", "400", "300", "5000", "8"].map(String::from).into_iter()).unwrap();
+    let view = View::new(-0.7498100000000001, -0.020300000000000054, 0.00006400000000000002);
+    let mut app = manual_app(&config);
+    app.c.set_view(&view);
+    app.render("The view");
+    let start = std::time::Instant::now();
+    while app.progress.as_ref().is_some_and(|progress| progress.pass < 2) {
+        assert!(start.elapsed() < Duration::from_secs(60));
+        std::thread::sleep(Duration::from_millis(1));
+        app.poll_job();
+    }
+    assert!(app.is_busy(), "the render is interrupted after {} of 8 layers", app.progress.as_ref().map_or(8, |progress| progress.pass));
+
+    //Moving interrupts it; the pixels that stay visible continue from the samples they have (2 layers or more, and part of the next one)
+    app.translate("up", 10, 0);
+    wait_for_job(&mut app);
+    let message = app.log.last().unwrap().clone();
+    assert!(message.starts_with("Moved up 10 pixels (continued the samples of 116000 pixels) in "), "{message}");
+    //And the result is exactly the image of a render that was not interrupted, moved the same way
+    let expected = moved_after_a_complete_render(&config, Some(&view), 10, 0);
+    let differing: Vec<(usize, usize)> = (0..400 * 300).filter(|i| app.p.pixels[*i] != expected[*i]).map(|i| (i % 400, i / 400)).collect();
+    assert!(differing.is_empty(), "{} pixels differ, the first: {:?}, rows {:?}", differing.len(), &differing[..differing.len().min(10)], differing.iter().map(|(_, y)| *y).min().zip(differing.iter().map(|(_, y)| *y).max()));
+}
+
+#[test]
+fn centering_on_a_click_moves_by_whole_pixels_and_keeps_the_samples() {
+    let config = Config::build(["mandelbrot", "64", "48", "50", "3"].map(String::from).into_iter()).unwrap();
+    let mut app = manual_app(&config);
+    let target = app.c.complex_from_pixel_plane(50.3, 10.6);
+    app.handle_image_click(50.3, 10.6, true);
+    wait_for_job(&mut app);
+    //18 columns to the right, 13 rows up: the clicked point is within half a pixel of the center
+    let center = app.c.center();
+    assert!((center.x - target.x).abs() <= app.c.increment_x / 2.0 && (center.y - target.y).abs() <= app.c.increment_y / 2.0, "{center:?} {target:?}");
+    assert!(app.log.last().unwrap().contains(&format!("(continued the samples of {} pixels)", (64 - 18) * (48 - 13))), "{:?}", app.log.last());
 }
 
 #[test]
@@ -156,9 +210,9 @@ fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
 
     //A move keeps the limit and only renders the strip
     app.translate("up", 10, 0);
-    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 10 * 64);
     wait_for_job(&mut app);
     assert_eq!(app.m.max_iterations, limit);
+    assert!(app.log.last().unwrap().contains("(continued the samples of 2432 pixels)"), "{:?}", app.log.last());
 
     //A zoom chooses a new limit, a deeper zoom never a lower start
     app.c.scale(1e-4);
@@ -830,7 +884,7 @@ fn the_last_image_follows_a_new_view_until_the_render_of_that_view_arrives() {
 
     //Move 12 columns to the right: until the new render shows a layer, the old image is drawn 12 columns (a tenth of the image) to the left
     crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 12);
-    app.render_moved("Moved", (0, -12));
+    app.render_moved("Moved");
     let moved = super::transform::shown_fraction(&app.shown_plane, &app.c);
     assert!((moved.min.x + 0.1).abs() < 1e-5 && moved.min.y.abs() < 1e-5, "{moved:?}");
     wait_for_job(&mut app);
@@ -874,22 +928,19 @@ fn a_drag_shifts_the_shown_image_even_when_its_render_was_interrupted() {
     let mut app = manual_app(&config);
     app.gesture_active = true;
     crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 5);
-    app.render_moved("Moved by dragging", (0, -5));
-    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 5 * 80, "the first move renders its strip");
-    //The next frame of the drag interrupts that render: the image on the screen is still the old one, so the strip covers both moves
+    app.render_moved("Moved by dragging");
+    //The next frame of the drag interrupts that render: its samples go on to the next render, which shifts them by the second move
     crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 2, 4);
-    app.render_moved("Moved by dragging", (2, -4));
-    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 9 * 80 + 2 * 120 - 9 * 2, "9 columns and 2 rows, the old image shifted");
+    app.render_moved("Moved by dragging");
     wait_for_job(&mut app);
 
-    //The drag stops: the whole view is rendered with the full quality, and equals a render of that view from scratch
+    //The drag stops: the full-quality render continues every sample, and gives exactly the image of a complete render moved the same way (9 columns right, 2 rows up)
     app.gesture_active = false;
     app.settle_gesture(&egui::Context::default());
     wait_for_job(&mut app);
     assert!(app.buffer_is_complete);
-    let mut direct = PixelBuffer::new(PixelPlane::new(120, 80));
-    crate::rendering::render_complex_plane_into_buffer(&mut direct, &app.c, &app.m, 4, app.coloring_function);
-    assert!(app.p.colors.iter().zip(&direct.colors).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "the settled image is the image of the view");
+    assert!(app.log.last().unwrap().starts_with(&format!("Moved by dragging (continued the samples of {} pixels) in ", 120 * 80)), "every pixel has its first sample from the drag: {:?}", app.log.last());
+    assert_eq!(app.p.pixels, moved_after_a_complete_render(&config, None, 2, 9));
 }
 
 #[test]
@@ -919,7 +970,7 @@ fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives()
     let colors = app.p.colors.clone();
     let mut sizes = Vec::new();
     for pass in [0, 0, 0, 1] {
-        sender.send(JobMessage::Pass { colors: colors.clone(), plane: app.c.clone(), pass, total: 1, layer_time: Duration::ZERO }).unwrap();
+        sender.send(JobMessage::Pass { colors: colors.clone(), plane: app.c.clone(), pass, total: 1, layer_time: Duration::ZERO, whole: true }).unwrap();
         app.poll_job();
         app.update_texture(&ctx);
         sizes.push((app.preview_block, app.texture.as_ref().unwrap().size()));

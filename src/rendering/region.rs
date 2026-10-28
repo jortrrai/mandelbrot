@@ -58,6 +58,13 @@ pub fn center_complex_plane_on(c: &mut ComplexPlane, new_center: &Complex) -> (i
     (i128::from(rows), i128::from(columns))
 }
 
+/// Moves the complex plane `c` up by `rows_up` and right by `columns_right` whole pixels (any distance), without rendering anything.
+///
+/// After the move the plane is the old plane shifted by whole pixels, see `pixel_shift`.
+pub fn move_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i64, columns_right: i64) {
+    c.translate(columns_right as f64 * c.increment_x, -(rows_up as f64) * c.increment_y);
+}
+
 /// Moves the complex plane `c` up by `rows_up` and right by `columns_right` pixels, without rendering anything.
 ///
 /// Each distance is taken modulo 256 pixels (`as u8`): a move of 256 pixels moves by 0 and one of 300 by 44. The window only moves by small steps.
