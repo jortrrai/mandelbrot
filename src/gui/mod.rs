@@ -134,6 +134,10 @@ pub struct MandelbrotApp {
     bars: Option<RenderBars>,
     /// The time per pixel of the first layer of the last render, to predict whether the next render needs previews, see `render_job`
     first_layer_per_pixel: Option<Duration>,
+    /// Whether the last render showed a full layer (not only a preview) of the view `shown_plane`
+    layer_shown: bool,
+    /// The message and the time of the last render during a gesture, until the full-quality render after the gesture starts, see `render_job`
+    settle: Option<(String, std::time::Instant)>,
     /// Whether every pixel of the buffer has been rendered with the full supersampling amount, so a move can reuse it
     buffer_is_complete: bool,
     /// Messages from background tasks that do not change the view, e.g. saving an image
@@ -194,6 +198,8 @@ impl MandelbrotApp {
             progress: None,
             bars: None,
             first_layer_per_pixel: None,
+            layer_shown: false,
+            settle: None,
             buffer_is_complete: false,
             notices,
             notice_sender,
@@ -274,6 +280,7 @@ impl eframe::App for MandelbrotApp {
 
         let mut fit_area = egui::Vec2::ZERO;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| fit_area = self.image_ui(ui));
+        self.settle_gesture(&ctx);
         self.fit_to_window(&ctx, fit_area);
     }
 }

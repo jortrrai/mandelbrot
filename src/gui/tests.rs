@@ -837,3 +837,57 @@ fn the_last_image_follows_a_new_view_until_the_render_of_that_view_arrives() {
     let after = super::transform::shown_fraction(&app.shown_plane, &app.c);
     assert!((after.min - full.min).length() < 1e-5 && (after.max - full.max).length() < 1e-5, "the rendered image fills the view again: {after:?}");
 }
+
+#[test]
+fn a_wheel_zoom_renders_quickly_with_a_steady_limit_and_the_full_quality_follows_when_it_stops() {
+    let ctx = egui::Context::default();
+    let config = Config::build(["mandelbrot", "120", "80", "100", "6"].map(String::from).into_iter()).unwrap();
+    let mut app = MandelbrotApp::new(&config); //Auto iterations and adaptive supersampling are on by default
+    wait_for_job(&mut app);
+    let limit = app.m.max_iterations;
+
+    //Zooming with the wheel: the first layer only, with the limit of the image that is shown
+    app.gesture_active = true;
+    app.c.scale(0.5);
+    app.render("Zoomed in with the wheel");
+    assert_eq!(app.bars.as_ref().unwrap().total_layers, 1);
+    assert!(!app.limit_pending);
+    wait_for_job(&mut app);
+    assert_eq!(app.m.max_iterations, limit, "no auto iterations probes during the gesture");
+    assert!(!app.buffer_is_complete, "the image of a gesture does not have the full quality");
+    app.settle_gesture(&ctx);
+    assert!(!app.is_busy(), "the full-quality render waits while the gesture goes on");
+
+    //The wheel stops: the full-quality render starts, chooses the limit again, and shows no previews over the layer that is on the screen
+    app.gesture_active = false;
+    app.settle_gesture(&ctx);
+    assert!(app.is_busy() && app.settle.is_none());
+    assert_eq!(app.bars.as_ref().unwrap().total_layers, 6);
+    wait_for_job(&mut app);
+    assert!(app.buffer_is_complete);
+    assert!(app.log.last().unwrap().starts_with("Zoomed in with the wheel (auto iterations: limit "), "{:?}", app.log.last());
+}
+
+#[test]
+fn a_drag_shifts_the_shown_image_even_when_its_render_was_interrupted() {
+    let config = Config::build(["mandelbrot", "120", "80", "100", "4"].map(String::from).into_iter()).unwrap();
+    let mut app = manual_app(&config);
+    app.gesture_active = true;
+    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 0, 5);
+    app.render_moved("Moved by dragging", (0, -5));
+    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 5 * 80, "the first move renders its strip");
+    //The next frame of the drag interrupts that render: the image on the screen is still the old one, so the strip covers both moves
+    crate::rendering::translate_complex_plane_by_pixels(&mut app.c, 2, 4);
+    app.render_moved("Moved by dragging", (2, -4));
+    assert_eq!(app.bars.as_ref().unwrap().pixels_total, 9 * 80 + 2 * 120 - 9 * 2, "9 columns and 2 rows, the old image shifted");
+    wait_for_job(&mut app);
+
+    //The drag stops: the whole view is rendered with the full quality, and equals a render of that view from scratch
+    app.gesture_active = false;
+    app.settle_gesture(&egui::Context::default());
+    wait_for_job(&mut app);
+    assert!(app.buffer_is_complete);
+    let mut direct = PixelBuffer::new(PixelPlane::new(120, 80));
+    crate::rendering::render_complex_plane_into_buffer(&mut direct, &app.c, &app.m, 4, app.coloring_function);
+    assert!(app.p.colors.iter().zip(&direct.colors).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "the settled image is the image of the view");
+}
