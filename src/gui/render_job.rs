@@ -16,9 +16,12 @@ use crate::rendering::Render;
 use super::MandelbrotApp;
 
 
+/// A preview of a new view is only shown if the first layer is expected to take longer than this, about a frame: a faster first layer is shown directly, see `Render::preview`
+const PREVIEW_WORTHWHILE: Duration = Duration::from_millis(16);
+
 /// A message from a rendering job that runs on a background thread
 pub(super) enum JobMessage {
-    /// An intermediate image: the running average of the first `pass` of `total` supersampling layers
+    /// An intermediate image: the running average of the first `pass` of `total` supersampling layers, or a low-resolution preview of the first layer when `pass` is 0
     Pass { colors: Vec<TrueColor>, plane: ComplexPlane, pass: u8, total: u8, layer_time: Duration },
     /// The iteration limit that auto iterations chose for the render, sent as soon as it is known, before the first layer is rendered
     Limit { max_iterations: u32, palette_scale: u32 },
@@ -71,11 +74,17 @@ impl MandelbrotApp {
                     self.p.colors = colors;
                     self.shown_plane = plane;
                     self.texture_outdated = true;
+                    if pass == 0 {
+                        continue; //A preview is not a layer: the progress and the layer times are not changed
+                    }
                     if let Some(progress) = &mut self.progress {
                         progress.pass = pass;
                         progress.total = total;
                     }
                     if let Some(bars) = &mut self.bars {
+                        if pass == 1 {
+                            self.first_layer_per_pixel = Some(layer_time / u32::try_from(bars.pixels_total.max(1)).unwrap_or(u32::MAX));
+                        }
                         bars.layer_times.push(layer_time);
                         bars.layer_started = Instant::now();
                     }
@@ -161,6 +170,9 @@ impl MandelbrotApp {
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
         let pixels_total = strip.as_ref().map_or(width * height, |(_, region)| region.pixel_count(width, height));
+        //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
+        let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
+        let preview = expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE).then_some(PREVIEW_WORTHWHILE);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let pixels_done = Arc::new(AtomicUsize::new(0));
@@ -198,9 +210,13 @@ impl MandelbrotApp {
             };
             let base = p.colors.clone();
             let mut layer_started = started;
-            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).only(&region, &base).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
+            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).only(&region, &base).preview(preview).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 p.colors.copy_from_slice(colors);
+                if pass == 0 {
+                    let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO });
+                    return;
+                }
                 let layer_time = layer_started.elapsed();
                 println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
                 let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time });

@@ -132,6 +132,8 @@ pub struct MandelbrotApp {
     progress: Option<Progress>,
     /// The progress bar of the last progressive render
     bars: Option<RenderBars>,
+    /// The time per pixel of the first layer of the last render, to predict whether the next render needs previews, see `render_job`
+    first_layer_per_pixel: Option<Duration>,
     /// Whether every pixel of the buffer has been rendered with the full supersampling amount, so a move can reuse it
     buffer_is_complete: bool,
     /// Messages from background tasks that do not change the view, e.g. saving an image
@@ -191,6 +193,7 @@ impl MandelbrotApp {
             job: None,
             progress: None,
             bars: None,
+            first_layer_per_pixel: None,
             buffer_is_complete: false,
             notices,
             notice_sender,
