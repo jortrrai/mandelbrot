@@ -6,6 +6,7 @@ use crate::auto_iterations::AutoPreset;
 use crate::complex_plane::{ComplexPlane, View};
 use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
 use crate::rendering::{self};
+use crate::resolution::Resolution;
 use super::MandelbrotApp;
 
 
@@ -31,21 +32,28 @@ impl MandelbrotApp {
     /// Saves the current view as an image on its own background thread. This does not interrupt a running render;
     /// while one runs, the buffer only holds a partially refined image, so the image is rendered again for saving.
     pub(super) fn save_image(&mut self) {
+        let resolution = match self.save_size.resolve(self.command_line_resolution(), self.view_resolution()) {
+            Ok(resolution) => resolution,
+            Err(reason) => {
+                self.log(format!("Could not save the image: {reason}"));
+                return;
+            }
+        };
         let time_stamp = chrono::Utc::now().to_string();
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
         let (c, p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
-        let (config, image_supersampling_amount, coloring_function) = (self.config.clone(), self.image_supersampling_amount, self.coloring_function);
+        let (image_supersampling_amount, coloring_function) = (self.image_supersampling_amount, self.coloring_function);
         let buffer_is_complete = self.progress.is_none() && !self.adaptive_supersampling; //An adaptively sampled buffer is not a full-quality image of the saved quality
         let sender = self.notice_sender.clone();
         std::thread::spawn(move || {
             let view = c.get_view();
-            #[allow(clippy::float_cmp)] // 1.0 is the exact default: only an unscaled window shows the image that is saved
-            let unscaled = config.window_scale == 1.0;
-            let saved = if unscaled && buffer_is_complete {
+            let (view_width, view_height) = (p.pixel_plane.width, p.pixel_plane.height);
+            let same_size_as_view = resolution == Resolution::new(view_width, view_height); //Only then is the image in the buffer the image that is saved
+            let saved = if same_size_as_view && buffer_is_complete {
                 p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount)
             } else {
-                let mut image_p = PixelBuffer::new(PixelPlane::new(config.image_width, config.image_height));
-                let mut image_c = ComplexPlane::new(config.image_width, config.image_height);
+                let mut image_p = PixelBuffer::new(PixelPlane::new(resolution.width, resolution.height));
+                let mut image_c = ComplexPlane::new(resolution.width, resolution.height);
                 image_p.color_channel_mapping = p.color_channel_mapping;
                 image_c.set_view(&view);
                 rendering::render_complex_plane_into_buffer(&mut image_p, &image_c, &m, image_supersampling_amount, coloring_function);
@@ -58,6 +66,16 @@ impl MandelbrotApp {
             let _ = sender.send(message);
         });
         self.log("Saving the image...");
+    }
+
+    /// The image size of the command line, see `Config::image_width`
+    pub(super) fn command_line_resolution(&self) -> Resolution {
+        Resolution::new(self.config.image_width, self.config.image_height)
+    }
+
+    /// The size of the view that is shown in the window
+    pub(super) fn view_resolution(&self) -> Resolution {
+        Resolution::new(self.p.pixel_plane.width, self.p.pixel_plane.height)
     }
 
     /// Goes to the view that was typed in the three "go to view" fields (x, y and scale); a message in the status log if they are not numbers or the scale is not positive
