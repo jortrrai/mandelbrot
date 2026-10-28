@@ -21,8 +21,8 @@ pub enum Route {
 }
 
 impl Route {
-    /// Every route, in the order of the drop-down
-    pub const ALL: [Route; 2] = [Route::ViaReset, Route::Shortest];
+    /// Every route, in the order of the drop-down (the default, see `MandelbrotApp::new`, first)
+    pub const ALL: [Route; 2] = [Route::Shortest, Route::ViaReset];
 
     /// The name in the drop-down
     pub const fn name(self) -> &'static str {
@@ -42,8 +42,8 @@ pub enum Pace {
 }
 
 impl Pace {
-    /// Every pace, in the order of the drop-down
-    pub const ALL: [Pace; 3] = [Pace::Cinematic, Pace::Normal, Pace::Fast];
+    /// Every pace, in the order of the drop-down (the default, see `MandelbrotApp::new`, first)
+    pub const ALL: [Pace; 3] = [Pace::Fast, Pace::Normal, Pace::Cinematic];
 
     /// The name in the drop-down
     pub const fn name(self) -> &'static str {
@@ -69,6 +69,34 @@ impl Pace {
         match self {
             Pace::Cinematic => t * t * t * (t * (t * 6.0 - 15.0) + 10.0),
             Pace::Fast | Pace::Normal => t * t * (3.0 - 2.0 * t),
+        }
+    }
+}
+
+/// How complete the frames of a flight have to be before the camera moves on
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlightRendering {
+    /// The camera follows the clock, and the screen shows whatever the render has so far (the image moved and scaled, with black where nothing is rendered yet)
+    BestEffort,
+    /// The camera waits for a complete low-resolution frame (a preview of the whole view, or a full layer)
+    LowRes,
+    /// The camera waits for a full-resolution frame (the first layer): sharp all the way, slow where the view is expensive
+    MaxQuality,
+    /// Every frame is rendered with all its supersampling layers, and the camera waits until the last one is done: the finished image of every view on the way, the slowest
+    SuperSampled,
+}
+
+impl FlightRendering {
+    /// Every mode, in the order of the drop-down
+    pub const ALL: [FlightRendering; 4] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::MaxQuality, FlightRendering::SuperSampled];
+
+    /// The name in the drop-down
+    pub const fn name(self) -> &'static str {
+        match self {
+            FlightRendering::BestEffort => "Best effort",
+            FlightRendering::LowRes => "Low res",
+            FlightRendering::MaxQuality => "Max quality",
+            FlightRendering::SuperSampled => "Super sampled",
         }
     }
 }
@@ -267,8 +295,8 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_via_reset_and_cinematic() {
-        assert_eq!(Route::ALL[0], Route::ViaReset);
-        assert_eq!(Pace::ALL[0], Pace::Cinematic);
+    fn the_drop_downs_list_the_defaults_first() {
+        assert_eq!(Route::ALL[0], Route::Shortest);
+        assert_eq!(Pace::ALL[0], Pace::Fast);
     }
 }

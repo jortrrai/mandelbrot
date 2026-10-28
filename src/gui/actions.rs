@@ -112,12 +112,13 @@ impl MandelbrotApp {
 
     /// Handles a click on the fractal at `(x, y)` in pixel buffer coordinates
     pub(super) fn handle_image_click(&mut self, x: f32, y: f32, centering: bool) {
-        let complex = self.c.complex_from_pixel_plane(x.into(), y.into());
+        //The point under the mouse in the view on the screen (with immersion, that can be the last complete frame while the view moves on)
+        let complex = self.displayed_plane().complex_from_pixel_plane(x.into(), y.into());
         if centering {
             //Moves by whole pixels, so the samples of the pixels that stay visible are kept: the clicked point ends up within half a pixel of the center
-            let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
-            let columns_right = (x - width / 2.0).round() as i64;
-            let rows_up = (height / 2.0 - y).round() as i64;
+            let center = self.c.center();
+            let columns_right = ((complex.x - center.x) / self.c.increment_x).round() as i64;
+            let rows_up = ((complex.y - center.y) / self.c.increment_y).round() as i64;
             rendering::move_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
             self.render_moved(&format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y));
         } else {

@@ -14,8 +14,6 @@ const MAX_COLOR_TABLE_ITERATIONS: u32 = 200_000;
 
 /// The block sizes of the preview levels, coarse to fine, see [`Render::preview`]. The levels are always reported in this order, starting with the first; a render can stop reporting after any level
 pub const PREVIEW_BLOCKS: [usize; 3] = [8, 4, 2];
-/// Only pixels in the rows and columns that are multiples of this get a preview sample
-const SMALLEST_BLOCK: usize = PREVIEW_BLOCKS[PREVIEW_BLOCKS.len() - 1];
 
 /// A render of the complex plane: what to render and how, set step by step and started with [`Render::run`].
 ///
@@ -258,9 +256,9 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                             _ => {}
                         }
                     }
-                    if skip_first && y % SMALLEST_BLOCK == 0 {
-                        //The first samples that the previews computed (top-left pixels of blocks): the color of the pixel itself, whether or not a preview showed it
-                        for x in (0..width).step_by(SMALLEST_BLOCK).filter(|x| has_first[y * width + x]) {
+                    if skip_first {
+                        //The first samples that the previews computed (the representatives of blocks): the color of the pixel itself, whether or not a preview showed it
+                        for x in (0..width).filter(|x| has_first[y * width + x]) {
                             color_row[x] = sum_color(row[x]);
                         }
                     }
@@ -304,6 +302,11 @@ fn colors_of_kept_samples(state: &SampleState, colors: &mut [TrueColor]) -> [usi
         }
     });
     pending.into_inner().unwrap()
+}
+
+/// The chunks of `chunk` cells of a grid, or `count` empty chunks if the grid is not kept (empty)
+fn chunks_or_empty<T>(grid: &mut [T], chunk: usize, count: usize) -> Vec<&mut [T]> {
+    if grid.is_empty() { (0..count).map(|_| <&mut [T]>::default()).collect() } else { grid.chunks_mut(chunk).collect() }
 }
 
 /// The rows of a `width` x `height` grid, or `height` empty rows if the grid is not kept (empty)
@@ -351,30 +354,56 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
     let threads = render_thread_count();
     //The time the threads spent computing samples, without starting threads and waiting: on a fast view those would dominate the estimate
     let busy_nanos = AtomicU64::new(0);
+    let height = state.height;
     for block in PREVIEW_BLOCKS {
         let count = AtomicUsize::new(0);
-        let rows = Mutex::new(state.sums.chunks_mut(width).zip(state.counts.chunks_mut(width)).zip(rows_or_empty(&mut state.first, width, state.height)).zip(has_first.chunks_mut(width)).enumerate().step_by(block));
+        //Every block has a representative: the pixel whose first sample it shows. That is its top-left pixel (always, in a render from nothing), unless that pixel
+        //has samples from before (it was kept by a move): then a pixel of the block that a coarser level computed, or else its first pixel without samples. So a block
+        //that has pixels without samples always shows a sample of one of them, and a preview of a strip has no gaps.
+        let (across, bands) = (width.div_ceil(block), height.div_ceil(block));
+        let mut representatives: Vec<Option<usize>> = vec![None; across * bands];
+        let band = width * block;
+        let first_bands = chunks_or_empty(&mut state.first, band, bands);
+        let rows = Mutex::new(state.sums.chunks_mut(band).zip(state.counts.chunks_mut(band)).zip(first_bands).zip(has_first.chunks_mut(band)).zip(representatives.chunks_mut(across)).enumerate());
         thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| loop {
                     if cancel.load(Ordering::Relaxed) {
                         return;
                     }
-                    let next_row = rows.lock().unwrap().next();
-                    let Some((y, (((row, counts), first), has_row))) = next_row else { return };
-                    let row_started = Instant::now();
-                    let xs: Vec<usize> = (0..width).step_by(block).filter(|x| counts[*x] == 0).collect();
-                    positions(c, m, y, &xs, 0, origin, |x, position| {
-                        let color = color_of(position);
-                        row[x] = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
-                        counts[x] = 1;
-                        if !first.is_empty() {
-                            first[x] = color;
+                    let next_band = rows.lock().unwrap().next();
+                    let Some((by, ((((sums, counts), first), has), representatives))) = next_band else { return };
+                    let started = Instant::now();
+                    let rows_in_band = counts.len() / width;
+                    let mut to_sample: Vec<usize> = Vec::new();
+                    for (bx, representative) in representatives.iter_mut().enumerate() {
+                        let (left, right) = (bx * block, (bx * block + block).min(width));
+                        let mut pixels = (0..rows_in_band).flat_map(|row| (left..right).map(move |x| row * width + x));
+                        let chosen = if has[left] || counts[left] == 0 { Some(left) } else { pixels.clone().find(|index| has[*index]).or_else(|| pixels.find(|index| counts[*index] == 0)) };
+                        if let Some(index) = chosen {
+                            *representative = Some(by * band + index);
+                            if counts[index] == 0 {
+                                to_sample.push(index);
+                            }
                         }
-                        has_row[x] = true;
-                    });
-                    count.fetch_add(xs.len(), Ordering::Relaxed);
-                    busy_nanos.fetch_add(u64::try_from(row_started.elapsed().as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
+                    }
+                    for row in 0..rows_in_band {
+                        let xs: Vec<usize> = to_sample.iter().filter(|index| **index / width == row).map(|index| index % width).collect();
+                        if xs.is_empty() {
+                            continue;
+                        }
+                        positions(c, m, by * block + row, &xs, 0, origin, |x, position| {
+                            let (index, color) = (row * width + x, color_of(position));
+                            sums[index] = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
+                            counts[index] = 1;
+                            if !first.is_empty() {
+                                first[index] = color;
+                            }
+                            has[index] = true;
+                        });
+                    }
+                    count.fetch_add(to_sample.len(), Ordering::Relaxed);
+                    busy_nanos.fetch_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
                 });
             }
         });
@@ -388,25 +417,28 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
         if remaining <= worthwhile {
             break;
         }
-        fill_blocks(width, block, state, &has_first, colors);
+        fill_blocks(width, block, state, &has_first, &representatives, colors);
         on_pass(colors, 0);
     }
     Some((has_first, precomputed))
 }
 
-/// Gives every pixel without samples the color of the top-left pixel of its `block` x `block` block, if the previews computed that pixel
-fn fill_blocks(width: usize, block: usize, state: &SampleState, has_first: &[bool], colors: &mut [TrueColor]) {
+/// Gives every pixel without samples (and every pixel the previews computed) the color of the representative of its `block` x `block` block, see `render_previews`
+fn fill_blocks(width: usize, block: usize, state: &SampleState, has_first: &[bool], representatives: &[Option<usize>], colors: &mut [TrueColor]) {
+    let across = width.div_ceil(block);
     let rows = Mutex::new(colors.chunks_mut(width).enumerate());
     thread::scope(|scope| {
         for _ in 0..render_thread_count() {
             scope.spawn(|| loop {
                 let next_row = rows.lock().unwrap().next();
                 let Some((y, row)) = next_row else { return };
-                let top = (y - y % block) * width;
+                let band = (y / block) * across;
                 for (x, color) in row.iter_mut().enumerate() {
-                    let (index, origin) = (y * width + x, top + x - x % block);
-                    if has_first[origin] && (state.counts[index] == 0 || has_first[index]) {
-                        *color = sum_color(state.sums[origin]);
+                    let index = y * width + x;
+                    if state.counts[index] == 0 || has_first[index] {
+                        if let Some(representative) = representatives[band + x / block] {
+                            *color = sum_color(state.sums[representative]);
+                        }
                     }
                 }
             });

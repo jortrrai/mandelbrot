@@ -23,7 +23,8 @@
 //! * `max_iterations` is a whole number from 1 to 1,000,000, the range of the control in the window.
 //! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. Both are optional.
 //! * The points are listed in alphabetical order of their **file names** (ignoring case), not of their display names: start a file name with a digit to choose its place in the list (with more than ten files, use leading zeros so that `10-` does not sort before `2-`).
-//!   The bundled files are named `0-frost-on-the-shoreline.json` to `9-sunlit-reef.json`: the number of the view they replaced, counting from 0 (`VIEW_1` is 0, `VIEW_9` is 8 and `VIEW_0` is 9), a `-`, and the slugified name.
+//!   The bundled files are named `00-reset-view.json` (the reset view, first in the list), then `01-frost-on-the-shoreline.json` to `10-sunlit-reef.json`: the number of
+//!   the view they replaced, counting from 1 with two digits (`VIEW_1` is 01, `VIEW_9` is 09 and `VIEW_0` is 10), a `-`, and the slugified name.
 //!   Fields that are not known are ignored, so newer files still load.
 //!
 //! A file that cannot be used is skipped with a message that names the file; the others still load. See `load_folder`.
@@ -367,38 +368,44 @@ mod tests {
         assert_eq!(slugify("  The  Narrow--Pass! "), "the-narrow-pass");
     }
 
-    /// The numbers of the ten views that were hard-coded in `lib.rs` (`VIEW_1` to `VIEW_9`, then `VIEW_0`), by the name of the file that holds them now, in their original order; the file names count from 0
+    /// The numbers of the ten views that were hard-coded in `lib.rs` (`VIEW_1` to `VIEW_9`, then `VIEW_0`), by the name of the file that holds them now, in their original order; the file names count from 01
     const FORMER_VIEWS: [(&str, &str, f64, f64, f64); 10] = [
-        ("0-frost-on-the-shoreline", "Frost on the Shoreline", -0.6604166666666667, 0.4437500000000001, 0.1),
-        ("1-frozen-constellation", "Frozen Constellation", -1.0591666666666668, 0.2629166666666668, 0.01),
-        ("2-harbor-of-moons", "Harbor of Moons", -0.4624999999999999, 0.55, 0.1),
-        ("3-the-narrow-pass", "The Narrow Pass", -0.46395833333333325, 0.5531250000000001, 0.03),
-        ("4-coral-atoll", "Coral Atoll", -0.4375218333333333, 0.5632133750000003, 0.00002000000000000002),
-        ("5-seahorse-embers", "Seahorse Embers", -0.7498100000000001, -0.020300000000000054, 0.00006400000000000002),
-        ("6-lone-comet", "Lone Comet", -1.7862712000000047, 0.000052399999999991516, 0.00001677721600000001),
-        ("7-comets-crown", "Comet's Crown", -1.7862581627050718, 0.00005198056959995248, 0.000006039797760000003),
-        ("8-the-whirlpool", "The Whirlpool", -0.4687339999999999, 0.5425518958333333, 0.000010000000000000003),
-        ("9-sunlit-reef", "Sunlit Reef", -0.437520465811966, 0.5632133750000006, 0.000004000000000000004),
+        ("01-frost-on-the-shoreline", "Frost on the Shoreline", -0.6604166666666667, 0.4437500000000001, 0.1),
+        ("02-frozen-constellation", "Frozen Constellation", -1.0591666666666668, 0.2629166666666668, 0.01),
+        ("03-harbor-of-moons", "Harbor of Moons", -0.4624999999999999, 0.55, 0.1),
+        ("04-the-narrow-pass", "The Narrow Pass", -0.46395833333333325, 0.5531250000000001, 0.03),
+        ("05-coral-atoll", "Coral Atoll", -0.4375218333333333, 0.5632133750000003, 0.00002000000000000002),
+        ("06-seahorse-embers", "Seahorse Embers", -0.7498100000000001, -0.020300000000000054, 0.00006400000000000002),
+        ("07-lone-comet", "Lone Comet", -1.7862712000000047, 0.000052399999999991516, 0.00001677721600000001),
+        ("08-comets-crown", "Comet's Crown", -1.7862581627050718, 0.00005198056959995248, 0.000006039797760000003),
+        ("09-the-whirlpool", "The Whirlpool", -0.4687339999999999, 0.5425518958333333, 0.000010000000000000003),
+        ("10-sunlit-reef", "Sunlit Reef", -0.437520465811966, 0.5632133750000006, 0.000004000000000000004),
     ];
 
     #[test]
-    fn the_shipped_folder_has_the_ten_former_views_in_their_original_order_with_exactly_their_numbers() {
+    fn the_shipped_folder_has_the_reset_view_first_then_the_ten_former_views_in_their_original_order_with_exactly_their_numbers() {
         let report = load_folder(&find_folder());
         assert!(report.problems.is_empty(), "{:?}", report.problems);
-        assert_eq!(report.points.len(), 10);
-        //The file names sort as View 1 to View 10 (VIEW_0 last), numbered 0 to 9, and that is the order of the list
-        for (index, (point, (file, name, real, imaginary, scale))) in report.points.iter().zip(FORMER_VIEWS).enumerate() {
+        assert_eq!(report.points.len(), 11);
+        //The reset view first: exactly the view of `ComplexPlane::new`
+        let reset = &report.points[0];
+        let plane = crate::complex_plane::ComplexPlane::new(1200, 800);
+        assert_eq!((reset.file_name.as_str(), reset.name.as_str()), ("00-reset-view.json", "Reset View"));
+        assert_eq!((reset.location.real, reset.location.imaginary, reset.location.scale), (plane.center().x, plane.center().y, plane.get_scale()));
+        //Then the file names sort as View 1 to View 10 (VIEW_0 last), numbered 01 to 10, and that is the order of the list
+        for (index, (point, (file, name, real, imaginary, scale))) in report.points[1..].iter().zip(FORMER_VIEWS).enumerate() {
+            let number = format!("{:02}", index + 1);
             assert_eq!(point.file_name, format!("{file}.json"), "position {}", index + 1);
-            assert!(file.starts_with(&format!("{index}-")), "the number of the file is its place, counting from 0");
+            assert!(file.starts_with(&format!("{number}-")), "the number of the file is its place in the list");
             assert_eq!(point.name, name);
-            assert_eq!(format!("{index}-{}", slugify(&point.name)), file, "the file is named after its number and the display name");
+            assert_eq!(format!("{number}-{}", slugify(&point.name)), file, "the file is named after its number and the display name");
             assert_ne!(point.description, "");
             assert_eq!((point.location.real.to_bits(), point.location.imaginary.to_bits(), point.location.scale.to_bits()), (real.to_bits(), imaginary.to_bits(), scale.to_bits()), "{file}");
             assert!(MAX_ITERATIONS_RANGE.contains(&point.location.max_iterations));
             let appearance = point.appearance.as_ref().expect("the default appearance is written out");
             assert_eq!((appearance.coloring, format!("{:?}", appearance.color_channels.unwrap())), (Some(Coloring::Bernstein), String::from("RGB")), "the default appearance of the application");
         }
-        assert_eq!(report.points[9].file_name, "9-sunlit-reef.json", "VIEW_0, the tenth view, is number 9");
+        assert_eq!(report.points[10].file_name, "10-sunlit-reef.json", "VIEW_0, the tenth view, is number 10");
         let mut sorted: Vec<String> = report.points.iter().map(|p| p.file_name.to_lowercase()).collect();
         sorted.sort();
         assert_eq!(sorted, report.points.iter().map(|p| p.file_name.to_lowercase()).collect::<Vec<_>>(), "listed in alphabetical order of the file names");

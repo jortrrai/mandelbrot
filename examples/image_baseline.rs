@@ -6,7 +6,7 @@
 //! cargo run --release --example image_baseline | grep '^BASELINE' > after.txt    # on the new code
 //! diff before.txt after.txt                                                      # no output: nothing changed
 //! ```
-//! It covers the ten places of the `points_of_interest` folder and the default view, with the real palettes (Bernstein, HSV), smooth and integer coloring, the palette of automatic iterations,
+//! It covers the places of the `points_of_interest` folder (the reset view and ten more) and the default view, with the real palettes (Bernstein, HSV), smooth and integer coloring, the palette of automatic iterations,
 //! uniform and adaptive supersampling, the channel mappings, moves that render only the exposed strip, the old non-progressive render path used for saving, a saved PNG file (read back),
 //! thumbnails, and the choices of the automatic iteration limit.
 //!
