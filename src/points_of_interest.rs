@@ -22,8 +22,9 @@
 //!   `-0.46395833333333325` was read one bit off, which a test of the shipped files caught).
 //! * `max_iterations` is a whole number from 1 to 1,000,000, the range of the control in the window.
 //! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. Both are optional.
-//! * The points are listed in alphabetical order of their **file names** (ignoring case), not of their display names: start a file name with a digit to choose its place in the list (with more than ten files, use leading zeros so that `10-` does not sort before `2-`).
-//!   The bundled files are named `00-reset-view.json` (the reset view, first in the list), then `01-frost-on-the-shoreline.json` to `10-sunlit-reef.json`: the number of
+//! * The points are listed by **zoom**, the shallowest first (the largest `scale` at the top), so the deeper places are further down. Places with the same zoom are listed in
+//!   alphabetical order of their file names (ignoring case), not of their display names.
+//!   The bundled files are named `00-reset-view.json` (the reset view, the shallowest, so first in the list), then `01-frost-on-the-shoreline.json` to `10-sunlit-reef.json`: the number of
 //!   the view they replaced, counting from 1 with two digits (`VIEW_1` is 01, `VIEW_9` is 09 and `VIEW_0` is 10), a `-`, and the slugified name.
 //!   Fields that are not known are ignored, so newer files still load.
 //!
@@ -221,7 +222,10 @@ pub fn load_folder(folder: &Path) -> LoadReport {
             Err(error) => report.problems.push(format!("{file_name}: cannot be read: {error}")),
         }
     }
-    report.points.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()).then_with(|| a.file_name.cmp(&b.file_name)));
+    report.points.sort_by(|a, b| {
+        //Zoom ascending is scale descending: the shallowest place first
+        b.location.scale.total_cmp(&a.location.scale).then_with(|| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())).then_with(|| a.file_name.cmp(&b.file_name))
+    });
     report
 }
 
@@ -397,17 +401,21 @@ mod tests {
     #[test]
     fn a_folder_loads_the_good_files_sorts_them_and_reports_the_bad_ones() {
         let folder = temp_folder("mixed");
+        let deep = |name: &str| VALID.replace("Test Place", name).replace("\"scale\": 0.5", "\"scale\": 0.001");
+        let shallow = |name: &str| VALID.replace("Test Place", name).replace("\"scale\": 0.5", "\"scale\": 2.0");
         std::fs::write(folder.join("2-ant.json"), VALID.replace("Test Place", "Ant")).unwrap();
         std::fs::write(folder.join("1-zebra.json"), VALID.replace("Test Place", "Zebra")).unwrap();
         std::fs::write(folder.join("0-Yak.JSON"), VALID.replace("Test Place", "Yak")).unwrap();
         std::fs::write(folder.join("b-cat.json"), VALID.replace("Test Place", "Cat")).unwrap();
         std::fs::write(folder.join("A-bee.json"), VALID.replace("Test Place", "Bee")).unwrap();
+        std::fs::write(folder.join("0-deep.json"), deep("Deep")).unwrap();
+        std::fs::write(folder.join("z-shallow.json"), shallow("Shallow")).unwrap();
         std::fs::write(folder.join("broken.json"), "{ nope").unwrap();
         std::fs::write(folder.join("notes.txt"), "not a point").unwrap();
         std::fs::create_dir(folder.join("sub.json")).unwrap();
         let report = load_folder(&folder);
         let names: Vec<&str> = report.points.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Yak", "Zebra", "Ant", "Bee", "Cat"], "alphabetical order of the file names (0-, 1-, 2-, A-bee, b-cat, ignoring case), not of the display names");
+        assert_eq!(names, ["Shallow", "Yak", "Zebra", "Ant", "Bee", "Cat", "Deep"], "by zoom, the shallowest first whatever the file name; the same zoom in alphabetical order of the file names (0-, 1-, 2-, A-bee, b-cat, ignoring case), not of the display names");
         assert_eq!(report.problems.len(), 1);
         assert!(report.problems[0].starts_with("broken.json"));
         let _ = std::fs::remove_dir_all(&folder);
@@ -441,20 +449,20 @@ mod tests {
     ];
 
     #[test]
-    fn the_shipped_folder_has_the_reset_view_first_then_the_ten_former_views_in_their_original_order_with_exactly_their_numbers() {
+    fn the_shipped_folder_has_the_reset_view_first_then_the_ten_former_views_by_zoom_with_exactly_their_numbers() {
         let report = load_folder(&find_folder());
         assert!(report.problems.is_empty(), "{:?}", report.problems);
         assert_eq!(report.points.len(), 11);
-        //The reset view first: exactly the view of `ComplexPlane::new`
+        //The reset view first, the shallowest: exactly the view of `ComplexPlane::new`
         let reset = &report.points[0];
         let plane = crate::complex_plane::ComplexPlane::new(1200, 800);
         assert_eq!((reset.file_name.as_str(), reset.name.as_str()), ("00-reset-view.json", "Reset View"));
         assert_eq!((reset.location.real, reset.location.imaginary, reset.location.scale), (plane.center().x, plane.center().y, plane.get_scale()));
-        //Then the file names sort as View 1 to View 10 (VIEW_0 last), numbered 01 to 10, and that is the order of the list
-        for (index, (point, (file, name, real, imaginary, scale))) in report.points[1..].iter().zip(FORMER_VIEWS).enumerate() {
+        //The former View 1 to View 10 (VIEW_0 last) are numbered 01 to 10
+        for (index, (file, name, real, imaginary, scale)) in FORMER_VIEWS.into_iter().enumerate() {
             let number = format!("{:02}", index + 1);
-            assert_eq!(point.file_name, format!("{file}.json"), "position {}", index + 1);
-            assert!(file.starts_with(&format!("{number}-")), "the number of the file is its place in the list");
+            let point = report.points.iter().find(|p| p.file_name == format!("{file}.json")).unwrap_or_else(|| panic!("{file} is shipped"));
+            assert!(file.starts_with(&format!("{number}-")), "the number of the file is the number of the view it replaced");
             assert_eq!(point.name, name);
             assert_eq!(format!("{number}-{}", slugify(&point.name)), file, "the file is named after its number and the display name");
             assert_ne!(point.description, "");
@@ -463,10 +471,25 @@ mod tests {
             let appearance = point.appearance.as_ref().expect("the default appearance is written out");
             assert_eq!((appearance.coloring, format!("{:?}", appearance.color_channels.unwrap())), (Some(Coloring::Bernstein), String::from("RGB")), "the default appearance of the application");
         }
-        assert_eq!(report.points[10].file_name, "10-sunlit-reef.json", "VIEW_0, the tenth view, is number 10");
-        let mut sorted: Vec<String> = report.points.iter().map(|p| p.file_name.to_lowercase()).collect();
-        sorted.sort();
-        assert_eq!(sorted, report.points.iter().map(|p| p.file_name.to_lowercase()).collect::<Vec<_>>(), "listed in alphabetical order of the file names");
+        //Listed by zoom, the shallowest first; Frost on the Shoreline and Harbor of Moons have the same zoom, so they keep the order of their file names
+        let files: Vec<&str> = report.points.iter().map(|p| p.file_name.trim_end_matches(".json")).collect();
+        assert_eq!(
+            files,
+            [
+                "00-reset-view",
+                "01-frost-on-the-shoreline",
+                "03-harbor-of-moons",
+                "04-the-narrow-pass",
+                "02-frozen-constellation",
+                "06-seahorse-embers",
+                "05-coral-atoll",
+                "07-lone-comet",
+                "09-the-whirlpool",
+                "08-comets-crown",
+                "10-sunlit-reef",
+            ]
+        );
+        assert!(report.points.windows(2).all(|pair| pair[0].location.scale >= pair[1].location.scale), "zoom ascending");
     }
 
     #[test]
