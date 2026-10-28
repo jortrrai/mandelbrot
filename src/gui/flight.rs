@@ -179,6 +179,11 @@ impl Flight {
         self.legs.last().map_or_else(|| unreachable!("a flight has a leg"), |leg| leg.to)
     }
 
+    /// The share of the path (0 to 1) that the camera has covered `elapsed` after the start, as the progress bar shows it
+    pub fn share_of_path(&self, elapsed: Duration) -> f64 {
+        self.pace.ease(elapsed.as_secs_f64() / self.duration.as_secs_f64())
+    }
+
     /// Whether the flight has arrived `elapsed` after the start
     pub fn arrived(&self, elapsed: Duration) -> bool {
         elapsed >= self.duration
@@ -251,6 +256,14 @@ mod tests {
         }
         //Even a zoom by a factor 10^12 is capped
         assert_eq!(Flight::new(RESET, DEEP, Route::ViaReset, Pace::Cinematic, RESET).duration(), seconds(12.0));
+    }
+
+    #[test]
+    fn the_share_of_the_path_goes_from_0_to_1_without_going_back() {
+        let flight = Flight::new(RESET, SEAHORSE, Route::ViaReset, Pace::Cinematic, RESET);
+        let shares: Vec<f64> = (0..=100).map(|i| flight.share_of_path(flight.duration().mul_f64(f64::from(i) / 100.0))).collect();
+        assert_eq!((shares[0], shares[100]), (0.0, 1.0));
+        assert!(shares.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     #[test]

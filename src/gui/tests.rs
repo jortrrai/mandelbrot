@@ -25,7 +25,7 @@ fn wait_for_job(app: &mut MandelbrotApp) {
 /// Lets the flight to a point of interest that is under way arrive (as if its time has passed) and waits for the render of the point
 fn finish_flight(app: &mut MandelbrotApp) {
     if let Some(flight) = &app.flight {
-        let arrival = flight.started + flight.flight.duration();
+        let arrival = flight.last_frame + flight.flight.duration();
         app.fly_at(arrival);
     }
     assert!(app.flight.is_none());
@@ -995,7 +995,7 @@ fn going_to_a_point_flies_there_via_reset_at_a_cinematic_pace_with_quick_frames(
     wait_for_job(&mut app);
     app.go_to_point_of_interest(0);
     assert!(app.log.last().unwrap().starts_with("Flying to Test Place (Via reset, Cinematic, "), "{:?}", app.log.last());
-    let (started, duration) = app.flight.as_ref().map(|flight| (flight.started, flight.flight.duration())).unwrap();
+    let (started, duration) = app.flight.as_ref().map(|flight| (flight.last_frame, flight.flight.duration())).unwrap();
     assert!(duration >= Duration::from_secs(2), "{duration:?}");
 
     //A frame on the way: a quick render (the first layer only), and no full-quality render while the flight goes on
@@ -1025,7 +1025,7 @@ fn any_other_action_stops_a_flight_where_it_is() {
     app.pace = super::flight::Pace::Fast;
     app.go_to_point_of_interest(0);
     assert!(app.log.last().unwrap().contains("(Shortest route, Fast, "), "{:?}", app.log.last());
-    let started = app.flight.as_ref().unwrap().started;
+    let started = app.flight.as_ref().unwrap().last_frame;
     app.fly_at(started + Duration::from_millis(200));
     let on_the_way = app.c.get_view();
     app.translate("up", 10, 0);
@@ -1036,5 +1036,30 @@ fn any_other_action_stops_a_flight_where_it_is() {
     expected.set_view(&on_the_way);
     crate::rendering::translate_complex_plane_by_pixels(&mut expected, 10, 0);
     assert!((app.c.center().y - expected.center().y).abs() < 1e-12, "the view stays where the flight stopped, moved up");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn cancel_stops_a_flight_where_it_is_and_skip_goes_to_the_place_at_once() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.go_to_point_of_interest(0);
+    let started = app.flight.as_ref().unwrap().last_frame;
+    app.fly_at(started + Duration::from_millis(700));
+    let share = app.flight.as_ref().map(|flight| flight.flight.share_of_path(flight.elapsed)).unwrap();
+    assert!(share > 0.0 && share < 1.0, "the progress bar is part of the way: {share}");
+    let on_the_way = app.c.get_view();
+    app.cancel_flight();
+    assert!(app.flight.is_none());
+    assert_eq!(format!("{:?}", app.c.get_view()), format!("{on_the_way:?}"), "the view stays where the flight was");
+    wait_for_job(&mut app);
+    assert!(app.buffer_is_complete, "with a full-quality render");
+    assert!(app.log.last().unwrap().starts_with("Stopped the flight to Test Place in"), "{:?}", app.log.last());
+
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    assert!(app.flight.is_none());
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18, "at the place");
+    assert!(app.log.last().unwrap().starts_with("Moved to Test Place in"), "{:?}", app.log.last());
     let _ = std::fs::remove_dir_all(folder);
 }
