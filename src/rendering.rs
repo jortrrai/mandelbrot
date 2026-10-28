@@ -382,23 +382,6 @@ pub fn render_region_adaptively(c: &ComplexPlane, m: &MandelbrotSet, width: usiz
     true
 }
 
-pub fn translate_and_render_complex_plane_buffer(p: &mut PixelBuffer, c: &ComplexPlane, m: &MandelbrotSet, rows: i128, columns: i128, supersampling_amount: u8,coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor) {
-    println!("rows: {}, columns: {}",rows, columns);
-    let max_x: usize = if columns > 0 {columns as usize} else {p.pixel_plane.width-1};
-    let max_y: usize = if rows > 0 {rows as usize} else {p.pixel_plane.height-1};
-    p.translate_buffer(rows, columns);
-    if rows == 0 {
-        let render_box = RenderBox::new((max_x as i128-columns.abs()) as usize, max_x, 0, p.pixel_plane.height);
-        render_box_render_complex_plane_into_buffer(p, c, m, render_box, supersampling_amount, coloring_function);
-    }
-    else if columns == 0 {
-        let render_box = RenderBox::new(0, p.pixel_plane.width, (max_y as i128 -rows.abs()) as usize, max_y);
-        render_box_render_complex_plane_into_buffer(p, c, m, render_box, supersampling_amount, coloring_function);
-    } else {
-        println!("ERROR: translate_and_render_complex_plane_buffer() requires that rows == 0 || columns == 0");
-    }
-}
-
 ///# Panics
 /// If `rows_up` != 0 && `columns_right` != 0
 /// Moves the complex plane `c` up by `rows_up` and right by `columns_right` pixels, without rendering anything
@@ -406,31 +389,6 @@ pub fn translate_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i16, col
     let row_sign: f64 = if rows_up > 0 {-1.0} else {1.0};
     let column_sign: f64 = if columns_right > 0 {1.0} else {-1.0};
     c.translate(column_sign*c.pixels_to_real(columns_right.unsigned_abs() as u8), row_sign*c.pixels_to_imaginary(rows_up.unsigned_abs() as u8)); 
-}
-
-pub fn translate_and_render_efficiently(c: &mut ComplexPlane, p: &mut PixelBuffer, m: &MandelbrotSet, rows_up: i16, columns_right: i16, supersampling_amount: u8,coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor) {
-    assert!(rows_up == 0 || columns_right == 0, "translate_and_render_efficiently: rows_up should be 0 or columns_right should be 0!");
-
-    translate_complex_plane_by_pixels(c, rows_up, columns_right);
-    translate_and_render_complex_plane_buffer(p, c, m, rows_up.into(), (-columns_right).into(), supersampling_amount, coloring_function);
-}
-
-pub fn translate_to_center_and_render_efficiently(c: &mut ComplexPlane, p: &mut PixelBuffer, m: &MandelbrotSet, new_center: &Complex, supersampling_amount: u8, coloring_function: fn(iterations: u32, max_iterations: u32) -> TrueColor) {
-    let mut translation: Complex = new_center.subtract(&c.center());
-    //Mirror the y translation because the screen y is mirrored compared to the complex plane y axis
-    translation.y = -translation.y;
-
-    //Translate x, to the right
-    c.translate(translation.x, 0.0);
-    let columns_right = -c.real_to_pixels(translation.x);
-    dbg!(columns_right);
-    translate_and_render_complex_plane_buffer(p, c, m, 0, columns_right.into(), supersampling_amount, coloring_function);
-
-    //Translate y, up
-    c.translate(0.0, translation.y);
-    let rows_up = -c.imaginary_to_pixels(translation.y);
-    dbg!(rows_up);
-    translate_and_render_complex_plane_buffer(p, c, m, rows_up.into(), 0, supersampling_amount, coloring_function);
 }
 
 fn benchmark_start() -> Instant {

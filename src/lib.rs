@@ -75,28 +75,6 @@ impl InteractionVariables{
     pub fn inverse_scaling_factor(&self) -> f64 {
         self.scale_denominator / self.scale_numerator
     }
-
-    pub fn increment_translation_amount(&mut self) {
-        self.translation_amount = self.translation_amount.saturating_add(1);
-    }
-
-    pub fn decrement_translation_amount(&mut self) {
-        if self.translation_amount > 1 {
-            self.translation_amount -=1;
-        }
-    }
-
-    pub fn increment_scale_numerator(&mut self) {
-        if self.scale_numerator < 9.0 {
-            self.scale_numerator += 1.0;
-        }
-    }
-
-    pub fn decrement_scale_numerator(&mut self) {
-        if self.scale_numerator > 1.0 {
-            self.scale_numerator -= 1.0;
-        }
-    }
 }
 
 impl Default for InteractionVariables{
