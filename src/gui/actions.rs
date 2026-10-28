@@ -41,17 +41,21 @@ impl MandelbrotApp {
             let view = c.get_view();
             #[allow(clippy::float_cmp)] // 1.0 is the exact default: only an unscaled window shows the image that is saved
             let unscaled = config.window_scale == 1.0;
-            if unscaled && buffer_is_complete {
-                p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount);
+            let saved = if unscaled && buffer_is_complete {
+                p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount)
             } else {
                 let mut image_p = PixelBuffer::new(PixelPlane::new(config.image_width, config.image_height));
                 let mut image_c = ComplexPlane::new(config.image_width, config.image_height);
                 image_p.color_channel_mapping = p.color_channel_mapping;
                 image_c.set_view(&view);
                 rendering::render_complex_plane_into_buffer(&mut image_p, &image_c, &m, image_supersampling_amount, coloring_function);
-                image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount);
-            }
-            let _ = sender.send(format!("Saved the image to saved/{file_name}.png"));
+                image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount)
+            };
+            let message = match saved {
+                Ok(()) => format!("Saved the image to saved/{file_name}.png"),
+                Err(err) => format!("Could not save the image to saved/{file_name}.png: {err}"),
+            };
+            let _ = sender.send(message);
         });
         self.log("Saving the image...");
     }

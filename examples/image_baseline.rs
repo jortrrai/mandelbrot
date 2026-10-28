@@ -123,7 +123,7 @@ fn main() {
     let mut png_buffer = PixelBuffer::new(PixelPlane::new(WIDTH, HEIGHT));
     png_buffer.colors.copy_from_slice(&default_colors);
     png_buffer.update_pixels();
-    png_buffer.save_as_png("baseline", default_view, &MandelbrotSet::new(1000, 2.0), 1);
+    png_buffer.save_as_png("baseline", default_view, &MandelbrotSet::new(1000, 2.0), 1).expect("the baseline image can be saved");
     let decoder = png::Decoder::new(std::fs::File::open(directory.join("saved").join("baseline.png")).expect("the saved file"));
     let mut reader = decoder.read_info().expect("a valid PNG");
     let mut raster = vec![0; reader.output_buffer_size()];
