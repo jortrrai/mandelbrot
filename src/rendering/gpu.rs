@@ -21,7 +21,6 @@
 
 use std::borrow::Cow;
 
-use wgpu::util::DeviceExt;
 
 use crate::{complex::Complex, complex_plane::{ComplexPlane, View}, mandelbrot_set::MandelbrotSet};
 
@@ -82,6 +81,8 @@ impl GpuIterator {
             return Err(format!("{name} lacks f64 shaders or SPIR-V passthrough"));
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: needed, required_limits: adapter.limits(), ..Default::default() })).map_err(|err| format!("{name}: {err}"))?;
+        //An error outside a dispatch is logged instead of ending the program (the default); the errors of a dispatch are returned by `submit`
+        device.on_uncaptured_error(std::sync::Arc::new(|error| eprintln!("GPU error: {error}")));
         let entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None }, count: None };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("mandelbrot"), entries: &[entry(0, true), entry(1, true), entry(2, false), entry(3, false)] });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("mandelbrot"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -142,7 +143,14 @@ impl GpuIterator {
             params.extend(value.to_le_bytes());
         }
         let coordinates: Vec<f64> = points.iter().flat_map(|c| [c.x, c.y]).collect();
-        let storage = |contents: &[u8]| self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents, usage: wgpu::BufferUsages::STORAGE });
+        //Every GPU error of the dispatch (a buffer the driver could not create, a lost device) is caught here and returned, so the CPU computes the batch instead
+        //(the window once crashed with a buffer that could not be mapped, see issue #119); the buffers are written by the queue, not mapped when they are created
+        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
+        let storage = |contents: &[u8]| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: contents.len() as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            self.queue.write_buffer(&buffer, 0, contents);
+            buffer
+        };
         //The index of the next point that an invocation takes, see `gpu.wgsl`
         let (params, coordinates, next_point) = (storage(&params), storage(bytemuck::cast_slice(&coordinates)), storage(&0_u32.to_le_bytes()));
         let size = (points.len() * std::mem::size_of::<Outcome>()) as u64;
@@ -164,7 +172,9 @@ impl GpuIterator {
         encoder.copy_buffer_to_buffer(&outcomes, 0, &read, 0, size);
         let index = self.queue.submit([encoder.finish()]);
         read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        Ok(Submitted { read, index })
+        //The scopes are popped in the reverse order of pushing them
+        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+        errors.into_iter().flatten().next().map_or(Ok(Submitted { read, index }), |error| Err(format!("{}: {error}", self.name)))
     }
 
     /// Waits for a dispatch of `submit` and returns the outcome of every point, in the order of its points
