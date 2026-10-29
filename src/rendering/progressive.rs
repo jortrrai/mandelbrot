@@ -215,7 +215,8 @@ impl<'a> Render<'a> {
         //The pixels whose first sample the previews computed, empty without previews
         let mut has_first: Vec<bool> = Vec::new();
         if let Some(worthwhile) = preview.filter(|_| pending[0] > 0) {
-            match render_previews(&anchor, m, origin, worthwhile, preview_blocks, cancel, &color_of, state, pending[0], &mut colors, &mut on_pass) {
+            let preview_gpu = gpu.map(|(gpu, join_after)| (gpu, join_after, gpu_samples, fast_gpu));
+            match render_previews(&anchor, m, origin, worthwhile, preview_blocks, track, cancel, pixels_done, preview_gpu, cpu_threads, &color_of, state, pending[0], &mut colors, &mut on_pass) {
                 Some((flags, count)) => {
                     has_first = flags;
                     pending[0] -= count;
@@ -375,6 +376,9 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                 let next_row = rows.lock().unwrap().next();
                 if let Some((y, ((((row, counts), first), second), color_row))) = next_row {
                     let xs = select(y, counts);
+                    if xs.is_empty() && !skip_first {
+                        continue; //Nothing to sample or to color in this row (a preview level, an adaptive pass)
+                    }
                     let positions = on_cpu(y, &xs);
                     apply(y, row, counts, first, second, color_row, &xs, &positions);
                     continue;
@@ -399,14 +403,16 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                 //and at most a quarter of the rows that are left, so the CPU threads do not wait for a large last batch
                 let mut in_flight = VecDeque::new();
                 let (mut gpu_works, mut rate, mut points_per_row) = (true, None::<f64>, width as f64);
+                let (mut points_taken, mut rows_taken) = (0_usize, 0_usize);
                 let gpu_started = Instant::now();
                 let mut points_finished = 0_usize;
                 loop {
                     while gpu_works && in_flight.len() < 2 && !cancel.load(Ordering::Relaxed) {
-                        let wanted = rate.map_or(GPU_ROWS, |rate| (rate * GPU_BATCH_TIME.as_secs_f64() / points_per_row.max(1.0)) as usize);
+                        let points = rate.map_or(GPU_ROWS as f64 * points_per_row, |rate| rate * GPU_BATCH_TIME.as_secs_f64()).max(GPU_MIN_POINTS as f64);
+                        let wanted = (points / points_per_row.max(1.0)) as usize;
                         let batch: Vec<PassRow> = {
                             let mut rows = rows.lock().unwrap();
-                            let take = wanted.min(rows.len().div_ceil(4)).min(BATCH / width.max(1)).max(1);
+                            let take = wanted.min(rows.len().div_ceil(4)).min((BATCH as f64 / points_per_row.max(1.0)) as usize).max(1); //About `BATCH` points, also for rows with few pixels to sample (previews, adaptive passes)
                             let batch: Vec<PassRow> = rows.by_ref().take(take).collect();
                             gpu_pending.fetch_add(batch.len(), Ordering::SeqCst); //While the rows are locked: a CPU thread never sees them neither in `rows` nor pending
                             drop(rows);
@@ -421,7 +427,9 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                             (row, xs)
                         }).collect();
                         let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, sample, origin))).collect();
-                        points_per_row = points_per_row.mul_add(0.5, points.len() as f64 / rows_in_batch as f64 * 0.5);
+                        //The points per row of the pass so far (rows with few or no pixels to sample in a preview level or an adaptive pass make it small)
+                        (points_taken, rows_taken) = (points_taken + points.len(), rows_taken + rows_in_batch);
+                        points_per_row = points_taken as f64 / rows_taken as f64;
                         let submitted = (!points.is_empty()).then(|| gpu.submit(m, &points, *fast)); //Rows without pixels of this pass need no dispatch
                         in_flight.push_back((selected, submitted, points.len()));
                     }
@@ -487,6 +495,11 @@ const GPU_WORTHWHILE: Duration = Duration::from_millis(20);
 
 /// The rows the GPU takes from the queue of a pass for its first batch, before its speed is known (about 38,000 pixels at 1200 x 800)
 const GPU_ROWS: usize = 32;
+
+/// The fewest points of a dispatch: a dispatch takes at least as long as its slowest point, which one GPU thread iterates step after step (measured on an RTX 5070 Ti
+/// in Seahorse Valley: 7.5 ms for 2,000 points as for 8,000), so only a dispatch of many points keeps the GPU busy (preview levels and adaptive passes have few
+/// points per row)
+const GPU_MIN_POINTS: usize = 1 << 16;
 
 /// How long one dispatch of the GPU should take at the speed measured in the pass: long enough that the gaps between dispatches do not matter, short enough to
 /// keep the window responsive (the GPU also draws it)
@@ -604,18 +617,35 @@ fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], s
 
 /// The previews of [`Render::preview`]: computes the first sample of the top-left pixel of every block of each level that has no samples yet into `state`, and reports
 /// a level (filled into `colors`) when the rest of the first layer (`empty` pixels without samples at the start) is expected to take longer than `worthwhile`.
-/// Returns which pixels got their first sample and how many, or `None` if cancelled.
-#[allow(clippy::too_many_arguments)] // The state of `Render::run` that the previews share
-fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), worthwhile: Duration, blocks: &[usize], cancel: &AtomicBool, color_of: &(impl Fn(f64) -> TrueColor + Sync),
+/// Returns which pixels got their first sample and how many, or `None` if cancelled. A level with many samples is computed like a pass, with the GPU (see
+/// `sample_level_like_a_pass`); the others on the CPU threads here.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The state of `Render::run` that the previews share with the passes
+fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), worthwhile: Duration, blocks: &[usize], track: bool, cancel: &AtomicBool, pixels_done: &AtomicUsize,
+    gpu: Option<(&GpuIterator, Duration, &AtomicUsize, bool)>, cpu_threads: usize, color_of: &(impl Fn(f64) -> TrueColor + Sync),
     state: &mut SampleState, empty: usize, colors: &mut [TrueColor], on_pass: &mut impl FnMut(&[TrueColor], u8)) -> Option<(Vec<bool>, usize)> {
     let width = state.width;
     let mut has_first = vec![false; state.counts.len()];
     let mut precomputed = 0;
+    //The samples the CPU threads computed here, for their speed (`busy_nanos`)
+    let mut on_cpu = 0;
     let threads = render_thread_count();
     //The time the threads spent computing samples, without starting threads and waiting: on a fast view those would dominate the estimate
     let busy_nanos = AtomicU64::new(0);
     let height = state.height;
     for &block in blocks {
+        //The GPU only for a level with many samples: a dispatch takes at least as long as its slowest point (see `GPU_MIN_POINTS`), which a coarse level does not make up for
+        if let Some(gpu) = gpu.filter(|_| cpu_threads == 0 || width.div_ceil(block) * height.div_ceil(block) >= 4 * GPU_MIN_POINTS) {
+            let level_started = Instant::now();
+            let (representatives, sampled) = sample_level_like_a_pass(c, m, block, track, cancel, pixels_done, gpu, cpu_threads, color_of, state, &mut has_first, colors)?;
+            precomputed += sampled;
+            let remaining = level_started.elapsed().mul_f64(empty.saturating_sub(precomputed) as f64 / sampled.max(1) as f64);
+            if remaining <= worthwhile {
+                break;
+            }
+            fill_blocks(width, block, state, &has_first, &representatives, colors, empty == state.counts.len());
+            on_pass(colors, 0);
+            continue;
+        }
         let count = AtomicUsize::new(0);
         //Every block has a representative: the pixel whose first sample it shows. That is its top-left pixel (always, in a render from nothing), unless that pixel
         //has samples from before (it was kept by a move): then a pixel of the block that a coarser level computed, or else its first pixel without samples. So a block
@@ -676,9 +706,10 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        precomputed += count.into_inner();
+        let sampled = count.into_inner();
+        (precomputed, on_cpu) = (precomputed + sampled, on_cpu + sampled);
         //The rest of the first layer, at the speed of the samples so far, on all threads
-        let per_sample = busy_nanos.load(Ordering::Relaxed) as f64 / precomputed.max(1) as f64;
+        let per_sample = busy_nanos.load(Ordering::Relaxed) as f64 / on_cpu.max(1) as f64;
         let remaining = Duration::from_secs_f64(per_sample * empty.saturating_sub(precomputed) as f64 / threads as f64 / 1e9);
         if remaining <= worthwhile {
             break;
@@ -687,6 +718,47 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
         on_pass(colors, 0);
     }
     Some((has_first, precomputed))
+}
+
+/// A preview level computed like a pass: chooses the representatives of the blocks (see `render_previews`), samples those without a sample yet with `sample_pass`
+/// (the CPU threads and the GPU), and marks them in `has_first`. Returns the representatives and how many were sampled, or `None` if cancelled.
+#[allow(clippy::too_many_arguments)] // The state of `render_previews`
+fn sample_level_like_a_pass(c: &ComplexPlane, m: &MandelbrotSet, block: usize, track: bool, cancel: &AtomicBool, pixels_done: &AtomicUsize, gpu: (&GpuIterator, Duration, &AtomicUsize, bool),
+    cpu_threads: usize, color_of: &(impl Fn(f64) -> TrueColor + Sync), state: &mut SampleState, has_first: &mut [bool], colors: &mut [TrueColor]) -> Option<(Vec<Option<usize>>, usize)> {
+    let (width, height) = (state.width, state.height);
+    let (across, bands) = (width.div_ceil(block), height.div_ceil(block));
+    let mut representatives: Vec<Option<usize>> = vec![None; across * bands];
+    let mut to_sample = vec![false; state.counts.len()];
+    let band = width * block;
+    let counts = &state.counts;
+    let rows = Mutex::new(counts.chunks(band).zip(has_first.chunks(band)).zip(to_sample.chunks_mut(band)).zip(representatives.chunks_mut(across)).enumerate());
+    thread::scope(|scope| {
+        for _ in 0..render_thread_count() {
+            scope.spawn(|| loop {
+                let next_band = rows.lock().unwrap().next();
+                let Some((by, (((counts, has), to_sample), representatives))) = next_band else { return };
+                let rows_in_band = counts.len() / width;
+                for (bx, representative) in representatives.iter_mut().enumerate() {
+                    let (left, right) = (bx * block, (bx * block + block).min(width));
+                    let mut pixels = (0..rows_in_band).flat_map(|row| (left..right).map(move |x| row * width + x));
+                    let chosen = if has[left] || counts[left] == 0 { Some(left) } else { pixels.clone().find(|index| has[*index]).or_else(|| pixels.find(|index| counts[*index] == 0)) };
+                    if let Some(index) = chosen {
+                        *representative = Some(by * band + index);
+                        to_sample[index] = counts[index] == 0 && !has[index];
+                    }
+                }
+            });
+        }
+    });
+    //(Without the flags of the first samples: the pixels to sample have none yet, and the colors of the others are filled in after the level)
+    let sampled = sample_pass(c, m, 0, track, state, colors, Some(&to_sample), &[], color_of, cancel, pixels_done, Some(gpu), cpu_threads);
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    for &index in representatives.iter().flatten() {
+        has_first[index] |= to_sample[index];
+    }
+    Some((representatives, sampled))
 }
 
 /// Gives every pixel without samples (and every pixel the previews computed) the color of the representative of its `block` x `block` block, see `render_previews`.

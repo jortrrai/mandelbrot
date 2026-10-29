@@ -25,7 +25,8 @@ use wgpu::util::DeviceExt;
 
 use crate::{complex::Complex, complex_plane::{ComplexPlane, View}, mandelbrot_set::MandelbrotSet};
 
-/// The most points of one dispatch: short dispatches keep the GPU responsive for the window
+/// About the most points of one dispatch: short dispatches keep the GPU responsive for the window (the renderer aims at it from the points per row it measured, so a
+/// dispatch can be somewhat larger)
 pub(crate) const BATCH: usize = 1 << 18;
 
 /// The workgroups of 64 invocations of a dispatch: each invocation takes points until there are none left (see `gpu.wgsl`). Enough to keep the GPU busy, few enough
@@ -131,10 +132,9 @@ impl GpuIterator {
         Ok(positions)
     }
 
-    /// Starts one dispatch of the exact loop (or with `fast` the fast loop) over `points` (at most `BATCH`) and returns at once: the GPU runs it while the caller
+    /// Starts one dispatch of the exact loop (or with `fast` the fast loop) over `points` (about `BATCH` at most) and returns at once: the GPU runs it while the caller
     /// prepares the next one, see `finish`
     pub(crate) fn submit(&self, m: &MandelbrotSet, points: &[Complex], fast: bool) -> Result<Submitted, String> {
-        debug_assert!(points.len() <= BATCH);
         let count = u32::try_from(points.len()).map_err(|_| String::from("too many points"))?;
         let mut params = Vec::with_capacity(24);
         params.extend((m.orbit_radius * m.orbit_radius).to_le_bytes());

@@ -630,6 +630,34 @@ fn a_render_with_the_gpu_is_bit_for_bit_the_render_without_it() {
 }
 
 #[test]
+fn previews_computed_with_the_gpu_are_bit_for_bit_the_previews_of_the_cpu() {
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let (w, h) = (160, 120);
+    let (c, m) = boundary_plane(w, h);
+    let gpu_samples = AtomicUsize::new(0);
+    //Every frame the render reports, previews (pass 0) included; a preview threshold of zero reports every level
+    let frames = |gpu: Option<(&super::gpu::GpuIterator, std::time::Duration)>, only_gpu: bool| {
+        let mut frames = Vec::new();
+        let render = Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(2).preview(Some(std::time::Duration::ZERO)).gpu(gpu).count_gpu_samples_in(&gpu_samples);
+        let render = if only_gpu { render.on_the_gpu_only() } else { render };
+        assert!(render.run(|colors, pass| frames.push((pass, colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()))));
+        frames
+    };
+    let cpu = frames(None, false);
+    assert!(cpu.iter().filter(|(pass, _)| *pass == 0).count() >= 2, "the previews are reported");
+    let before = gpu_samples.load(Ordering::Relaxed);
+    //Without CPU threads every level is sampled like a pass, by the GPU (with them only the levels with many samples are)
+    assert!(frames(Some((&gpu, std::time::Duration::ZERO)), true) == cpu, "every preview and layer of the GPU is the CPU's");
+    assert!(gpu_samples.load(Ordering::Relaxed) > before, "the GPU computed the samples");
+}
+
+#[test]
 fn a_render_with_the_fast_gpu_keeps_almost_every_pixel_and_deep_views_exact() {
     let gpu = match super::gpu::GpuIterator::new() {
         Ok(gpu) => gpu,
