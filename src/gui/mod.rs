@@ -162,7 +162,8 @@ pub struct MandelbrotApp {
     texture_uv: egui::Rect,
     /// The block size of the preview that the colors of `p` show, 1 for a full layer: a coarse preview is uploaded small and scaled up smoothly
     preview_block: usize,
-    /// How many previews the running render has shown, to know the block size of the next one (`rendering::PREVIEW_BLOCKS`)
+    /// The block sizes of the previews of the running render (see `render_job::preview_levels`), and how many it has shown, to know the block size of the next one
+    preview_levels: Vec<usize>,
     previews_received: usize,
     /// The view that the colors of `p` show. It differs from `c` while the render of a new view has not shown its first layer yet: the image is then drawn moved and scaled, see `transform`
     shown_plane: ComplexPlane,
@@ -256,6 +257,7 @@ impl MandelbrotApp {
             texture_outdated: true,
             texture_uv: FULL_TEXTURE,
             preview_block: 1,
+            preview_levels: Vec::new(),
             previews_received: 0,
             shown_plane,
             job: None,
@@ -378,35 +380,73 @@ impl MandelbrotApp {
     }
 }
 
-/// How complete a frame of a render is, or has to be before the screen shows it
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// How complete a frame of a render is, or has to be before the screen shows it, from the least to the most complete
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Readiness {
     /// Anything (no frame needs to wait)
     Any,
-    /// A complete low-resolution frame: a preview (of the whole view, or of the pixels a move exposed next to the ones it kept), or a full layer
-    Complete,
-    /// A full-resolution frame: a full layer
-    FullResolution,
+    /// A complete frame of blocks of at most this many pixels across: a preview (of the whole view, or of the pixels a move exposed next to the ones it kept), or a full layer
+    Blocks(usize),
+    /// At least this many supersampling layers (1: a full-resolution frame)
+    Layers(u8),
     /// The finished frame: every supersampling layer
     SuperSampled,
+}
+
+impl Readiness {
+    /// Any complete frame, however coarse its blocks
+    pub(super) const COMPLETE: Readiness = Readiness::Blocks(usize::MAX);
+    /// A full layer
+    pub(super) const FULL_RESOLUTION: Readiness = Readiness::Layers(1);
+
+    /// The order of completeness: finer blocks, then more layers
+    const fn rank(self) -> (u8, usize) {
+        match self {
+            Readiness::Any => (0, 0),
+            Readiness::Blocks(block) => (1, usize::MAX - block),
+            Readiness::Layers(layers) => (2, layers as usize),
+            Readiness::SuperSampled => (3, 0),
+        }
+    }
+
+    /// What a flight with `rendering` waits for, see `flight::FlightRendering`
+    fn of_flight(rendering: flight::FlightRendering) -> Readiness {
+        match rendering {
+            flight::FlightRendering::BestEffort => Readiness::Any,
+            flight::FlightRendering::LowRes => Readiness::COMPLETE,
+            flight::FlightRendering::Resolution(percent) if percent < 100 => match (100.0 / f64::from(percent.max(1))).round() as usize {
+                0 | 1 => Readiness::FULL_RESOLUTION,
+                block => Readiness::Blocks(block),
+            },
+            flight::FlightRendering::Resolution(percent) => Readiness::Layers((f64::from(percent) / 100.0).powi(2).round().clamp(1.0, 64.0) as u8),
+            flight::FlightRendering::SuperSampled => Readiness::SuperSampled,
+        }
+    }
+}
+
+impl Ord for Readiness {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl PartialOrd for Readiness {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl MandelbrotApp {
     /// How complete a frame has to be before the screen shows it: a complete frame with immersion, and what the flight rendering asks for during a flight
     pub(super) fn required_readiness(&self) -> Readiness {
         let flight = if self.flight.is_some() { self.flight_readiness() } else { Readiness::Any };
-        flight.max(if self.immersion { Readiness::Complete } else { Readiness::Any })
+        flight.max(if self.immersion { Readiness::COMPLETE } else { Readiness::Any })
     }
 
     /// What the frames of a flight have to be, see `flight::FlightRendering`; immersion asks for at least a complete frame
     pub(super) fn flight_readiness(&self) -> Readiness {
-        let mode = match self.flight_rendering {
-            flight::FlightRendering::BestEffort => Readiness::Any,
-            flight::FlightRendering::LowRes => Readiness::Complete,
-            flight::FlightRendering::MaxQuality => Readiness::FullResolution,
-            flight::FlightRendering::SuperSampled => Readiness::SuperSampled,
-        };
-        mode.max(if self.immersion { Readiness::Complete } else { Readiness::Any })
+        let mode = Readiness::of_flight(self.flight_rendering);
+        mode.max(if self.immersion { Readiness::COMPLETE } else { Readiness::Any })
     }
 
     /// Where the image is drawn, as a fraction of the image area: moved and scaled to the current view (best effort), or held where it is, so the screen never shows
