@@ -155,17 +155,17 @@ impl MandelbrotApp {
             }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest, by the shortest path (zooming out only as far as the distance needs); using any control or the mouse stops a flight");
             egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
                 for mode in FlightRendering::ALL {
-                    ui.selectable_value(&mut self.flight_rendering, mode, mode.name()).on_hover_text(match mode {
+                    ui.selectable_value(&mut self.flight_rendering, mode, mode.entry()).on_hover_text(match mode {
                         FlightRendering::BestEffort => "The camera follows the clock; the picture fills in as the render goes",
                         FlightRendering::LowRes => "The camera waits for a complete low-resolution frame of every view on the way",
                         FlightRendering::Resolution(100) => "The camera waits for a full-resolution frame of every view on the way: sharp, but it can crawl where the view is slow",
-                        FlightRendering::Resolution(_) => "The camera waits for a frame of this resolution (blocks of 4 x 4 or 2 x 2 pixels): cleaner than Low res, faster than Max quality",
+                        FlightRendering::Resolution(_) => "The camera waits for a frame of this resolution (blocks of 4 x 4 or 2 x 2 pixels): cleaner than Low res, faster than full resolution",
                         FlightRendering::SuperSampled => "Every view on the way is rendered with all its supersampling layers, and the camera waits for the finished frame: the best picture, the slowest crawl",
                     });
                 }
             }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
             if let FlightRendering::Resolution(percent) = &mut self.flight_rendering {
-                ui.add(egui::DragValue::new(percent).range(1..=800).suffix("%")).on_hover_text("The resolution of the frames of a flight, in percent of the pixels across (type a value): below 100 the camera waits for blocks of 100 / percent pixels (33%: 3 x 3), 100 is Max quality, above 100 it waits for supersampling layers ((percent / 100)²: 200% is 4 samples per pixel, up to the quality setting)");
+                ui.add(egui::DragValue::new(percent).range(1..=800).suffix("%")).on_hover_text("The resolution of the frames of a flight, in percent of the pixels across (type a value): below 100 the camera waits for blocks of 100 / percent pixels (33%: 3 x 3), 100 is full resolution, above 100 it waits for supersampling layers ((percent / 100)²: 200% is 4 samples per pixel, up to the quality setting)");
             }
         });
         if let Some(flight) = &self.flight {

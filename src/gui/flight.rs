@@ -64,29 +64,36 @@ pub enum FlightRendering {
     /// The camera waits for a complete low-resolution frame (a preview of the whole view, or a full layer)
     LowRes,
     /// The camera waits for a frame of this resolution, in percent of the view's pixels across: below 100 a preview of blocks of `100 / percent` pixels (25: blocks of
-    /// 4 x 4), 100 a full layer (Max quality), above 100 `(percent / 100)²` supersampling layers (200: 4 samples per pixel)
+    /// 4 x 4), 100 a full layer (full resolution), above 100 `(percent / 100)²` supersampling layers (200: 4 samples per pixel)
     Resolution(u16),
     /// Every frame is rendered with all its supersampling layers, and the camera waits until the last one is done: the finished image of every view on the way, the slowest
     SuperSampled,
 }
 
 impl FlightRendering {
-    /// A full layer of every view on the way: sharp all the way, slow where the view is expensive
-    pub const MAX_QUALITY: FlightRendering = FlightRendering::Resolution(100);
+    /// A full layer of every view on the way (100%): sharp all the way, slow where the view is expensive
+    pub const FULL_RESOLUTION: FlightRendering = FlightRendering::Resolution(100);
 
     /// The modes of the drop-down; any other resolution can be typed in
-    pub const ALL: [FlightRendering; 6] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::Resolution(25), FlightRendering::Resolution(50), FlightRendering::MAX_QUALITY, FlightRendering::SuperSampled];
+    pub const ALL: [FlightRendering; 6] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::Resolution(25), FlightRendering::Resolution(50), FlightRendering::FULL_RESOLUTION, FlightRendering::SuperSampled];
 
-    /// The name in the drop-down
-    pub fn name(self) -> String {
+    /// The name of the mode: the drop-down shows it, with the resolution in percent next to it for `Resolution`
+    pub const fn name(self) -> &'static str {
         match self {
-            FlightRendering::BestEffort => String::from("Best effort"),
-            FlightRendering::LowRes => String::from("Low res"),
-            FlightRendering::Resolution(25) => String::from("Quarter resolution"),
-            FlightRendering::Resolution(50) => String::from("Half resolution"),
-            FlightRendering::Resolution(100) => String::from("Max quality"),
-            FlightRendering::Resolution(percent) => format!("{percent}% resolution"),
-            FlightRendering::SuperSampled => String::from("Super sampled"),
+            FlightRendering::BestEffort => "Best effort",
+            FlightRendering::LowRes => "Low res",
+            FlightRendering::Resolution(_) => "Resolution",
+            FlightRendering::SuperSampled => "Super sampled",
+        }
+    }
+
+    /// The name of an entry of the drop-down: the presets of `Resolution` by their resolution
+    pub const fn entry(self) -> &'static str {
+        match self {
+            FlightRendering::Resolution(25) => "Quarter resolution",
+            FlightRendering::Resolution(50) => "Half resolution",
+            FlightRendering::Resolution(100) => "Full resolution",
+            mode => mode.name(),
         }
     }
 }
