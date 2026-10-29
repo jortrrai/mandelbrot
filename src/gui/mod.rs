@@ -43,7 +43,7 @@ use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use crate::auto_iterations::{AutoIterationSettings, AutoPreset};
 use crate::coloring::{Channel, ColorChannelMapping, TrueColor};
 use crate::complex_plane::ComplexPlane;
-use crate::mandelbrot_set::MandelbrotSet;
+use crate::mandelbrot_set::{ColorCycle, MandelbrotSet};
 use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
 use crate::points_of_interest::{self, PointOfInterest};
 use crate::rendering::{self};
@@ -216,7 +216,8 @@ impl MandelbrotApp {
         let shown_plane = c.clone();
         let mut p = PixelBuffer::new(PixelPlane::new(config.window_width, config.window_height));
         p.color_channel_mapping = COLOR_CHANNEL_MAPPING;
-        let m = MandelbrotSet::new(config.max_iterations, config.orbit_radius);
+        //The window cycles the palette (see `ColorCycle`): a manual and an automatic limit color the same
+        let m = MandelbrotSet { palette: ColorCycle::CYCLE, ..MandelbrotSet::new(config.max_iterations, config.orbit_radius) };
         //The tests never read or write the presets file of the user
         let presets_path = if cfg!(test) { None } else { resolution::custom_presets_path() };
         let (save_size, preset_warnings) = SaveSize::new(Resolution::new(config.image_width, config.image_height), presets_path);

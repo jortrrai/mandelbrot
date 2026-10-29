@@ -574,10 +574,11 @@ fn a_preview_of_the_strip_a_move_exposed_has_no_gaps() {
 
 #[test]
 fn a_color_table_built_on_all_threads_is_the_table_of_one_thread() {
-    for coloring in [TrueColor::new_from_bernstein_polynomials as fn(u32, u32) -> TrueColor, TrueColor::new_from_hsv_colors] {
-        for (limit, palette) in [(100, None), (40_000, Some(2043)), (65_376, Some(2043)), (200_000, None)] {
+    for coloring in [TrueColor::new_from_bernstein_polynomials as fn(f64, f64) -> TrueColor, TrueColor::new_from_hsv_colors] {
+        let cycle = crate::mandelbrot_set::ColorCycle { divide: 3.7, offset: 120.0, stretch: false };
+        for (limit, palette) in [(100, crate::mandelbrot_set::ColorCycle::STRETCHED), (40_000, cycle), (65_376, cycle), (200_000, crate::mandelbrot_set::ColorCycle::STRETCHED)] {
             let mut m = MandelbrotSet::new(limit, 2.0);
-            m.palette_scale = palette;
+            m.palette = palette;
             let table = super::progressive::color_table(&m, coloring);
             assert_eq!(table.len(), limit as usize + 1);
             assert!(table.iter().enumerate().all(|(iterations, color)| {

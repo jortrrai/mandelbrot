@@ -33,7 +33,7 @@ pub struct Render<'a> {
     set: &'a MandelbrotSet,
     width: usize,
     height: usize,
-    coloring_function: fn(u32, u32) -> TrueColor,
+    coloring_function: fn(f64, f64) -> TrueColor,
     supersampling_amount: u8,
     adaptive: Option<AdaptiveSampling>,
     exposed: Option<(&'a ExposedRegion, &'a [TrueColor])>,
@@ -55,7 +55,7 @@ pub struct Render<'a> {
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
-    pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(u32, u32) -> TrueColor) -> Self {
+    pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(f64, f64) -> TrueColor) -> Self {
         Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, cpu_threads: render_thread_count(), keep_samples: true }
     }
 
@@ -593,7 +593,7 @@ const PARALLEL_COLOR_TABLE_ENTRIES: usize = 50_000;
 
 /// The color of every iteration count from 0 to `max_iterations` of `m`. Every entry is independent of the others, so the table is the same however it is split.
 /// Measured on 16 threads, one thread and all threads: 65,376 HSV entries 0.75 and 0.23 ms; 200,000 entries 0.64 and 0.24 ms (Bernstein), 2.45 and 0.45 ms (HSV).
-pub(super) fn color_table(m: &MandelbrotSet, coloring_function: fn(u32, u32) -> TrueColor) -> Vec<TrueColor> {
+pub(super) fn color_table(m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor) -> Vec<TrueColor> {
     let entries = m.max_iterations as usize + 1;
     if entries < PARALLEL_COLOR_TABLE_ENTRIES {
         return (0..=m.max_iterations).map(|iterations| m.color(coloring_function, iterations)).collect();

@@ -4,6 +4,7 @@
 use eframe::egui::{self};
 
 use super::flight::{FlightRendering, Pace};
+use crate::mandelbrot_set::{MIN_DIVIDE, PALETTE_LENGTH};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
 use crate::resolution;
@@ -302,6 +303,24 @@ impl MandelbrotApp {
                 }
             });
         });
+        //The color cycle (see `ColorCycle`): how the iteration counts map onto the palette, the same with a manual and an automatic limit
+        let before = self.m.palette;
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!self.m.palette.stretch, |ui| {
+                ui.label("Iteration divide:");
+                ui.add(egui::DragValue::new(&mut self.m.palette.divide).range(MIN_DIVIDE..=100_000.0).speed(0.05).max_decimals(3))
+                    .on_hover_text("How many iterations one step of the palette takes: 1 changes the colors fastest; more gives broader, calmer bands. Deep views, whose iteration counts are high and far apart, often look best with more. A point keeps its color however far you zoom and whatever the iteration limit.");
+                ui.label("Offset:");
+                ui.add(egui::DragValue::new(&mut self.m.palette.offset).range(0.0..=PALETTE_LENGTH).speed(1.0).max_decimals(0))
+                    .on_hover_text("Where the palette starts, in steps (0 to 500): shifts every color along the palette");
+            });
+        });
+        ui.checkbox(&mut self.m.palette.stretch, "Stretch the palette over the limit")
+            .on_hover_text("On: the palette spans the iteration counts once, from 0 to the limit, without repeating (the colors change with the limit). Off: the palette repeats every 500 steps, see Iteration divide.");
+        if self.m.palette != before {
+            self.m.palette.offset = self.m.palette.offset.rem_euclid(PALETTE_LENGTH);
+            self.render(&format!("Set the colors to {}", super::points::palette_description(self.m.palette)));
+        }
         if ui.checkbox(&mut self.m.smooth_coloring, "Smooth colors").on_hover_text("Colors flow smoothly from one iteration count to the next (the fractional iteration count). Off: every pixel gets the color of its whole iteration count, which shows bands of color and saves two logarithms per pixel outside the set. Saved images use this setting too.").changed() {
             self.render(&format!("Turned smooth colors {}", if self.m.smooth_coloring { "on" } else { "off" }));
         }

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::auto_iterations::{self};
 use crate::coloring::TrueColor;
 use crate::complex_plane::ComplexPlane;
-use crate::mandelbrot_set::MandelbrotSet;
+use crate::mandelbrot_set::{ColorCycle, MandelbrotSet};
 use crate::rendering::{self, Render};
 use eframe::egui;
 
@@ -102,10 +102,10 @@ pub(super) enum JobMessage {
     /// `whole` is true when the render started from nothing, so the pass covers the whole view (not only pixels that a move exposed)
     Pass { colors: Vec<TrueColor>, plane: ComplexPlane, pass: u8, total: u8, layer_time: Duration, whole: bool },
     /// The iteration limit that auto iterations chose for the render, sent as soon as it is known, before the first layer is rendered
-    Limit { max_iterations: u32, palette_scale: u32 },
+    Limit { max_iterations: u32 },
     /// A frame of a flight (see `flight_job`) is complete enough: the flight clock at the frame, its view, its iteration limit and palette, and which preview of
     /// the render it is (the `Pass` that follows carries its colors)
-    FlightFrame { elapsed: Duration, plane: ComplexPlane, max_iterations: u32, palette_scale: Option<u32>, preview: usize },
+    FlightFrame { elapsed: Duration, plane: ComplexPlane, max_iterations: u32, palette: ColorCycle, preview: usize },
     /// The job has finished (or was cancelled), this is its final result; `reported` is whether it showed anything of `c` (otherwise `p` still shows the previous view)
     Done { c: ComplexPlane, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool, reported: bool },
 }
@@ -205,19 +205,18 @@ impl MandelbrotApp {
                         bars.layer_started = Instant::now();
                     }
                 }
-                Ok(JobMessage::Limit { max_iterations, palette_scale }) => {
+                Ok(JobMessage::Limit { max_iterations }) => {
                     //Only the running job can send this: the receiver of an interrupted job is dropped, so a stale limit never reaches the display
                     self.m.max_iterations = max_iterations;
-                    self.m.palette_scale = Some(palette_scale);
                     self.limit_pending = false;
                 }
-                Ok(JobMessage::FlightFrame { elapsed, plane, max_iterations, palette_scale, preview }) => {
+                Ok(JobMessage::FlightFrame { elapsed, plane, max_iterations, palette, preview }) => {
                     if let Some(flight) = &mut self.flight {
                         flight.elapsed = elapsed;
                         flight.frames.push(Instant::now()); //A frame of the flight, for its frame rate
                     }
                     self.c = plane; //The camera is where the frame is
-                    (self.m.max_iterations, self.m.palette_scale) = (max_iterations, palette_scale);
+                    (self.m.max_iterations, self.m.palette) = (max_iterations, palette);
                     self.previews_received = preview; //So the pass that follows is known as that preview (or layer)
                 }
                 Ok(JobMessage::Done { c, m, message, elapsed, completed, reported }) => {
@@ -345,12 +344,10 @@ impl MandelbrotApp {
             if !keeps_limit {
                 let initial = self.auto_settings.initial_limit(self.c.get_scale());
                 self.m.max_iterations = initial;
-                self.m.palette_scale = Some(initial);
                 self.limit_pending = true;
             }
         } else {
             self.m.max_iterations = self.max_iterations_input;
-            self.m.palette_scale = None;
         }
         let mut m = self.m.clone();
         let supersampling_amount = if all_layers { self.supersampling_amount } else { 1 };
@@ -378,9 +375,8 @@ impl MandelbrotApp {
                 //Choose the iteration limit for this zoom first; a cancelled choice cancels the render
                 match auto_iterations::choose_limit(&c, &m, width, height, settings, rendering::render_thread_count(), &thread_cancel) {
                     Some(result) => {
-                        let _ = sender.send(JobMessage::Limit { max_iterations: result.limit, palette_scale: result.palette_scale });
+                        let _ = sender.send(JobMessage::Limit { max_iterations: result.limit });
                         m.max_iterations = result.limit;
-                        m.palette_scale = Some(result.palette_scale);
                         message = format!("{message} (auto iterations: limit {}, {} rounds, {:?}, {:.2} s)", result.limit, result.rounds.len(), result.stop, started.elapsed().as_secs_f64());
                         println!("{result:?}");
                     }
@@ -390,8 +386,6 @@ impl MandelbrotApp {
                         return;
                     }
                 }
-            } else if auto_settings.is_none() {
-                m.palette_scale = None;
             }
             let kept = samples.prepare_for(&c, width, height, &m, coloring_function);
             let whole = kept == 0;
