@@ -66,6 +66,9 @@ fn main() {
     }
     var zx = 0.0lf;
     var zy = 0.0lf;
+    // The squares of z, from the escape check of the step before: the squares the next step needs (3 multiplications a step instead of 6, the same numbers)
+    var x2 = 0.0lf;
+    var y2 = 0.0lf;
     var iterations = 0u;
     var running = true;
     var saved_x = 0.0lf;
@@ -79,12 +82,15 @@ fn main() {
         // One block of steps, shorter at the end like the last block of the lockstep loop
         let steps = min(4u, max_iterations - step);
         for (var k = 0u; k < steps; k++) {
-            // The same arithmetic as z = z.squared().add(c): (zx * zx - zy * zy) + cx and (2 * zx) * zy + cy
-            let new_x = zx * zx - zy * zy + cx;
-            let new_y = 2.0lf * zx * zy + cy;
+            // The same arithmetic as z = z.squared().add(c): (zx * zx - zy * zy) + cx and (2 * zx) * zy + cy, with the squares of the step before and 2 * zx
+            // as zx + zx (exact either way)
+            let new_x = x2 - y2 + cx;
+            let new_y = (zx + zx) * zy + cy;
             zx = new_x;
             zy = new_y;
-            if (running && new_x * new_x + new_y * new_y > params.radius_squared) {
+            x2 = new_x * new_x;
+            y2 = new_y * new_y;
+            if (running && x2 + y2 > params.radius_squared) {
                 running = false;
             }
             if (running) {
@@ -118,6 +124,8 @@ fn main() {
             }
             zx = 0.0lf;
             zy = 0.0lf;
+            x2 = 0.0lf;
+            y2 = 0.0lf;
             iterations = 0u;
             running = true;
             saved_x = 0.0lf;
