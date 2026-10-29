@@ -27,6 +27,22 @@ pub(super) struct PointFlight {
     pub(super) point: PointOfInterest,
     /// With auto iterations: the limits of the frames on the way
     pub(super) limits: Option<FlightLimits>,
+    /// When the flight started, and when each of its frames was shown (a render complete enough for the flight rendering), for the frame rate, see `fps`
+    pub(super) started: Instant,
+    pub(super) frames: Vec<Instant>,
+}
+
+impl PointFlight {
+    /// The frames shown in the second before `now`
+    pub(super) fn fps(&self, now: Instant) -> usize {
+        self.frames.iter().rev().take_while(|shown| now.saturating_duration_since(**shown) <= Duration::from_secs(1)).count()
+    }
+
+    /// The frames shown so far, the time since the start, and the average frame rate, for the status log
+    fn summary(&self, now: Instant) -> String {
+        let seconds = now.saturating_duration_since(self.started).as_secs_f64();
+        format!("{} frames in {seconds:.1} s, {:.1} FPS on average", self.frames.len(), self.frames.len() as f64 / seconds.max(1e-9))
+    }
 }
 
 /// The iteration limits of a flight with auto iterations: for every frame the zoom rule of the preset (`AutoIterationSettings::initial_limit`) times a factor.
@@ -329,7 +345,8 @@ impl MandelbrotApp {
         let flight = Flight::new(from, to, self.pace);
         self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| self.flight_limits(to));
-        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point, limits });
+        let now = Instant::now();
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new() });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
 
@@ -358,6 +375,7 @@ impl MandelbrotApp {
     /// Stops the flight where it is (the Cancel button): the view stays, gets a full-quality render, and the controls are free again
     pub(super) fn cancel_flight(&mut self) {
         if let Some(flight) = self.flight.take() {
+            self.log(format!("The flight to {} stopped: {}", flight.point.name, flight.summary(Instant::now())));
             self.render(&format!("Stopped the flight to {}", flight.point.name));
         }
     }
@@ -365,6 +383,7 @@ impl MandelbrotApp {
     /// Ends the flight at its destination at once (the Skip button)
     pub(super) fn skip_flight(&mut self) {
         if let Some(flight) = self.flight.take() {
+            self.log(format!("The flight to {} was skipped: {}", flight.point.name, flight.summary(Instant::now())));
             self.arrive_at(&flight.point);
         }
     }
@@ -395,6 +414,7 @@ impl MandelbrotApp {
         }
         let elapsed = flight.elapsed;
         if flight.flight.arrived(elapsed) {
+            self.log(format!("The flight to {}: {}", flight.point.name, flight.summary(now)));
             self.arrive_at(&flight.point);
             return;
         }

@@ -1347,7 +1347,7 @@ fn flight_frames_without_smooth_colors_color_by_the_iteration_count_and_the_arri
     use super::render_job::RenderKind;
     let config = Config::sized(64, 48, 50, 1);
     let mut app = manual_app(&config);
-    assert!(app.smooth_flights, "on by default");
+    assert!(!app.smooth_flights, "off by default");
     let smooth = app.p.pixels.clone();
     app.m.smooth_coloring = false;
     app.render("Integer colors");
@@ -1356,6 +1356,7 @@ fn flight_frames_without_smooth_colors_color_by_the_iteration_count_and_the_arri
     assert_ne!(smooth, integer);
     app.m.smooth_coloring = true;
 
+    app.smooth_flights = true;
     app.start_render_as("A flight frame", RenderKind::FlightFrame);
     wait_for_job(&mut app);
     assert_eq!(app.p.pixels, smooth, "on: a flight frame is smooth like any render");
@@ -1391,4 +1392,25 @@ fn the_zoom_stops_where_the_fast_gpu_math_ends_with_a_warning_in_the_log() {
     assert!(!app.zoom_refused(&deep), "the limit switched off");
     (app.limit_zoom, app.fast_gpu) = (true, false);
     assert!(!app.zoom_refused(&deep), "without the fast GPU math there is no limit");
+}
+
+#[test]
+fn a_flight_counts_its_frames_shows_the_frame_rate_and_logs_the_average() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::BestEffort;
+    app.go_to_point_of_interest(0);
+    let started = app.flight.as_ref().unwrap().started;
+    for step in 1..=3 {
+        app.fly_at(started + Duration::from_millis(100 * step));
+        wait_for_job(&mut app);
+    }
+    let flight = app.flight.as_ref().unwrap();
+    assert!(flight.frames.len() >= 3, "every frame that was shown counts: {}", flight.frames.len());
+    let last = *flight.frames.last().unwrap();
+    assert_eq!(flight.fps(last), flight.frames.iter().filter(|shown| last.duration_since(**shown) <= Duration::from_secs(1)).count());
+    assert_eq!(flight.fps(last + Duration::from_secs(5)), 0, "the frames of the second before");
+    app.skip_flight();
+    assert!(app.log.iter().any(|line| line.starts_with("The flight to Test Place was skipped: ") && line.contains(" frames in ") && line.ends_with(" FPS on average")), "{:?}", app.log);
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
 }
