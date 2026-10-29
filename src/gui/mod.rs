@@ -395,7 +395,9 @@ impl MandelbrotApp {
         match self.blur.as_ref().filter(|_| self.auto_blur && self.flight.is_some()) {
             Some(blur) => {
                 let sigma = blur::blur_sigma(self.preview_block, self.shown_samples);
-                ui.painter_at(rect).add(blur.paint(target, texture.id(), self.texture_uv, self.p.pixel_plane.width, self.p.pixel_plane.height, sigma));
+                if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
+                    ui.painter_at(rect).add(callback);
+                }
             }
             None => {
                 ui.painter_at(rect).image(texture.id(), target, self.texture_uv, Color32::WHITE);

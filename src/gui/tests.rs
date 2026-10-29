@@ -1139,15 +1139,16 @@ fn a_frame_is_only_shown_when_it_is_complete_enough() {
 }
 
 /// Lets a flight that waits for its frames run in real time until it arrives, as the window does (see `flight_job`), and returns the flight clock at every frame
-fn fly_until_arrived(app: &mut MandelbrotApp) -> Vec<Duration> {
+fn fly_until_arrived(app: &mut MandelbrotApp) -> Vec<(Duration, usize)> {
     let started = std::time::Instant::now();
     let mut clocks = Vec::new();
     while let Some(flight) = &app.flight {
         assert!(started.elapsed() < Duration::from_secs(60), "the flight did not arrive");
         let frames = flight.frames.len();
         app.poll_job();
+        //(Fast frames can arrive more than one at a time: then only the clock of the last is seen, with the frames it took)
         if let Some(flight) = app.flight.as_ref().filter(|flight| flight.frames.len() > frames) {
-            clocks.push(flight.elapsed);
+            clocks.push((flight.elapsed, flight.frames.len() - frames));
         }
         app.fly_at(std::time::Instant::now());
         std::thread::sleep(Duration::from_millis(1));
@@ -1166,8 +1167,8 @@ fn a_flight_that_waits_for_its_frames_is_rendered_frame_after_frame_by_one_job()
     assert_eq!(format!("{:?}", app.c.get_view()), format!("{before:?}"), "the camera waits for the first frame");
     let clocks = fly_until_arrived(&mut app);
     assert!(clocks.len() >= 3, "frames on the way: {clocks:?}");
-    assert!(clocks.windows(2).all(|pair| pair[1] > pair[0] && pair[1].saturating_sub(pair[0]) <= super::points::MAX_WAITING_STEP), "the clock moves on by at most a step per frame: {clocks:?}");
-    assert_eq!(*clocks.last().unwrap(), duration, "the last frame is at the destination");
+    assert!(clocks.windows(2).all(|pair| pair[1].0 > pair[0].0 && pair[1].0.saturating_sub(pair[0].0) <= super::points::MAX_WAITING_STEP * u32::try_from(pair[1].1).unwrap()), "the clock moves on by at most a step per frame: {clocks:?}");
+    assert_eq!(clocks.last().unwrap().0, duration, "the last frame is at the destination");
     //The arrival: the place itself, with a full-quality render
     assert!(!app.flight_job);
     wait_for_job(&mut app);
@@ -1602,4 +1603,21 @@ fn an_auto_flight_shows_frames_of_the_chosen_resolution_and_arrives() {
     wait_for_job(&mut app);
     assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete, "the place itself, fully rendered");
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visible() {
+    use super::blur::visible_part;
+    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1));
+    let full = rect(0.0, 0.0, 1.0, 1.0);
+    //Zoomed in twice around the center of a 100 x 100 area: the middle half of the texture fills the area
+    let (shown, uv) = visible_part(rect(-50.0, -50.0, 150.0, 150.0), rect(0.0, 0.0, 100.0, 100.0), full).unwrap();
+    assert_eq!((shown, uv), (rect(0.0, 0.0, 100.0, 100.0), rect(0.25, 0.25, 0.75, 0.75)));
+    //Moved half out to the left, with the texture coordinates of a coarse preview
+    let (shown, uv) = visible_part(rect(-50.0, 0.0, 50.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), rect(0.1, 0.0, 0.9, 0.8)).unwrap();
+    assert_eq!(shown, rect(0.0, 0.0, 50.0, 100.0));
+    assert!((uv.min.x - 0.5).abs() < 1e-6 && (uv.max.x - 0.9).abs() < 1e-6 && uv.min.y == 0.0 && (uv.max.y - 0.8).abs() < 1e-6);
+    //Inside the area: unchanged; outside: nothing to draw
+    assert_eq!(visible_part(rect(10.0, 10.0, 90.0, 90.0), rect(0.0, 0.0, 100.0, 100.0), full), Some((rect(10.0, 10.0, 90.0, 90.0), full)));
+    assert_eq!(visible_part(rect(200.0, 0.0, 300.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), full), None);
 }
