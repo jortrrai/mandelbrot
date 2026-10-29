@@ -23,6 +23,7 @@ mod points;
 mod render_job;
 mod save_size;
 mod status;
+mod temporal;
 mod transform;
 #[cfg(test)]
 mod tests;
@@ -167,6 +168,8 @@ pub struct MandelbrotApp {
     blur: Option<std::sync::Arc<blur::Blur>>,
     /// Whether the image is blurred while a flight moves the view, see `blur`
     auto_blur: bool,
+    /// Whether the full-resolution frames of a flight are blended over time (off by default), see `temporal`
+    blend_frames: bool,
     /// The samples per pixel of the frame on the screen (0 for a preview), for the strength of the blur
     shown_samples: u8,
     /// The part of the texture that covers the image: all of it, except for a coarse preview, see `coarse_texture`
@@ -270,6 +273,7 @@ impl MandelbrotApp {
             texture_outdated: true,
             blur: None,
             auto_blur: true,
+            blend_frames: false,
             shown_samples: 0,
             texture_uv: FULL_TEXTURE,
             preview_block: 1,

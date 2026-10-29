@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::points::MAX_WAITING_STEP;
 use super::render_job::{JobMessage, Progress, RenderKind, GPU_JOIN_AFTER, PREVIEW_WORTHWHILE};
-use super::{MandelbrotApp, Readiness};
+use super::{temporal, MandelbrotApp, Readiness};
 use crate::complex_plane::ComplexPlane;
 use crate::rendering::{self, Render};
 
@@ -47,7 +47,7 @@ impl MandelbrotApp {
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
         let pixels = u32::try_from(width * height).unwrap_or(u32::MAX);
         let mut first_layer_per_pixel = self.first_layer_per_pixel;
-        let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
+        let (gpu, fast_gpu, blend_frames) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu, self.blend_frames);
         //`cancel` stops the frame that is rendered (the job sets it when the frame is complete enough), `stop` the whole job (the window sets it, then `cancel`)
         let (cancel, stop) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let (thread_cancel, thread_stop) = (Arc::clone(&cancel), Arc::clone(&stop));
@@ -58,6 +58,8 @@ impl MandelbrotApp {
             let mut frame_started = Instant::now();
             //The join delay of the GPU for the next frame: none once a frame has taken longer than a few delays
             let mut join_after = GPU_JOIN_AFTER;
+            //With Blend frames: the image of the frames so far, and the sample (jitter) the next frame takes, see `temporal`
+            let (mut history, mut next_sample) = (None, 0_u8);
             while !thread_stop.load(Ordering::SeqCst) {
                 thread_cancel.store(false, Ordering::SeqCst);
                 if thread_stop.load(Ordering::SeqCst) {
@@ -76,7 +78,13 @@ impl MandelbrotApp {
                 let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels)
                     .gpu(gpu.as_deref().map(|gpu| (gpu, join_after))).fast_gpu(fast_gpu).cancel_with(&thread_cancel);
                 let last = path.arrived(elapsed);
-                let render = if required == Readiness::FULL_RESOLUTION && !last { render.colors_only() } else { render };
+                let blending = blend_frames && required == Readiness::FULL_RESOLUTION && !last;
+                let render = match (required == Readiness::FULL_RESOLUTION && !last, blending) {
+                    (true, true) => render.colors_only_of_sample(next_sample),
+                    (true, false) => render.colors_only(),
+                    (false, _) => render,
+                };
+                next_sample = next_sample.wrapping_add(1) % 64;
                 render.run(|colors, pass| {
                         if pass == 1 {
                             first_layer_per_pixel = Some(layer_started.elapsed() / pixels.max(1));
@@ -89,7 +97,14 @@ impl MandelbrotApp {
                         }
                         shown = true;
                         let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette_scale: m.palette_scale, preview: previews });
-                        let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: plane.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
+                        let colors = if blending {
+                            let mut shown = spare_colors.copy(&[]);
+                            temporal::blend(&mut history, &plane, colors, width, height, &mut shown);
+                            shown
+                        } else {
+                            spare_colors.copy(colors)
+                        };
+                        let _ = sender.send(JobMessage::Pass { colors, plane: plane.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
                         thread_cancel.store(true, Ordering::SeqCst); //Complete enough: on to the next frame
                     });
                 if frame_started.elapsed() > 4 * GPU_JOIN_AFTER {
