@@ -105,7 +105,7 @@ pub(super) enum JobMessage {
     Limit { max_iterations: u32, palette_scale: u32 },
     /// A frame of a flight (see `flight_job`) is complete enough: the flight clock at the frame, its view, its iteration limit and palette, and which preview of
     /// the render it is (the `Pass` that follows carries its colors)
-    FlightFrame { elapsed: Duration, plane: ComplexPlane, max_iterations: u32, palette_scale: Option<u32>, preview: usize },
+    FlightFrame { elapsed: Duration, plane: ComplexPlane, max_iterations: u32, palette_scale: Option<u32>, preview: usize, levels: Vec<usize> },
     /// The job has finished (or was cancelled), this is its final result; `reported` is whether it showed anything of `c` (otherwise `p` still shows the previous view)
     Done { c: ComplexPlane, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool, reported: bool },
 }
@@ -211,7 +211,7 @@ impl MandelbrotApp {
                     self.m.palette_scale = Some(palette_scale);
                     self.limit_pending = false;
                 }
-                Ok(JobMessage::FlightFrame { elapsed, plane, max_iterations, palette_scale, preview }) => {
+                Ok(JobMessage::FlightFrame { elapsed, plane, max_iterations, palette_scale, preview, levels }) => {
                     if let Some(flight) = &mut self.flight {
                         flight.elapsed = elapsed;
                         flight.frames.push(Instant::now()); //A frame of the flight, for its frame rate
@@ -219,6 +219,7 @@ impl MandelbrotApp {
                     self.c = plane; //The camera is where the frame is
                     (self.m.max_iterations, self.m.palette_scale) = (max_iterations, palette_scale);
                     self.previews_received = preview; //So the pass that follows is known as that preview (or layer)
+                    self.preview_levels = levels; //(The levels of this frame: with Auto every frame can have its own)
                 }
                 Ok(JobMessage::Done { c, m, message, elapsed, completed, reported }) => {
                     self.job = None;

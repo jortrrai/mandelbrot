@@ -442,7 +442,8 @@ impl Readiness {
     fn of_flight(rendering: flight::FlightRendering) -> Readiness {
         match rendering {
             flight::FlightRendering::BestEffort => Readiness::Any,
-            flight::FlightRendering::LowRes => Readiness::COMPLETE,
+            //Auto: every frame of the flight job is complete; the job decides how fine (see `flight::auto_block`)
+            flight::FlightRendering::LowRes | flight::FlightRendering::Auto(_) => Readiness::COMPLETE,
             flight::FlightRendering::Resolution(percent) if percent < 100 => match (100.0 / f64::from(percent.max(1))).round() as usize {
                 0 | 1 => Readiness::FULL_RESOLUTION,
                 block => Readiness::Blocks(block),

@@ -1573,3 +1573,33 @@ fn the_blur_of_a_flight_frame_follows_the_resolution_it_really_has() {
     let app = MandelbrotApp::new(&Config::sized(64, 48, 50, 32));
     assert!(app.blur.is_none() && app.auto_blur);
 }
+
+#[test]
+fn auto_chooses_the_finest_resolution_that_keeps_the_frame_rate_and_does_not_flicker() {
+    use super::flight::{auto_block, AUTO_COARSEST};
+    let ms = Duration::from_millis;
+    let target = ms(16); //60 FPS (16.7 ms)
+    assert_eq!(auto_block(ms(10), target, 2), 1, "a fast view gets full resolution");
+    assert_eq!(auto_block(ms(40), target, 1), 2, "40 ms at full resolution: blocks of 2 take 10 ms");
+    assert_eq!(auto_block(ms(100), target, 1), 3);
+    assert_eq!(auto_block(ms(10_000), target, 1), AUTO_COARSEST, "never coarser than blocks of 8");
+    //At the boundary a finer block needs 15% to spare: 15 ms at full resolution fits 16 ms, but not from blocks of 2
+    assert_eq!(auto_block(ms(15), target, 1), 1);
+    assert_eq!(auto_block(ms(15), target, 2), 2);
+    assert_eq!(auto_block(ms(13), target, 2), 1);
+}
+
+#[test]
+fn an_auto_flight_shows_frames_of_the_chosen_resolution_and_arrives() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::Auto(60);
+    assert_eq!(app.flight_readiness(), Readiness::COMPLETE);
+    app.go_to_point_of_interest(0);
+    app.fly_at(std::time::Instant::now());
+    assert!(app.flight_job, "the flight job renders the frames");
+    let clocks = fly_until_arrived(&mut app);
+    assert!(clocks.len() >= 3, "frames on the way: {clocks:?}");
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete, "the place itself, fully rendered");
+    let _ = std::fs::remove_dir_all(folder);
+}

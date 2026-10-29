@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::points::MAX_WAITING_STEP;
 use super::render_job::{JobMessage, Progress, RenderKind, GPU_JOIN_AFTER, PREVIEW_WORTHWHILE};
+use super::flight::{auto_block, FlightRendering};
 use super::{MandelbrotApp, Readiness};
 use crate::complex_plane::ComplexPlane;
 use crate::rendering::{self, Render};
@@ -34,9 +35,14 @@ impl MandelbrotApp {
         self.samples = Some(samples_receiver);
         let (sender, receiver) = mpsc::channel();
         let spare_colors = self.spare_colors.clone();
-        let required = self.flight_readiness();
-        let levels = self.preview_levels(RenderKind::FlightFrame);
+        let (mut required, mut levels) = (self.flight_readiness(), self.preview_levels(RenderKind::FlightFrame));
         self.preview_levels.clone_from(&levels);
+        //With Auto: the frame time to keep, and the time a full-resolution frame takes, estimated from the frames so far (see `flight::auto_block`)
+        let auto = match self.flight_rendering {
+            FlightRendering::Auto(fps) => Some(Duration::from_secs_f64(1.0 / f64::from(fps.max(1)))),
+            _ => None,
+        };
+        let (mut block, mut full_frame) = (2, None::<Duration>);
         let adaptive = self.adaptive_supersampling.then(rendering::AdaptiveSampling::default);
         let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
         let mut m = self.m.clone();
@@ -71,6 +77,11 @@ impl MandelbrotApp {
                     m.max_iterations = limits.as_mut().map_or(palette, |limits| limits.limit_at(scale, settings));
                     m.palette_scale = Some(palette);
                 }
+                if let Some(target) = auto {
+                    //The block of this frame: from the estimate, or half resolution for the first frame
+                    block = full_frame.map_or(block, |full| auto_block(full, target, block));
+                    (required, levels) = if block > 1 { (Readiness::Blocks(block), vec![block]) } else { (Readiness::FULL_RESOLUTION, Vec::new()) };
+                }
                 let preview = (!levels.is_empty() && first_layer_per_pixel.is_none_or(|per_pixel| per_pixel * pixels > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
                 let (mut previews, mut shown, mut layer_started) = (0, false, Instant::now());
                 let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels)
@@ -88,10 +99,15 @@ impl MandelbrotApp {
                             return;
                         }
                         shown = true;
-                        let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette_scale: m.palette_scale, preview: previews });
+                        let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette_scale: m.palette_scale, preview: previews, levels: levels.clone() });
                         let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: plane.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
                         thread_cancel.store(true, Ordering::SeqCst); //Complete enough: on to the next frame
                     });
+                if auto.is_some() && shown {
+                    //What a full-resolution frame would take, from this frame and its pixels, smoothed over a few frames
+                    let full = frame_started.elapsed().mul_f64((block * block) as f64);
+                    full_frame = Some(full_frame.map_or(full, |before| before.mul_f64(0.5) + full.mul_f64(0.5)));
+                }
                 if frame_started.elapsed() > 4 * GPU_JOIN_AFTER {
                     join_after = Duration::ZERO; //(Measured before the wait for the screen below)
                 }
