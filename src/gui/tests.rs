@@ -1485,3 +1485,25 @@ fn go_to_view_keeps_the_current_scale_when_the_scale_is_empty() {
     app.go_to_view();
     assert!(app.log.last().unwrap().starts_with("Could not go to the view"), "a scale that is not a number is still refused");
 }
+
+#[test]
+fn the_spare_colors_are_reused_for_later_frames_and_the_pool_stays_small() {
+    use super::render_job::SparePool;
+    let pool = SparePool::default();
+    let frame = vec![TrueColor::new(1, 2, 3); 100];
+    let spare = vec![TrueColor::new(0, 0, 0); 100];
+    let address = spare.as_ptr();
+    pool.put(spare);
+    let copy = pool.copy(&frame);
+    assert!(copy.iter().zip(&frame).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)) && copy.len() == frame.len(), "a copy of the frame");
+    assert_eq!(copy.as_ptr(), address, "in the memory of the spare colors");
+    let second = pool.copy(&frame);
+    assert_ne!(second.as_ptr(), address, "a spare is used once");
+    for _ in 0..10 {
+        pool.put(vec![TrueColor::new(0, 0, 0); 100]);
+    }
+    assert_eq!(pool.len(), SparePool::KEPT, "no more than a few are kept");
+    pool.put(vec![TrueColor::new(0, 0, 0); 10]);
+    assert_eq!(pool.copy(&frame).len(), 100);
+    assert!(pool.len() < SparePool::KEPT, "colors of another size are dropped");
+}

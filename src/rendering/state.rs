@@ -50,6 +50,8 @@ pub struct SampleState {
     /// The color of the first sample, and the average of the first two samples, of every pixel that has them
     pub(super) first: Vec<TrueColor>,
     pub(super) second: Vec<TrueColor>,
+    /// The memory of the colors of the last render, so the next render does not allocate (and the system clear) a big image again, see `Render::run`
+    pub(super) colors: Vec<TrueColor>,
 }
 
 impl SampleState {

@@ -168,6 +168,9 @@ pub struct MandelbrotApp {
     shown_plane: ComplexPlane,
     /// The receiving end of the running background rendering job, if any. While a job runs, the controls are disabled.
     job: Option<Receiver<JobMessage>>,
+    /// The colors of frames that the screen no longer shows, which the jobs fill with later frames: a big image is then not allocated (and its memory cleared by
+    /// the system) for every frame, see `render_job::SparePool`
+    spare_colors: render_job::SparePool,
     /// Set while a progressive render runs
     progress: Option<Progress>,
     /// The progress bar of the last progressive render
@@ -256,6 +259,7 @@ impl MandelbrotApp {
             previews_received: 0,
             shown_plane,
             job: None,
+            spare_colors: render_job::SparePool::default(),
             progress: None,
             bars: None,
             first_layer_per_pixel: None,

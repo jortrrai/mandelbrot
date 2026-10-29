@@ -10,7 +10,6 @@ use crate::auto_iterations::{self};
 use crate::coloring::TrueColor;
 use crate::complex_plane::ComplexPlane;
 use crate::mandelbrot_set::MandelbrotSet;
-use crate::pixel_buffer::PixelBuffer;
 use crate::rendering::{self, Render};
 use eframe::egui;
 
@@ -60,6 +59,43 @@ impl RenderKind {
     }
 }
 
+/// The colors of frames that the window no longer shows, shared by the window and every job: the window puts the colors a new frame replaces here, and the jobs
+/// copy their frames into them (`copy`). Shared, so colors are not lost with a job that was interrupted
+#[derive(Clone, Default)]
+pub(super) struct SparePool(Arc<std::sync::Mutex<Vec<Vec<TrueColor>>>>);
+
+impl SparePool {
+    /// Enough for the frames in flight between a job and the window; more would only hold memory
+    pub(super) const KEPT: usize = 3;
+
+    /// Keeps `colors` for a later frame, unless the pool is full
+    pub(super) fn put(&self, colors: Vec<TrueColor>) {
+        let mut pool = self.0.lock().unwrap();
+        if pool.len() < Self::KEPT {
+            pool.push(colors);
+        }
+    }
+
+    /// How many spare colors are kept
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+
+    /// A copy of `colors`, in spare colors of the same size when there are any, else newly allocated
+    pub(super) fn copy(&self, colors: &[TrueColor]) -> Vec<TrueColor> {
+        let spare = {
+            let mut pool = self.0.lock().unwrap();
+            pool.retain(|spare| spare.capacity() >= colors.len()); //Colors of another window size are no use
+            pool.pop()
+        };
+        let mut copy = spare.unwrap_or_default();
+        copy.clear();
+        copy.extend_from_slice(colors);
+        copy
+    }
+}
+
 /// A message from a rendering job that runs on a background thread
 pub(super) enum JobMessage {
     /// An intermediate image: the running average of the first `pass` of `total` supersampling layers, or a low-resolution preview of the first layer when `pass` is 0
@@ -68,7 +104,7 @@ pub(super) enum JobMessage {
     /// The iteration limit that auto iterations chose for the render, sent as soon as it is known, before the first layer is rendered
     Limit { max_iterations: u32, palette_scale: u32 },
     /// The job has finished (or was cancelled), this is its final result; `reported` is whether it showed anything of `c` (otherwise `p` still shows the previous view)
-    Done { c: ComplexPlane, p: PixelBuffer, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool, reported: bool },
+    Done { c: ComplexPlane, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool, reported: bool },
 }
 
 /// What the render progress bar shows: the time of every finished layer and how far the current layer is.
@@ -136,7 +172,8 @@ impl MandelbrotApp {
                         }
                         self.frame_ready = true;
                         self.frame_accepted = true;
-                        self.p.colors = colors;
+                        let replaced = std::mem::replace(&mut self.p.colors, colors);
+                        self.spare_colors.put(replaced);
                         self.shown_plane = plane;
                         self.texture_outdated = true;
                         self.layer_shown = pass > 0;
@@ -164,7 +201,7 @@ impl MandelbrotApp {
                     self.m.palette_scale = Some(palette_scale);
                     self.limit_pending = false;
                 }
-                Ok(JobMessage::Done { c, p, m, message, elapsed, completed, reported }) => {
+                Ok(JobMessage::Done { c, m, message, elapsed, completed, reported }) => {
                     self.job = None;
                     self.limit_pending = false;
                     //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
@@ -181,7 +218,7 @@ impl MandelbrotApp {
                         if reported {
                             self.shown_plane = c.clone();
                         }
-                        self.p = p;
+                        self.p.update_pixels(); //The colors are those of the last frame shown, which arrived with its pass
                     }
                     if self.flight.is_none() {
                         self.c = c; //During a flight the camera moves on while a render runs (best effort), so it is not set back to the view of the render
@@ -268,7 +305,9 @@ impl MandelbrotApp {
         self.layer_shown = false;
         self.previews_received = 0;
         let (sender, receiver) = mpsc::channel();
-        let (c, mut p) = (self.c.clone(), self.p.clone());
+        let spare_colors = self.spare_colors.clone();
+        //The job only needs the view: the window keeps the image (every frame it shows arrives as a `Pass`), so a big image is not copied for every render
+        let c = self.c.clone();
         //A move keeps the iteration limit once it is settled; while the probes of the last render had not chosen it yet, the move chooses it like any render
         let keeps_limit = (moved || during_gesture) && !self.limit_pending;
         let adaptive = self.adaptive_supersampling.then(rendering::AdaptiveSampling::default);
@@ -289,7 +328,7 @@ impl MandelbrotApp {
         let mut m = self.m.clone();
         let supersampling_amount = if all_layers { self.supersampling_amount } else { 1 };
         let coloring_function = self.coloring_function;
-        let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
+        let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
         let pixels_total = width * height;
         //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
         let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
@@ -320,7 +359,7 @@ impl MandelbrotApp {
                     }
                     None => {
                         let _ = samples_sender.send(samples);
-                        let _ = sender.send(JobMessage::Done { c, p, m, message: String::from("Cancelled the rendering"), elapsed: started.elapsed(), completed: false, reported: false });
+                        let _ = sender.send(JobMessage::Done { c, m, message: String::from("Cancelled the rendering"), elapsed: started.elapsed(), completed: false, reported: false });
                         return;
                     }
                 }
@@ -336,21 +375,19 @@ impl MandelbrotApp {
             let mut reported = false;
             let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).fast_gpu(fast_gpu).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
-                p.colors.copy_from_slice(colors);
                 reported = true;
                 if pass == 0 {
-                    let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole });
+                    let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: c.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole });
                     return;
                 }
                 let layer_time = layer_started.elapsed();
                 println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
-                let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass, total: supersampling_amount, layer_time, whole });
+                let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: c.clone(), pass, total: supersampling_amount, layer_time, whole });
                 layer_started = Instant::now();
             });
             let _ = samples_sender.send(samples); //To the next job, or kept for it if there is none yet
-            p.update_pixels(); //The pixels of the last completed layer
             let message = if completed { message } else { String::from("Cancelled the rendering, showing the layers that were completed") };
-            let _ = sender.send(JobMessage::Done { c, p, m, message, elapsed: started.elapsed(), completed, reported }); //The receiver is gone if the window was closed
+            let _ = sender.send(JobMessage::Done { c, m, message, elapsed: started.elapsed(), completed, reported }); //The receiver is gone if the window was closed
         });
         let now = Instant::now();
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
