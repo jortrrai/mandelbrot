@@ -1392,3 +1392,18 @@ fn the_zoom_stops_where_the_fast_gpu_math_ends_with_a_warning_in_the_log() {
     (app.limit_zoom, app.fast_gpu) = (true, false);
     assert!(!app.zoom_refused(&deep), "without the fast GPU math there is no limit");
 }
+
+#[test]
+fn a_flight_frame_that_waits_for_a_full_layer_skips_the_previews_it_would_never_show() {
+    use super::flight::FlightRendering;
+    use super::render_job::RenderKind;
+    let mut app = manual_app(&Config::sized(64, 48, 50, 1));
+    for (mode, previews) in [(FlightRendering::BestEffort, true), (FlightRendering::LowRes, true), (FlightRendering::MaxQuality, false), (FlightRendering::SuperSampled, false)] {
+        app.flight_rendering = mode;
+        assert_eq!(app.shows_previews(RenderKind::FlightFrame), previews, "{mode:?}");
+        assert!(app.shows_previews(RenderKind::Settled { moved: false }) && app.shows_previews(RenderKind::GestureFrame { moved: true }), "other renders keep them");
+    }
+    app.flight_rendering = FlightRendering::BestEffort;
+    app.immersion = true;
+    assert!(app.shows_previews(RenderKind::FlightFrame), "immersion shows complete previews");
+}
