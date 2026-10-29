@@ -80,6 +80,9 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     banner::print_banner();
 
     let mut app = gui::MandelbrotApp::new(config);
+    if app.use_settings_file(gui::settings_path()) {
+        app.render_with_settings();
+    }
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Mandelbrot set viewer")

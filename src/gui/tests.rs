@@ -1590,3 +1590,36 @@ fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visibl
     assert_eq!(visible_part(rect(10.0, 10.0, 90.0, 90.0), rect(0.0, 0.0, 100.0, 100.0), full), Some((rect(10.0, 10.0, 90.0, 90.0), full)));
     assert_eq!(visible_part(rect(200.0, 0.0, 300.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), full), None);
 }
+
+#[test]
+fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
+    let folder = std::env::temp_dir().join(format!("mandelbrot-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let path = folder.join("settings.json");
+    //A first run: no file yet, the defaults
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    assert!(!app.use_settings_file(Some(path.clone())));
+    let defaults = app.settings();
+    (app.pace, app.fast_gpu, app.supersampling_amount, app.m.smooth_coloring) = (super::flight::Pace::Cinematic, false, 16, false);
+    app.flight_rendering = super::flight::FlightRendering::Resolution(37);
+    let now = std::time::Instant::now();
+    app.keep_settings(now);
+    assert!(!path.exists(), "not on every frame of a drag");
+    app.keep_settings(now + Duration::from_secs(1));
+    assert!(path.exists(), "written once the change has settled");
+    //The next run gets them back
+    let mut next = manual_app(&Config::sized(64, 48, 50, 4));
+    assert!(next.use_settings_file(Some(path.clone())));
+    assert_eq!((next.pace, next.fast_gpu, next.supersampling_amount, next.m.smooth_coloring, next.flight_rendering),
+        (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
+    //A file with unknown and missing values loads what it knows
+    std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
+    let mut partial = manual_app(&Config::sized(64, 48, 50, 4));
+    partial.use_settings_file(Some(path));
+    assert_eq!((partial.pace, partial.supersampling_amount), (super::flight::Pace::Normal, defaults.clone().supersampling_for_test()));
+    //Reset
+    next.reset_settings();
+    assert_eq!(next.settings(), defaults);
+    wait_for_job(&mut next);
+    let _ = std::fs::remove_dir_all(folder);
+}
