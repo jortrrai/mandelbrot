@@ -147,7 +147,10 @@ impl MandelbrotApp {
             ui.label("Flight:");
             egui::ComboBox::from_id_salt("flight_pace").selected_text(self.pace.name()).show_ui(ui, |ui| {
                 for pace in Pace::ALL {
-                    ui.selectable_value(&mut self.pace, pace, pace.name());
+                    let response = ui.selectable_value(&mut self.pace, pace, pace.name());
+                    if pace == Pace::NoFlight {
+                        response.on_hover_text("Clicking a place shows it at once, without flying there");
+                    }
                 }
             }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest, by the shortest path (zooming out only as far as the distance needs); using any control or the mouse stops a flight");
             egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {

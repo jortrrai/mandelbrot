@@ -1532,3 +1532,17 @@ fn the_spare_colors_are_reused_for_later_frames_and_the_pool_stays_small() {
     assert_eq!(pool.copy(&frame).len(), 100);
     assert!(pool.len() < SparePool::KEPT, "colors of another size are dropped");
 }
+
+#[test]
+fn with_no_flight_going_to_a_place_shows_it_at_once() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    assert!(super::flight::Pace::ALL.contains(&super::flight::Pace::NoFlight), "a choice of the drop-down");
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_point_of_interest(0);
+    assert!(app.flight.is_none(), "no flight");
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.m.max_iterations == 321, "the place itself, with its limit");
+    assert!(app.is_busy(), "rendered at once");
+    wait_for_job(&mut app);
+    assert!(app.log.last().unwrap().starts_with("Moved to Test Place"), "{:?}", app.log.last());
+    let _ = std::fs::remove_dir_all(folder);
+}
