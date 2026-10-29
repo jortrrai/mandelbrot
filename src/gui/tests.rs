@@ -1560,3 +1560,16 @@ fn with_no_flight_going_to_a_place_shows_it_at_once() {
     assert!(app.log.last().unwrap().starts_with("Moved to Test Place"), "{:?}", app.log.last());
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn the_blur_of_a_flight_frame_follows_the_resolution_it_really_has() {
+    use super::blur::blur_sigma;
+    //Full resolution with one sample: σ 0.8 (#118); coarser frames get more, supersampled ones less
+    assert!((blur_sigma(1, 1) - 0.8).abs() < 1e-6);
+    assert!((blur_sigma(4, 0) - 1.84).abs() < 0.01 && (blur_sigma(2, 0) - 1.21).abs() < 0.01);
+    assert!((blur_sigma(1, 4) - 0.53).abs() < 0.01 && (blur_sigma(1, 9) - 0.41).abs() < 0.01);
+    assert_eq!(blur_sigma(1, 0), blur_sigma(1, 1), "a preview of single pixels is a frame of one sample");
+    //Without an OpenGL context (as here) there is no blur, and the image is drawn as it is
+    let app = MandelbrotApp::new(&Config::sized(64, 48, 50, 32));
+    assert!(app.blur.is_none() && app.auto_blur);
+}

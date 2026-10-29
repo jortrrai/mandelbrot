@@ -187,6 +187,7 @@ impl MandelbrotApp {
                         self.texture_outdated = true;
                         self.layer_shown = pass > 0;
                         self.preview_block = preview_block;
+                        self.shown_samples = pass;
                     }
                     if pass == 0 {
                         continue; //A preview is not a layer: the progress and the layer times are not changed

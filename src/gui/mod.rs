@@ -12,6 +12,7 @@
 //! * `status`: the current view, the status log and the progress bar.
 
 mod actions;
+mod blur;
 mod controls;
 mod fit;
 mod flight;
@@ -162,6 +163,12 @@ pub struct MandelbrotApp {
     log: Vec<String>,
     texture: Option<TextureHandle>,
     texture_outdated: bool,
+    /// The blur of the image during flights (`None` without a suitable OpenGL context, as in tests), see `blur`
+    blur: Option<std::sync::Arc<blur::Blur>>,
+    /// Whether the image is blurred while a flight moves the view, see `blur`
+    auto_blur: bool,
+    /// The samples per pixel of the frame on the screen (0 for a preview), for the strength of the blur
+    shown_samples: u8,
     /// The part of the texture that covers the image: all of it, except for a coarse preview, see `coarse_texture`
     texture_uv: egui::Rect,
     /// The block size of the preview that the colors of `p` show, 1 for a full layer: a coarse preview is uploaded small and scaled up smoothly
@@ -261,6 +268,9 @@ impl MandelbrotApp {
             log: Vec::new(),
             texture: None,
             texture_outdated: true,
+            blur: None,
+            auto_blur: true,
+            shown_samples: 0,
             texture_uv: FULL_TEXTURE,
             preview_block: 1,
             preview_levels: Vec::new(),
@@ -346,6 +356,11 @@ impl MandelbrotApp {
         self.job.is_none() || self.progress.is_some()
     }
 
+    /// Prepares what needs the OpenGL context of the window: the blur of flights (see `blur`)
+    pub fn use_gl(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.blur = gl.and_then(blur::Blur::new);
+    }
+
     pub(super) fn update_texture(&mut self, ctx: &egui::Context) {
         if !self.texture_outdated && self.texture.is_some() {
             return;
@@ -377,7 +392,15 @@ impl MandelbrotApp {
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         //The image of the last render, at its place in the current view (the whole rectangle when they are the same view, or when the view is held, see `drawn_fraction`)
         let target = transform::rect_of(self.drawn_fraction(), rect);
-        ui.painter_at(rect).image(texture.id(), target, self.texture_uv, Color32::WHITE);
+        match self.blur.as_ref().filter(|_| self.auto_blur && self.flight.is_some()) {
+            Some(blur) => {
+                let sigma = blur::blur_sigma(self.preview_block, self.shown_samples);
+                ui.painter_at(rect).add(blur.paint(target, texture.id(), self.texture_uv, self.p.pixel_plane.width, self.p.pixel_plane.height, sigma));
+            }
+            None => {
+                ui.painter_at(rect).image(texture.id(), target, self.texture_uv, Color32::WHITE);
+            }
+        }
         if self.show_points {
             points::draw_markers(&ui.painter_at(rect), &points::marker_positions(&self.points, self.displayed_plane(), rect));
         }
