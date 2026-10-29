@@ -20,6 +20,17 @@ pub(super) fn blur_sigma(block: usize, samples: u8) -> f32 {
     0.8 * (100.0 / percent).powf(0.6)
 }
 
+/// The part of `rect` inside `visible`, and the part of the texture coordinates `uv` (which cover `rect`) under it, or `None` if no part of `rect` is visible
+pub(super) fn visible_part(rect: egui::Rect, visible: egui::Rect, uv: egui::Rect) -> Option<(egui::Rect, egui::Rect)> {
+    let shown = rect.intersect(visible);
+    if !shown.is_positive() {
+        return None;
+    }
+    //The same fractions of `uv` as `shown` is of `rect`
+    let at = |position: egui::Pos2| uv.min + (position - rect.min) / rect.size() * uv.size();
+    Some((shown, egui::Rect::from_min_max(at(shown.min), at(shown.max))))
+}
+
 /// The shader program of the blur, made once from the OpenGL context of the window
 pub(super) struct Blur {
     program: glow::Program,
@@ -67,10 +78,15 @@ impl Blur {
         }
     }
 
-    /// A paint callback that draws `texture` (its part `uv`, showing an image of `width` x `height` pixels) blurred by `sigma` image pixels over the rectangle `rect`
-    pub(super) fn paint(self: &Arc<Blur>, rect: egui::Rect, texture: egui::TextureId, uv: egui::Rect, width: usize, height: usize, sigma: f32) -> egui::PaintCallback {
+    /// A paint callback that draws `texture` (its part `uv`, showing an image of `width` x `height` pixels) blurred by `sigma` image pixels over the rectangle `rect`,
+    /// only where it is inside `visible`, or `None` if nothing of it is.
+    ///
+    /// Only the visible part is drawn, with the part of the texture it shows: egui clamps the viewport of a paint callback to the screen, so a rectangle that reaches
+    /// beyond it (a best-effort flight moves and scales the image past the edges of the window) would squeeze the whole image into what is left of it.
+    pub(super) fn paint(self: &Arc<Blur>, rect: egui::Rect, visible: egui::Rect, texture: egui::TextureId, uv: egui::Rect, (width, height): (usize, usize), sigma: f32) -> Option<egui::PaintCallback> {
         let blur = Arc::clone(self);
         let step = [uv.width() / width as f32, uv.height() / height as f32];
+        let (rect, uv) = visible_part(rect, visible, uv)?;
         let radius = ((2.5 * sigma).ceil() as i32).clamp(1, MAX_RADIUS);
         let callback = egui_glow::CallbackFn::new(move |_info, painter| {
             let Some(texture) = painter.texture(texture) else { return };
@@ -89,6 +105,6 @@ impl Blur {
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
         });
-        egui::PaintCallback { rect, callback: Arc::new(callback) }
+        Some(egui::PaintCallback { rect, callback: Arc::new(callback) })
     }
 }
