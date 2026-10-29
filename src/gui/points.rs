@@ -363,6 +363,7 @@ impl MandelbrotApp {
             return;
         }
         let flight = Flight::new(from, to, self.pace);
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations) });
         self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| self.flight_limits(to));
         let now = Instant::now();

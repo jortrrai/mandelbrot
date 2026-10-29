@@ -24,6 +24,7 @@ mod render_job;
 mod save_size;
 mod status;
 mod transform;
+mod video;
 #[cfg(test)]
 mod tests;
 
@@ -146,6 +147,12 @@ pub struct MandelbrotApp {
     new_point: Option<(String, String)>,
     /// How fast a flight to a point of interest goes (fast by default), and the flight that is under way, see `flight`
     pace: flight::Pace,
+    /// The last flight, for a video of it, the video under way, and the frame rate of videos, see `video`
+    last_flight: Option<video::VideoFlight>,
+    video_job: Option<video::VideoJob>,
+    video_fps: u32,
+    /// Where videos are written (`saved`)
+    video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
     /// Whether the running job renders the frames of the flight (see `flight_job`), and the time between two frames of the screen, which the job keeps to
     flight_job: bool,
@@ -257,6 +264,10 @@ impl MandelbrotApp {
             show_points: false,
             new_point: None,
             pace: flight::Pace::Fast,
+            last_flight: None,
+            video_job: None,
+            video_fps: 30,
+            video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
             frame_interval: Duration::from_secs_f64(1.0 / 60.0),
@@ -497,6 +508,7 @@ impl eframe::App for MandelbrotApp {
         let ctx = ui.ctx().clone();
         self.poll_job();
         self.poll_thumbnails(&ctx);
+        self.poll_video(&ctx);
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
         }
