@@ -15,6 +15,9 @@
 //! than f64 (64 times on an RTX 5070 Ti). Measured at 1200 x 800 on an RTX 5070 Ti: Seahorse Valley in 29 ms instead of 88 ms, the shipped places 1.3 to 3.1 times as
 //! fast. It is not bit for bit the CPU's: 0.02% to 1.5% of the pixels of most shipped places get another iteration count, up to 25% in the most chaotic ones (where
 //! f64 with fused multiply-adds already changes 15 to 19%, so f64 cannot pin those pixels down either). The renderer only uses it when asked, see `Render::fast_gpu`.
+//! The fast loop gets pixels instead of points (`submit_pixels`): it computes the point of a sample itself, with the CPU's jitter and arithmetic, and returns the
+//! smooth position (`FastOutcome`), so a pixel costs 12 bytes of transfers instead of 40 and the CPU only colors it. At shallow zoom the loop is so fast that
+//! those costs decided how much the GPU could do (measured: a 4K flight frame of Frost on the Shoreline with the GPU doing 54% instead of 15%, 34 FPS instead of 21).
 //!
 //! `GpuIterator::new` checks a set of points on the GPU against the CPU before it is used, and refuses when anything differs, when there is no suitable GPU,
 //! or when it lacks f64 shaders or SPIR-V passthrough: the renderer then stays on the CPU.
@@ -49,6 +52,36 @@ impl Outcome {
     }
 }
 
+/// The outcome of the fast loop for one pixel, as `gpu_fast.wgsl` writes it: the position itself, see `position`
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct FastOutcome {
+    /// The whole part of the position; with the top bit set, a smooth position that is still to be clamped
+    whole: u32,
+    fraction: f32,
+}
+
+impl FastOutcome {
+    /// The position: the iteration count, or the smooth position clamped to `[0, max_iterations - 1]` like `MandelbrotSet::smooth_position` does
+    pub(crate) fn position(self, m: &MandelbrotSet) -> f64 {
+        if self.whole & SMOOTH == 0 {
+            return f64::from(self.whole);
+        }
+        (f64::from(self.whole & !SMOOTH) + f64::from(self.fraction)).clamp(0.0, f64::from(m.max_iterations.saturating_sub(1)))
+    }
+}
+
+/// The top bit of `FastOutcome::whole`: a smooth position
+const SMOOTH: u32 = 1 << 31;
+
+/// A pixel for `GpuIterator::submit_pixels`: `x` in the low 16 bits, `y` in the high 16 bits (both below `MAX_PIXEL`)
+pub const fn packed_pixel(x: usize, y: usize) -> u32 {
+    (x as u32) | ((y as u32) << 16)
+}
+
+/// The pixels of a batch of `submit_pixels` are below this in both directions, see `packed_pixel`
+pub(crate) const MAX_PIXEL: usize = 1 << 16;
+
 /// A dispatch that runs on the GPU, see `GpuIterator::submit`
 pub(crate) struct Submitted {
     read: wgpu::Buffer,
@@ -76,9 +109,9 @@ impl GpuIterator {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).map_err(|err| format!("no GPU: {err}"))?;
         let info = adapter.get_info();
         let name = format!("{} ({:?})", info.name, info.backend);
-        let needed = wgpu::Features::SHADER_F64 | wgpu::Features::PASSTHROUGH_SHADERS;
+        let needed = wgpu::Features::SHADER_F64 | wgpu::Features::SHADER_INT64 | wgpu::Features::PASSTHROUGH_SHADERS;
         if !adapter.features().contains(needed) {
-            return Err(format!("{name} lacks f64 shaders or SPIR-V passthrough"));
+            return Err(format!("{name} lacks f64 or 64-bit integer shaders, or SPIR-V passthrough"));
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: needed, required_limits: adapter.limits(), ..Default::default() })).map_err(|err| format!("{name}: {err}"))?;
         //An error outside a dispatch is logged instead of ending the program (the default); the errors of a dispatch are returned by `submit`
@@ -110,14 +143,14 @@ impl GpuIterator {
         &self.name
     }
 
-    /// The position of every point: exactly `m.position(point)`, or with `fast` that of the fast loop (see the module)
+    /// The position of every point: exactly `m.position(point)` (see the module)
     ///
     /// # Errors
     /// The GPU failed (for example the device was lost)
-    pub fn positions(&self, m: &MandelbrotSet, points: &[Complex], fast: bool) -> Result<Vec<f64>, String> {
+    pub fn positions(&self, m: &MandelbrotSet, points: &[Complex]) -> Result<Vec<f64>, String> {
         let mut positions = vec![0.0; points.len()];
         for (batch, out) in points.chunks(BATCH).zip(positions.chunks_mut(BATCH)) {
-            let outcomes = self.finish(self.submit(m, batch, fast)?)?;
+            let outcomes: Vec<Outcome> = self.finish(self.submit(m, batch)?)?;
             //The positions (two logarithms for every escaped point with smooth coloring) on all render threads
             let chunk = batch.len().div_ceil(super::render_thread_count()).max(1);
             std::thread::scope(|scope| {
@@ -133,39 +166,78 @@ impl GpuIterator {
         Ok(positions)
     }
 
-    /// Starts one dispatch of the exact loop (or with `fast` the fast loop) over `points` (about `BATCH` at most) and returns at once: the GPU runs it while the caller
-    /// prepares the next one, see `finish`
-    pub(crate) fn submit(&self, m: &MandelbrotSet, points: &[Complex], fast: bool) -> Result<Submitted, String> {
-        let count = u32::try_from(points.len()).map_err(|_| String::from("too many points"))?;
+    /// The position of sample `sample` of every pixel of `pixels` (see `packed_pixel`) of `anchor`, where pixel (0, 0) is pixel `origin` of `anchor`, with the fast
+    /// loop: the positions the renderer gets with `Render::fast_gpu`
+    ///
+    /// # Errors
+    /// The GPU failed (for example the device was lost)
+    pub fn fast_positions(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32]) -> Result<Vec<f64>, String> {
+        let mut positions = Vec::with_capacity(pixels.len());
+        for batch in pixels.chunks(BATCH) {
+            let outcomes: Vec<FastOutcome> = self.finish(self.submit_pixels(m, anchor, sample, origin, batch)?)?;
+            positions.extend(outcomes.into_iter().map(|outcome| outcome.position(m)));
+        }
+        Ok(positions)
+    }
+
+    /// Starts one dispatch of the exact loop over `points` (about `BATCH` at most) and returns at once: the GPU runs it while the caller prepares the next one, see
+    /// `finish`, which gives an `Outcome` for every point
+    pub(crate) fn submit(&self, m: &MandelbrotSet, points: &[Complex]) -> Result<Submitted, String> {
         let mut params = Vec::with_capacity(24);
         params.extend((m.orbit_radius * m.orbit_radius).to_le_bytes());
-        for value in [m.max_iterations, count, u32::from(m.orbit_radius >= 2.0), 0] {
+        for value in [m.max_iterations, u32::try_from(points.len()).map_err(|_| String::from("too many points"))?, u32::from(m.orbit_radius >= 2.0), 0] {
             params.extend(value.to_le_bytes());
         }
         let coordinates: Vec<f64> = points.iter().flat_map(|c| [c.x, c.y]).collect();
+        self.dispatch(&self.exact, &params, bytemuck::cast_slice(&coordinates), points.len(), std::mem::size_of::<Outcome>())
+    }
+
+    /// Starts one dispatch of the fast loop over sample `sample` of `pixels` (about `BATCH` at most, see `fast_positions`) and returns at once, see `finish`, which
+    /// gives a `FastOutcome` for every pixel. The GPU computes the points itself (see `gpu_fast.wgsl`)
+    pub(crate) fn submit_pixels(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32]) -> Result<Submitted, String> {
+        let to_i32 = |value: isize| i32::try_from(value).map_err(|_| String::from("the origin is too far away"));
+        let mut params = Vec::with_capacity(72);
+        for value in [anchor.min_x, anchor.min_y, anchor.increment_x, anchor.increment_y, m.orbit_radius * m.orbit_radius] {
+            params.extend(value.to_le_bytes());
+        }
+        for value in [m.max_iterations, u32::try_from(pixels.len()).map_err(|_| String::from("too many points"))?, u32::from(m.orbit_radius >= 2.0), u32::from(m.smooth_coloring)] {
+            params.extend(value.to_le_bytes());
+        }
+        for value in [to_i32(origin.0)?, to_i32(origin.1)?] {
+            params.extend(value.to_le_bytes());
+        }
+        for value in [u32::from(sample), 0] {
+            params.extend(value.to_le_bytes());
+        }
+        self.dispatch(&self.fast, &params, bytemuck::cast_slice(pixels), pixels.len(), std::mem::size_of::<FastOutcome>())
+    }
+
+    /// One dispatch of `pipeline` over `count` points with these parameters and input, whose outcomes have `outcome_size` bytes each
+    fn dispatch(&self, pipeline: &wgpu::ComputePipeline, params: &[u8], input: &[u8], count: usize, outcome_size: usize) -> Result<Submitted, String> {
+        let count = u32::try_from(count).map_err(|_| String::from("too many points"))?;
         //Every GPU error of the dispatch (a buffer the driver could not create, a lost device) is caught here and returned, so the CPU computes the batch instead
         //(the window once crashed with a buffer that could not be mapped, see issue #119); the buffers are written by the queue, not mapped when they are created
         let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
         let storage = |contents: &[u8]| {
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: contents.len() as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: contents.len().max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             self.queue.write_buffer(&buffer, 0, contents);
             buffer
         };
         //The index of the next point that an invocation takes, see `gpu.wgsl`
-        let (params, coordinates, next_point) = (storage(&params), storage(bytemuck::cast_slice(&coordinates)), storage(&0_u32.to_le_bytes()));
-        let size = (points.len() * std::mem::size_of::<Outcome>()) as u64;
+        let (params, input, next_point) = (storage(params), storage(input), storage(&0_u32.to_le_bytes()));
+        let size = (count as usize * outcome_size) as u64;
         let outcomes = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: coordinates.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: input.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: outcomes.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 3, resource: next_point.as_entire_binding() },
         ] });
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(if fast { &self.fast } else { &self.exact });
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(count.div_ceil(64).min(WORKGROUPS), 1, 1);
         }
@@ -177,8 +249,8 @@ impl GpuIterator {
         errors.into_iter().flatten().next().map_or(Ok(Submitted { read, index }), |error| Err(format!("{}: {error}", self.name)))
     }
 
-    /// Waits for a dispatch of `submit` and returns the outcome of every point, in the order of its points
-    pub(crate) fn finish(&self, submitted: Submitted) -> Result<Vec<Outcome>, String> {
+    /// Waits for a dispatch of `submit` (`Outcome`) or `submit_pixels` (`FastOutcome`) and returns the outcome of every point, in the order of its points
+    pub(crate) fn finish<T: bytemuck::Pod>(&self, submitted: Submitted) -> Result<Vec<T>, String> {
         self.device.poll(wgpu::PollType::Wait { submission_index: Some(submitted.index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
         let view = submitted.read.slice(..).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
         Ok(bytemuck::cast_slice(&view).to_vec())
@@ -193,20 +265,29 @@ impl GpuIterator {
             let mut m = MandelbrotSet::new(max_iterations, orbit_radius);
             m.smooth_coloring = smooth;
             let points: Vec<Complex> = (0..48).flat_map(|y| (0..64).map(move |x| (x, y))).map(|(x, y)| plane.complex_from_pixel_plane(f64::from(x) + 0.37, f64::from(y) + 0.61)).collect();
-            let gpu = self.positions(&m, &points, false)?;
+            let gpu = self.positions(&m, &points)?;
             if let Some((point, (gpu, cpu))) = points.iter().zip(gpu.iter().zip(points.iter().map(|c| m.position(c)))).find(|(_, (gpu, cpu))| gpu.to_bits() != cpu.to_bits()) {
                 return Err(format!("{} differs from the CPU at ({}, {}): {gpu} instead of {cpu}", self.name, point.x, point.y));
             }
             if index == 0 {
-                let fast = self.positions(&m, &points, true)?;
-                let differ = points.iter().zip(&fast).filter(|(c, fast)| fast.floor().to_bits() != m.position(c).floor().to_bits()).count();
-                if differ * 100 > points.len() {
-                    return Err(format!("the fast loop of {} gives other iteration counts than the CPU for {differ} of {} points", self.name, points.len()));
+                //The fast loop computes the points of the pixels itself: sample 3 of the pixels, placed 5 pixels right and 2 up in the plane
+                let (pixels, cpu) = fast_test_case(&plane, &m, 64, 48);
+                let fast = self.fast_positions(&m, &plane, 3, (5, -2), &pixels)?;
+                let differ = cpu.iter().zip(&fast).filter(|(cpu, fast)| fast.floor().to_bits() != cpu.floor().to_bits()).count();
+                if differ * 100 > pixels.len() {
+                    return Err(format!("the fast loop of {} gives other iteration counts than the CPU for {differ} of {} points", self.name, pixels.len()));
                 }
             }
         }
         Ok(())
     }
+}
+
+/// The `width` x `height` pixels of `plane` packed for `fast_positions`, and the positions of the CPU for sample 3 of them, placed at origin (5, -2) (see `progressive::sample_point`)
+fn fast_test_case(plane: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize) -> (Vec<u32>, Vec<f64>) {
+    let pixels: Vec<(usize, usize)> = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).collect();
+    let cpu = pixels.iter().map(|(x, y)| m.position(&super::progressive::sample_point(plane, *x, *y, 3, (5, -2)))).collect();
+    (pixels.iter().map(|(x, y)| packed_pixel(*x, *y)).collect(), cpu)
 }
 
 /// The views of the self-test: (view, iterations, orbit radius, smooth coloring)
@@ -226,7 +307,7 @@ fn spirv_without_contraction(source: &str) -> Result<Vec<u32>, String> {
     const OP_DECORATE: u32 = 71;
     const NO_CONTRACTION: u32 = 42;
     let module = naga::front::wgsl::parse_str(source).map_err(|err| format!("the shader: {err}"))?;
-    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::FLOAT64).validate(&module).map_err(|err| format!("the shader: {err:?}"))?;
+    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::FLOAT64 | naga::valid::Capabilities::SHADER_INT64).validate(&module).map_err(|err| format!("the shader: {err:?}"))?;
     let options = naga::back::spv::Options { lang_version: (1, 3), ..Default::default() };
     let pipeline_options = naga::back::spv::PipelineOptions { shader_stage: naga::ShaderStage::Compute, entry_point: "main".into() };
     let words = naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline_options)).map_err(|err| format!("the shader: {err}"))?;
@@ -293,12 +374,22 @@ mod tests {
         plane.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.000064));
         let m = MandelbrotSet::new(5000, 2.0);
         let points: Vec<Complex> = (0..160).flat_map(|y| (0..240).map(move |x| (x, y))).map(|(x, y)| plane.complex_from_pixel_plane(f64::from(x) + 0.5, f64::from(y) + 0.5)).collect();
-        let positions = gpu.positions(&m, &points, false).unwrap();
+        let positions = gpu.positions(&m, &points).unwrap();
         let differ = points.iter().zip(&positions).filter(|(c, gpu)| gpu.to_bits() != m.position(c).to_bits()).count();
         assert_eq!(differ, 0, "{} of {} positions differ on {}", differ, points.len(), gpu.name());
         //The fast loop: the iteration counts of almost every point (measured: 1.5% differ at 1200 x 800), the colors of the rest are close
-        let fast = gpu.positions(&m, &points, true).unwrap();
-        let differ = points.iter().zip(&fast).filter(|(c, fast)| fast.floor().to_bits() != m.position(c).floor().to_bits()).count();
-        assert!(differ * 100 < points.len() * 3, "the fast loop changes {differ} of {} iteration counts", points.len());
+        let (pixels, cpu) = fast_test_case(&plane, &m, 240, 160);
+        let fast = gpu.fast_positions(&m, &plane, 3, (5, -2), &pixels).unwrap();
+        let differ = cpu.iter().zip(&fast).filter(|(cpu, fast)| fast.floor().to_bits() != cpu.floor().to_bits()).count();
+        assert!(differ * 100 < pixels.len() * 3, "the fast loop changes {differ} of {} iteration counts", pixels.len());
+        //On a calm view the orbits of the fast loop are the CPU's, so the smooth positions are too, up to the f32 logarithms of the GPU (far below the 1/256 steps of
+        //the coloring). In the chaotic parts of a view like this one, an orbit that ends with the same count can end elsewhere, which moves the fraction
+        let mut calm = ComplexPlane::new(240, 160);
+        calm.set_view(&View::new(-0.75, 0.0, 1.0));
+        let m = MandelbrotSet::new(500, 2.0);
+        let (pixels, cpu) = fast_test_case(&calm, &m, 240, 160);
+        let fast = gpu.fast_positions(&m, &calm, 3, (5, -2), &pixels).unwrap();
+        let close = cpu.iter().zip(&fast).filter(|(cpu, fast)| (*cpu - *fast).abs() < 1e-4).count();
+        assert!(close * 1000 >= cpu.len() * 999, "only {close} of {} fast positions are the CPU's", cpu.len());
     }
 }

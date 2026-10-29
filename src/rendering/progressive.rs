@@ -1,12 +1,12 @@
 //! The progressive renderer: one supersampling layer at a time, so every layer can be shown as soon as it is computed.
 
-use std::{collections::VecDeque, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
+use std::{borrow::Cow, collections::VecDeque, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
 
 use super::adaptive::{mask_where, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 use super::jitter::sample_jitter;
 use super::region::ExposedRegion;
 use super::render_thread_count;
-use super::gpu::{GpuIterator, Outcome, BATCH};
+use super::gpu::{packed_pixel, FastOutcome, GpuIterator, Outcome, BATCH, MAX_PIXEL};
 use super::state::{SampleKey, SampleState, FOREIGN};
 use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, mandelbrot_set::MandelbrotSet};
 
@@ -172,7 +172,8 @@ impl<'a> Render<'a> {
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
         let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, cpu_threads } = self;
-        let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS;
+        //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
+        let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS && width <= MAX_PIXEL && height <= MAX_PIXEL;
         debug_assert!(cpu_threads > 0 || gpu.is_some(), "a render without CPU threads needs the GPU");
         let own_gpu_samples = AtomicUsize::new(0);
         let gpu_samples = gpu_samples.unwrap_or(&own_gpu_samples);
@@ -298,12 +299,18 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     let divide = divider(u32::from(sample) + 1);
     let skip_first = sample == 0 && !has_first.is_empty();
     //The pixels of row `y` that get this sample
-    let select = |y: usize, counts: &[u8]| -> Vec<usize> {
-        if track {
+    //Most rows of a pass are whole (a frame of a flight: every row): checking that at once and sharing this list is several times as fast as choosing pixel by pixel
+    let every_pixel: Vec<usize> = (0..width).collect();
+    let select = |y: usize, counts: &[u8]| -> Cow<[usize]> {
+        let whole = mask.is_none() && if track { counts.iter().all(|count| *count == sample) } else { !skip_first && counts.iter().all(|count| *count != FOREIGN) };
+        if whole {
+            return Cow::Borrowed(&every_pixel);
+        }
+        Cow::Owned(if track {
             (0..width).filter(|x| counts[*x] == sample && mask.is_none_or(|mask| mask[y * width + x])).collect()
         } else {
             (0..width).filter(|x| counts[*x] != FOREIGN && mask.is_none_or(|mask| mask[y * width + x]) && !(skip_first && has_first[y * width + x])).collect()
-        }
+        })
     };
     //Adds the samples at `positions` of the pixels `xs` of a row, and updates its running averages and counts: the same for the CPU threads and the GPU
     let apply = |y: usize, row: &mut [[u32; 3]], counts: &mut [u8], first: &mut [TrueColor], second: &mut [TrueColor], color_row: &mut [TrueColor], xs: &[usize], positions: &[f64]| {
@@ -355,9 +362,10 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     let gpu_done: Mutex<Vec<GpuRow>> = Mutex::new(Vec::new());
     //The rows that the GPU worker took from `rows` and has not put into `gpu_done` yet: the CPU threads wait for those before they stop
     let gpu_pending = AtomicUsize::new(0);
-    let finish_gpu_row = |(y, ((((row, counts), first), second), color_row)): PassRow, xs: Vec<usize>, outcomes: Option<(Arc<Vec<Outcome>>, usize)>| {
-        let positions = match outcomes {
-            Some((all, offset)) => xs.iter().zip(&all[offset..]).map(|(x, outcome)| outcome.position(m, &sample_point(c, *x, y, sample, origin))).collect(),
+    let finish_gpu_row = |(y, ((((row, counts), first), second), color_row)): PassRow, xs: Cow<[usize]>, outcomes: Option<(Arc<GpuOutcomes>, usize)>| {
+        let positions = match outcomes.as_ref().map(|(all, offset)| (&**all, *offset)) {
+            Some((GpuOutcomes::Exact(all), offset)) => xs.iter().zip(&all[offset..]).map(|(x, outcome)| outcome.position(m, &sample_point(c, *x, y, sample, origin))).collect(),
+            Some((GpuOutcomes::Fast(all), offset)) => all[offset..offset + xs.len()].iter().map(|outcome| outcome.position(m)).collect(),
             None => on_cpu(y, &xs),
         };
         apply(y, row, counts, first, second, color_row, &xs, &positions);
@@ -406,6 +414,8 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                 let (mut points_taken, mut rows_taken) = (0_usize, 0_usize);
                 let gpu_started = Instant::now();
                 let mut points_finished = 0_usize;
+                //The pixels of a batch for the fast loop, kept for the next: a new vector of a megabyte would cost its page faults every batch
+                let mut pixels: Vec<u32> = Vec::new();
                 loop {
                     while gpu_works && in_flight.len() < 2 && !cancel.load(Ordering::Relaxed) {
                         let points = rate.map_or(GPU_ROWS as f64 * points_per_row, |rate| rate * GPU_BATCH_TIME.as_secs_f64()).max(GPU_MIN_POINTS as f64);
@@ -422,22 +432,36 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                             break;
                         }
                         let rows_in_batch = batch.len();
-                        let selected: Vec<(PassRow, Vec<usize>)> = batch.into_iter().map(|row| {
+                        let selected: Vec<(PassRow, Cow<[usize]>)> = batch.into_iter().map(|row| {
                             let xs = select(row.0, (row.1).0.0.0.1);
                             (row, xs)
                         }).collect();
-                        let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, sample, origin))).collect();
+                        //The fast loop gets the pixels and computes their points itself; the exact loop gets the points
+                        let count: usize = selected.iter().map(|(_, xs)| xs.len()).sum();
+                        let submitted = (count > 0).then(|| if *fast {
+                            pixels.clear();
+                            for ((y, _), xs) in &selected {
+                                pixels.extend(xs.iter().map(|x| packed_pixel(*x, *y)));
+                            }
+                            gpu.submit_pixels(m, c, sample, origin, &pixels)
+                        } else {
+                            let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, sample, origin))).collect();
+                            gpu.submit(m, &points)
+                        }); //Rows without pixels of this pass need no dispatch
                         //The points per row of the pass so far (rows with few or no pixels to sample in a preview level or an adaptive pass make it small)
-                        (points_taken, rows_taken) = (points_taken + points.len(), rows_taken + rows_in_batch);
+                        (points_taken, rows_taken) = (points_taken + count, rows_taken + rows_in_batch);
                         points_per_row = points_taken as f64 / rows_taken as f64;
-                        let submitted = (!points.is_empty()).then(|| gpu.submit(m, &points, *fast)); //Rows without pixels of this pass need no dispatch
-                        in_flight.push_back((selected, submitted, points.len()));
+                        in_flight.push_back((selected, submitted, count));
                     }
                     let Some((selected, submitted, count)) = in_flight.pop_front() else { break };
                     if cancel.load(Ordering::Relaxed) {
                         return; //Not waiting for the dispatches on the GPU: their rows keep the samples they had, like a row the CPU stops in
                     }
-                    let outcomes = submitted.map_or_else(|| Ok(Vec::new()), |submitted| submitted.and_then(|submitted| gpu.finish(submitted)));
+                    let outcomes = submitted.map_or_else(|| Ok(GpuOutcomes::Exact(Vec::new())), |submitted| submitted.and_then(|submitted| if *fast {
+                        gpu.finish(submitted).map(GpuOutcomes::Fast)
+                    } else {
+                        gpu.finish(submitted).map(GpuOutcomes::Exact)
+                    }));
                     gpu_works = outcomes.is_ok();
                     if gpu_works {
                         gpu_samples.fetch_add(count, Ordering::Relaxed);
@@ -506,7 +530,13 @@ const GPU_MIN_POINTS: usize = 1 << 16;
 const GPU_BATCH_TIME: Duration = Duration::from_millis(10);
 
 /// A row that the GPU computed: the row, its pixels, and the outcomes of its batch with where the row starts in them (`None`: the GPU failed)
-type GpuRow<'r> = (PassRow<'r>, Vec<usize>, Option<(Arc<Vec<Outcome>>, usize)>);
+type GpuRow<'r> = (PassRow<'r>, Cow<'r, [usize]>, Option<(Arc<GpuOutcomes>, usize)>);
+
+/// The outcomes of a dispatch: of the exact loop, which the CPU turns into positions, or of the fast loop, which are positions
+enum GpuOutcomes {
+    Exact(Vec<Outcome>),
+    Fast(Vec<FastOutcome>),
+}
 
 /// A row of a pass: its number, sums, counts, first and second colors, and colors
 type PassRow<'r> = (usize, ((((&'r mut [[u32; 3]], &'r mut [u8]), &'r mut [TrueColor]), &'r mut [TrueColor]), &'r mut [TrueColor]));
@@ -598,7 +628,7 @@ fn average(sum: [u32; 3], count: u8) -> TrueColor {
 ///
 /// With `cancel`, it stops between groups once `cancel` is set, and returns how many of `xs` (from the start) it gave to `sink`; without, it does all of them.
 /// The point of sample `sample` of pixel `(x, y)`: pixel `(x + origin.0, y + origin.1)` of `anchor`, at the jitter of that pixel and sample (see `SampleState`)
-fn sample_point(anchor: &ComplexPlane, x: usize, y: usize, sample: u8, origin: (isize, isize)) -> Complex {
+pub(super) fn sample_point(anchor: &ComplexPlane, x: usize, y: usize, sample: u8, origin: (isize, isize)) -> Complex {
     let (anchor_x, anchor_y) = (x.cast_signed() + origin.0, y.cast_signed() + origin.1);
     let (jitter_x, jitter_y) = sample_jitter(anchor_x as usize, anchor_y as usize, sample);
     anchor.complex_from_pixel_plane(anchor_x as f64 + jitter_x, anchor_y as f64 + jitter_y)

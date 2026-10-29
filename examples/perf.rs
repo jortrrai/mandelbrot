@@ -210,15 +210,14 @@ fn main() {
                         }); });
                         out
                     };
-                    let (on_cpu, on_gpu) = (cpu(&points), gpu.positions(&m, &points, false).expect("the GPU"));
+                    let (on_cpu, on_gpu) = (cpu(&points), gpu.positions(&m, &points).expect("the GPU"));
                     let same = on_cpu.iter().zip(&on_gpu).all(|(a, b)| a.to_bits() == b.to_bits());
                     summarize(&format!("{name} ({max_iterations} it), CPU all threads"), time_runs(runs, || { std::hint::black_box(cpu(&points)); }));
-                    summarize(&format!("{name} ({max_iterations} it), GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points, false).expect("the GPU")); }));
+                    summarize(&format!("{name} ({max_iterations} it), GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points).expect("the GPU")); }));
                     println!("{:<44} the same positions bit for bit: {same}", "");
-                    let fast = gpu.positions(&m, &points, true).expect("the GPU");
-                    let differ = on_cpu.iter().zip(&fast).filter(|(a, b)| a.floor().to_bits() != b.floor().to_bits()).count();
-                    summarize(&format!("{name} ({max_iterations} it), fast GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points, true).expect("the GPU")); }));
-                    println!("{:<44} other iteration counts: {:.3}%", "", differ as f64 * 100.0 / points.len() as f64);
+                    //The fast loop gets the pixels and computes their points itself (sample 0, at its jitter): its iteration counts are checked in `gpu`'s tests
+                    let pixels: Vec<u32> = (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| rendering::gpu::packed_pixel(x, y))).collect();
+                    summarize(&format!("{name} ({max_iterations} it), fast GPU"), time_runs(runs, || { std::hint::black_box(gpu.fast_positions(&m, &c, 0, (0, 0), &pixels).expect("the GPU")); }));
                 }
                 //Whole renders: the CPU threads alone, and with the GPU joining the first pass after 3 ms, like the window (`GPU_JOIN_AFTER`)
                 let join = Some((&gpu, Duration::from_millis(3)));
