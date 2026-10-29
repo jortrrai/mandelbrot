@@ -12,7 +12,7 @@ use crate::complex_plane::{ComplexPlane, View};
 use crate::pixel_buffer::PixelBuffer;
 use crate::points_of_interest::{self, Coloring, PointOfInterest};
 use crate::thumbnails::{self, ThumbnailRequest};
-use super::flight::{Camera, Flight};
+use super::flight::{Camera, Flight, Pace};
 use super::{MandelbrotApp, Readiness, COLORING_FUNCTIONS};
 
 /// The most a flight that waits for its frames moves on after a frame, in flight time: two frames at 60 Hz
@@ -346,7 +346,8 @@ impl MandelbrotApp {
         }
     }
 
-    /// Flies to the point of interest at `index` by the shortest path at the chosen pace (see `flight`); `fly` moves the view on every frame and arrives with `arrive_at`
+    /// Flies to the point of interest at `index` by the shortest path at the chosen pace (see `flight`); `fly` moves the view on every frame and arrives with `arrive_at`.
+    /// With no flight (`Pace::NoFlight`) the place is shown at once.
     pub(super) fn go_to_point_of_interest(&mut self, index: usize) {
         let Some(point) = self.points.get(index).cloned() else { return };
         let center = self.c.center();
@@ -356,6 +357,10 @@ impl MandelbrotApp {
         destination.set_view(&View::new(to.x, to.y, to.scale));
         if self.zoom_refused(&destination) {
             return; //Deeper than the zoom limit: no flight
+        }
+        if self.pace == Pace::NoFlight {
+            self.arrive_at(&point);
+            return;
         }
         let flight = Flight::new(from, to, self.pace);
         self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));

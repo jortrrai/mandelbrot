@@ -17,11 +17,13 @@ pub enum Pace {
     Fast,
     Normal,
     Cinematic,
+    /// No flight: going to a place shows it at once (see `MandelbrotApp::go_to_point_of_interest`)
+    NoFlight,
 }
 
 impl Pace {
     /// Every pace, in the order of the drop-down (the default, see `MandelbrotApp::new`, first)
-    pub const ALL: [Pace; 3] = [Pace::Fast, Pace::Normal, Pace::Cinematic];
+    pub const ALL: [Pace; 4] = [Pace::Fast, Pace::Normal, Pace::Cinematic, Pace::NoFlight];
 
     /// The name in the drop-down
     pub const fn name(self) -> &'static str {
@@ -29,6 +31,7 @@ impl Pace {
             Pace::Fast => "Fast",
             Pace::Normal => "Normal",
             Pace::Cinematic => "Cinematic",
+            Pace::NoFlight => "No flight",
         }
     }
 
@@ -38,6 +41,7 @@ impl Pace {
             Pace::Fast => (4.0, 0.5, 3.0),
             Pace::Normal => (2.0, 1.0, 6.0),
             Pace::Cinematic => (1.0, 2.0, 12.0),
+            Pace::NoFlight => (f64::INFINITY, 0.0, 0.0), //A flight of no time: arrived at once
         }
     }
 
@@ -47,6 +51,7 @@ impl Pace {
         match self {
             Pace::Cinematic => t * t * t * (t * (t * 6.0 - 15.0) + 10.0),
             Pace::Fast | Pace::Normal => t * t * (3.0 - 2.0 * t),
+            Pace::NoFlight => 1.0,
         }
     }
 }
@@ -212,7 +217,7 @@ mod tests {
 
     #[test]
     fn a_flight_starts_at_the_start_and_ends_exactly_at_the_destination() {
-        for pace in Pace::ALL {
+        for pace in Pace::ALL.into_iter().filter(|pace| *pace != Pace::NoFlight) {
             for (from, to) in [(RESET, SEAHORSE), (SEAHORSE, DEEP), (DEEP, RESET), (SEAHORSE, SEAHORSE)] {
                 let flight = Flight::new(from, to, pace);
                 assert_eq!(flight.camera_at(Duration::ZERO), from, "{pace:?}");
