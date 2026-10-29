@@ -157,6 +157,7 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
         });
+        ui.checkbox(&mut self.smooth_flights, "Smooth colors during flights").on_hover_text("Off: the frames on the way color by whole iteration counts, which shows bands of color but skips the smooth color of every pixel (up to a third of the time of a shallow frame). The place itself is always rendered with smooth colors.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
             let share = flight.flight.share_of_path(flight.elapsed) as f32;
