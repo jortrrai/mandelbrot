@@ -26,7 +26,7 @@ pub struct MandelbrotSet {
     pub smooth_coloring: bool,
 }
 
-/// The amount of points `MandelbrotSet::iterate_lanes` iterates at the same time
+/// The amount of points `MandelbrotSet::position_lanes` iterates at the same time
 pub const LANES: usize = 4;
 /// Smooth coloring continues an escaped orbit until |z|^2 reaches this (radius 256), or for at most `SMOOTH_MAX_EXTRA_STEPS` steps
 const SMOOTH_BAILOUT_SQUARED: f64 = 65536.0;
@@ -41,10 +41,11 @@ struct LaneResult {
     escape_y: [f64; LANES],
 }
 
-/// `iterate_lanes` checks whether every point has stopped after this many steps
+/// The lockstep and refilling loops check which points have stopped after every block of this many steps
 pub(crate) const CHECK_INTERVAL: u32 = 4;
 
-/// The lanes of `MandelbrotSet::positions`: several vectors of 4 that the CPU computes at the same time, so it does not wait for the result of one step before the next
+/// The lanes of the generic refilling loop (`MandelbrotSet::positions_generic`): one vector of 4 (more lanes were slower with all threads busy, which hide the
+/// latency of a step already)
 const STREAM_LANES: usize = 4;
 
 impl MandelbrotSet {
@@ -74,9 +75,11 @@ impl MandelbrotSet {
         if self.smooth_coloring { self.iterate_smooth(c) } else { f64::from(self.iterate(c)) }
     }
 
-    /// Like `position`, for `LANES` points at the same time
+    /// Like `position`, for `LANES` points at the same time: the points are iterated in lockstep, with the same arithmetic in the same order as `position`, so the
+    /// compiler can use vector instructions; a point that has stopped stops counting, but the others continue until none is left. Identical to `position` for every point.
     pub fn position_lanes(&self, points: &[Complex; LANES]) -> [f64; LANES] {
-        if self.smooth_coloring { self.iterate_lanes_smooth(points) } else { self.iterate_lanes(points).map(f64::from) }
+        let result = self.iterate_lanes_smooth_dispatch(points);
+        std::array::from_fn(|lane| self.position_after_loop(result.iterations[lane], result.escaped[lane], (result.escape_x[lane], result.escape_y[lane]), &points[lane]))
     }
 
     /// The continuous escape time of a point (normalized iteration count): the iteration count of `iterate` plus a fraction in about [-0.85, 0.53) that depends on how far
@@ -150,96 +153,6 @@ impl MandelbrotSet {
             return self.max_iterations; //Same result as the escape loop below, which never breaks for points inside the set
         }
         self.iterate_escape_loop(c)
-    }
-
-    /// Runs the Mandelbrot set algorithm for `LANES` Complex numbers at the same time, with exactly the same result for every point as `iterate`.
-    /// The points are iterated in lockstep, with the same arithmetic in the same order, so the compiler can use vector instructions.
-    /// A point that has escaped, or is known to be inside the set, stops counting, but the other points continue until none is left.
-    pub fn iterate_lanes(&self, points: &[Complex; LANES]) -> [u32; LANES] {
-        self.iterate_lanes_plain(points)
-    }
-
-    /// The lockstep loop of `iterate_lanes`: AVX2 when the CPU has it, else the generic loop. This is a separate copy of the loop of `iterate_lanes_smooth_generic` on purpose: sharing one generic function
-    /// between the two made the plain loop 48% slower when all render threads are busy, so the plain loop is kept as it is
-    fn iterate_lanes_plain(&self, points: &[Complex; LANES]) -> [u32; LANES] {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if std::arch::is_x86_feature_detected!("avx2") {
-                //SAFETY: the CPU supports AVX2, which was just detected
-                return unsafe { self.iterate_lanes_plain_avx2(points) };
-            }
-        }
-        self.iterate_lanes_plain_generic(points)
-    }
-
-    /// The loop of `iterate_lanes_plain_generic` compiled with AVX2 enabled
-    /// # Safety
-    /// The CPU must support AVX2 (checked by the caller with `is_x86_feature_detected!`)
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
-    unsafe fn iterate_lanes_plain_avx2(&self, points: &[Complex; LANES]) -> [u32; LANES] {
-        self.iterate_lanes_plain_generic(points)
-    }
-
-    /// The plain lockstep loop: the escape count of `LANES` points, all stepping together, with the interior shortcuts and the exact cycle detection of the module documentation
-    // Exact comparison of floats is the cycle certificate (an orbit that repeats bit for bit); inline(always) is a measured performance requirement (see the documentation)
-    #[allow(clippy::float_cmp, clippy::inline_always)]
-    #[inline(always)]
-    fn iterate_lanes_plain_generic(&self, points: &[Complex; LANES]) -> [u32; LANES] {
-        let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
-        let mut iterations = [0_u32; LANES];
-        let mut active = [true; LANES];
-        let (mut cx, mut cy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
-        for lane in 0..LANES {
-            (cx[lane], cy[lane]) = (points[lane].x, points[lane].y);
-            if self.is_known_interior(&points[lane]) {
-                active[lane] = false;
-                iterations[lane] = self.max_iterations;
-            }
-        }
-        let (mut zx, mut zy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
-        let (mut saved_x, mut saved_y) = ([0.0_f64; LANES], [0.0_f64; LANES]);
-        let (mut blocks_since_saved, mut blocks_until_save) = (0_u32, 1_u32);
-        let mut step = 0;
-        while step < self.max_iterations {
-            if !active.iter().any(|lane_active| *lane_active) {
-                break;
-            }
-            //Only check whether any point is left every few steps; points that already stopped do not count anymore
-            for _ in 0..CHECK_INTERVAL.min(self.max_iterations - step) {
-                for lane in 0..LANES {
-                    //Same arithmetic as z = z.squared().add(c)
-                    let new_x = zx[lane] * zx[lane] - zy[lane] * zy[lane] + cx[lane];
-                    let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
-                    (zx[lane], zy[lane]) = (new_x, new_y);
-                    let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
-                    active[lane] &= !escaped;
-                    iterations[lane] += u32::from(active[lane]);
-                }
-            }
-            step += CHECK_INTERVAL;
-            //Brent's cycle detection, once per block of steps: if a point is exactly where it was at an earlier block, its orbit repeats forever,
-            //and every point of it was inside the orbit radius, so the original loop would count every step: max_iterations
-            for lane in 0..LANES {
-                if active[lane] && zx[lane] == saved_x[lane] && zy[lane] == saved_y[lane] {
-                    active[lane] = false;
-                    iterations[lane] = self.max_iterations;
-                }
-            }
-            blocks_since_saved += 1;
-            if blocks_since_saved == blocks_until_save {
-                (saved_x, saved_y) = (zx, zy);
-                blocks_since_saved = 0;
-                blocks_until_save = blocks_until_save.saturating_mul(2);
-            }
-        }
-        iterations
-    }
-
-    /// Like `iterate_lanes`, but returns the smooth color position of every point, see `iterate_smooth`; identical to it for every point
-    pub fn iterate_lanes_smooth(&self, points: &[Complex; LANES]) -> [f64; LANES] {
-        let result = self.iterate_lanes_smooth_dispatch(points);
-        std::array::from_fn(|lane| self.position_after_loop(result.iterations[lane], result.escaped[lane], (result.escape_x[lane], result.escape_y[lane]), &points[lane]))
     }
 
     /// The position of `c` from the outcome of the escape loop of the lockstep path (also the GPU's, see `rendering::gpu`): the iteration count, whether it escaped,
@@ -592,20 +505,21 @@ mod tests {
         }
     }
 
-    /// `iterate_lanes` must give exactly the result of `iterate` for every point, for any mix of interior, exterior and boundary points
+    /// The lockstep and the refilling loop must give exactly the count of `iterate` for every point (integer coloring), for any mix of interior, exterior and boundary points
     #[test]
-    fn iterate_lanes_matches_iterate() {
+    fn lockstep_counts_match_iterate() {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let views = [(-0.75, 0.0, 1.25), (-0.7498100000000001, -0.0203, 0.00008), (-1.7862712, 0.0000524, 0.00002), (0.9, 0.9, 0.4), (-0.1, 0.65, 0.12)];
         for max_iterations in [0, 1, 7, 100, 1000, 3000] {
             for orbit_radius in [2.0, 4.0, 1.0] {
-                let m = MandelbrotSet::new(max_iterations, orbit_radius);
+                let mut m = MandelbrotSet::new(max_iterations, orbit_radius);
+                m.smooth_coloring = false;
                 for (x, y, half) in views {
                     for _ in 0..500 {
                         let points: [Complex; LANES] = std::array::from_fn(|_| Complex::new(x + (rng.gen::<f64>() - 0.5) * 2.0 * half, y + (rng.gen::<f64>() - 0.5) * 2.0 * half));
                         let expected: Vec<u32> = points.iter().map(|point| m.iterate(point)).collect();
-                        assert_eq!(m.iterate_lanes(&points).to_vec(), expected, "max_iterations = {max_iterations}, orbit_radius = {orbit_radius}, points = {:?}", points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
+                        assert_eq!(lockstep_counts(&m, &points), expected, "max_iterations = {max_iterations}, orbit_radius = {orbit_radius}, points = {:?}", points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
                     }
                 }
             }
@@ -614,28 +528,35 @@ mod tests {
 
     /// Points inside bulbs other than the main cardioid and the period-2 bulb never escape, and their orbits are found to repeat: the result must still be `max_iterations`
     #[test]
-    fn iterate_lanes_matches_iterate_inside_other_bulbs_and_deep_in_the_set() {
+    fn lockstep_counts_match_iterate_inside_other_bulbs_and_deep_in_the_set() {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         //Centers of the period-3 bulbs and a period-4 bulb, and a minibrot; the points are scattered around them
         let centers = [(-0.12256116687665362, 0.7448617666197442), (-0.12256116687665362, -0.7448617666197442), (-0.5043401, 0.5627655), (-1.7548776662466927, 0.0), (-1.3107, 0.0)];
         for max_iterations in [50, 1000, 4000] {
-            let m = MandelbrotSet::new(max_iterations, 2.0);
+            let mut m = MandelbrotSet::new(max_iterations, 2.0);
+            m.smooth_coloring = false;
             for (x, y) in centers {
                 for half in [0.002, 0.02, 0.1] {
                     for _ in 0..300 {
                         let points: [Complex; LANES] = std::array::from_fn(|_| Complex::new(x + (rng.gen::<f64>() - 0.5) * 2.0 * half, y + (rng.gen::<f64>() - 0.5) * 2.0 * half));
                         let expected: Vec<u32> = points.iter().map(|point| m.iterate(point)).collect();
-                        assert_eq!(m.iterate_lanes(&points).to_vec(), expected, "max_iterations = {max_iterations}, points = {:?}", points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
+                        assert_eq!(lockstep_counts(&m, &points), expected, "max_iterations = {max_iterations}, points = {:?}", points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
                     }
                 }
             }
         }
         //The center of the period-3 bulb is found to repeat, and iterates to the limit
-        let m = MandelbrotSet::new(3000, 2.0);
+        let mut m = MandelbrotSet::new(3000, 2.0);
+        m.smooth_coloring = false;
         let center = Complex::new(-0.12256116687665362, 0.7448617666197442);
         let points: [Complex; LANES] = std::array::from_fn(|_| Complex::new(center.x, center.y));
-        assert_eq!(m.iterate_lanes(&points), [3000; LANES]);
+        assert_eq!(lockstep_counts(&m, &points), [3000; LANES]);
+    }
+
+    /// The iteration counts of `position_lanes` with integer coloring (`m.smooth_coloring` off), where the position is the count
+    fn lockstep_counts(m: &MandelbrotSet, points: &[Complex; LANES]) -> Vec<u32> {
+        m.position_lanes(points).iter().map(|position| *position as u32).collect()
     }
 
     /// `positions` (the refilling loop) must give exactly the positions of `position_lanes` (the lockstep loop), bit for bit, for any mix of points, any limit
@@ -719,7 +640,7 @@ mod tests {
             let m = MandelbrotSet::new(max_iterations, 2.0);
             for group in points.as_chunks::<LANES>().0 {
                 let group: [Complex; LANES] = std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y));
-                let lanes = m.iterate_lanes_smooth(&group);
+                let lanes = m.position_lanes(&group);
                 let generic = m.iterate_lanes_smooth_dispatch(&group);
                 for lane in 0..LANES {
                     assert_eq!(lanes[lane].to_bits(), m.iterate_smooth(&group[lane]).to_bits(), "{:?}", group[lane]);
@@ -730,7 +651,7 @@ mod tests {
     }
 
     /// The loops that are compiled with AVX2 are the same code as the generic loops that CPUs without AVX2 (and other architectures) run: this checks that they give the same bits.
-    /// It can only compare them on a CPU that has AVX2, where `iterate_lanes_*` picks the AVX2 loops; elsewhere both sides are the generic loop and the test passes trivially.
+    /// It can only compare them on a CPU that has AVX2, where `position_lanes` picks the AVX2 loop; elsewhere both sides are the generic loop and the test passes trivially.
     #[test]
     fn the_avx2_loops_give_bit_identical_results_to_the_generic_loops() {
         let points = test_points();
@@ -739,7 +660,6 @@ mod tests {
             let m = MandelbrotSet::new(max_iterations, 2.0);
             for group in points.as_chunks::<LANES>().0 {
                 let group: [Complex; LANES] = std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y));
-                assert_eq!(m.iterate_lanes_plain(&group), m.iterate_lanes_plain_generic(&group), "{group:?}");
                 let dispatched = m.iterate_lanes_smooth_dispatch(&group);
                 let mut generic = LaneResult { iterations: [0; LANES], escaped: [false; LANES], escape_x: [0.0; LANES], escape_y: [0.0; LANES] };
                 m.iterate_lanes_smooth_generic(&group, &mut generic);

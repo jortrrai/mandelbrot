@@ -13,7 +13,7 @@ use mandelbrot::auto_iterations::{choose_limit, AutoIterationSettings};
 use mandelbrot::coloring::TrueColor;
 use mandelbrot::complex::Complex;
 use mandelbrot::complex_plane::{ComplexPlane, View};
-use mandelbrot::mandelbrot_set::{MandelbrotSet, LANES};
+use mandelbrot::mandelbrot_set::MandelbrotSet;
 use mandelbrot::rendering::{AdaptiveSampling, Render};
 
 /// FNV-1a, 64 bits
@@ -64,11 +64,13 @@ fn iteration_counts_of_small_views_match_pinned_checksums_on_the_scalar_and_the_
         let points = pixel_centers(&plane(&view.view, width, height), width, height);
         let set = MandelbrotSet::new(view.max_iterations, 2.0);
         let scalar: Vec<u32> = points.iter().map(|point| set.iterate(point)).collect();
-        let mut lanes = Vec::with_capacity(points.len());
-        for group in points.as_chunks::<LANES>().0 {
-            lanes.extend_from_slice(&set.iterate_lanes(&std::array::from_fn(|lane| Complex::new(group[lane].x, group[lane].y))));
-        }
-        assert_eq!(lanes, scalar, "{}: the lockstep (SIMD) path equals the scalar path", view.name);
+        //The loop the renderer uses (SIMD), with integer coloring: the position is the count
+        let mut integer = set.clone();
+        integer.smooth_coloring = false;
+        let mut positions = vec![0.0; points.len()];
+        integer.positions(&points, &mut positions, None);
+        let refilled: Vec<u32> = positions.iter().map(|position| *position as u32).collect();
+        assert_eq!(refilled, scalar, "{}: the refilling (SIMD) path equals the scalar path", view.name);
         actual.push(fnv(scalar.iter().flat_map(|count| count.to_le_bytes())));
     }
     assert_eq!(actual, PINNED_COUNTS, "the iteration counts of the views {:?} changed (actual checksums are listed on the left)", views().iter().map(|view| view.name).collect::<Vec<_>>());
@@ -116,7 +118,7 @@ fn smooth_positions_match_golden_samples_within_a_tolerance_and_counts_exactly()
         assert_eq!(set.iterate(&point), count, "({real}, {imaginary}): the iteration count");
         let actual = set.iterate_smooth(&point);
         assert!((actual - position).abs() < 1e-9, "({real}, {imaginary}): the smooth position is {actual:?}, expected {position:?}");
-        let lanes = set.iterate_lanes_smooth(&[Complex::new(real, imaginary), Complex::new(real, imaginary), Complex::new(real, imaginary), Complex::new(real, imaginary)]);
+        let lanes = set.position_lanes(&[Complex::new(real, imaginary), Complex::new(real, imaginary), Complex::new(real, imaginary), Complex::new(real, imaginary)]);
         assert_eq!(lanes[0].to_bits(), actual.to_bits(), "the SIMD path gives the same position as the scalar path");
     }
 }
