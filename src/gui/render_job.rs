@@ -167,7 +167,7 @@ impl MandelbrotApp {
                 Ok(JobMessage::Done { c, p, m, message, elapsed, completed, reported }) => {
                     self.job = None;
                     self.limit_pending = false;
-                    //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the coloring of the window (a flight frame can be without smooth coloring)
+                    //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
                     self.m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring, ..m };
                     self.buffer_is_complete = completed && self.settle.is_none(); //A render during a gesture has only the first layer
                     self.layer_shown |= completed;
@@ -279,8 +279,7 @@ impl MandelbrotApp {
             self.m.max_iterations = self.max_iterations_input;
             self.m.palette_scale = None;
         }
-        //Without smooth flights, a flight frame skips the smooth position of every escaped point: faster, with bands of color
-        let mut m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring && (self.smooth_flights || kind != RenderKind::FlightFrame), ..self.m.clone() };
+        let mut m = self.m.clone();
         let supersampling_amount = if all_layers { self.supersampling_amount } else { 1 };
         let coloring_function = self.coloring_function;
         let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);

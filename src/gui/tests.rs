@@ -1343,31 +1343,25 @@ fn every_kind_of_render_decides_its_layers_its_limit_and_its_history() {
 }
 
 #[test]
-fn flight_frames_without_smooth_colors_color_by_the_iteration_count_and_the_arrival_is_smooth() {
+fn the_smooth_colors_setting_applies_to_every_render_and_the_window_keeps_it() {
     use super::render_job::RenderKind;
     let config = Config::sized(64, 48, 50, 1);
     let mut app = manual_app(&config);
-    assert!(!app.smooth_flights, "off by default");
+    assert!(app.m.smooth_coloring, "on by default");
     let smooth = app.p.pixels.clone();
     app.m.smooth_coloring = false;
-    app.render("Integer colors");
+    app.render("Turned smooth colors off");
     wait_for_job(&mut app);
     let integer = app.p.pixels.clone();
-    assert_ne!(smooth, integer);
+    assert_ne!(smooth, integer, "whole iteration counts give other colors");
+    assert!(!app.m.smooth_coloring, "the window keeps its setting after the render");
+    app.start_render_as("A flight frame", RenderKind::FlightFrame);
+    wait_for_job(&mut app);
+    assert_eq!(app.p.pixels, integer, "a flight frame follows the setting like any render");
     app.m.smooth_coloring = true;
-
-    app.smooth_flights = true;
-    app.start_render_as("A flight frame", RenderKind::FlightFrame);
+    app.render("Turned smooth colors on");
     wait_for_job(&mut app);
-    assert_eq!(app.p.pixels, smooth, "on: a flight frame is smooth like any render");
-    app.smooth_flights = false;
-    app.start_render_as("A flight frame", RenderKind::FlightFrame);
-    wait_for_job(&mut app);
-    assert_eq!(app.p.pixels, integer, "off: a flight frame colors by the count");
-    assert!(app.m.smooth_coloring, "the setting of the window stays smooth");
-    app.render("The arrival");
-    wait_for_job(&mut app);
-    assert_eq!(app.p.pixels, smooth, "every other render is smooth");
+    assert_eq!(app.p.pixels, smooth);
 }
 
 #[test]
