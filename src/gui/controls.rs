@@ -161,11 +161,10 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
         });
-        ui.checkbox(&mut self.smooth_flights, "Smooth colors during flights").on_hover_text("Off by default: the frames on the way color by whole iteration counts, which shows bands of color but skips the smooth color of every pixel (up to a third of the time of a shallow frame). The place itself is always rendered with smooth colors.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
             let share = flight.flight.share_of_path(flight.elapsed) as f32;
-            let text = format!("To {}: {:.0}% of the way, {} FPS", flight.point.name, share * 100.0, flight.fps(std::time::Instant::now()));
+            let text = format!("To {}: {:.0}% of the way, {} FPS", flight.point.name, share * 100.0, flight.fps_shown);
             ui.horizontal(|ui| {
                 if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
                     self.cancel_flight();
@@ -239,7 +238,10 @@ impl MandelbrotApp {
                     self.render(&format!("Turned fast GPU math {}", if self.fast_gpu { "on" } else { "off" }));
                 }
                 ui.indent("zoom_limit", |ui| {
-                    ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.limit_zoom, "Limit the zoom to fast GPU math")).on_hover_text("Zooming in stops at a scale of about 10⁻⁹, where the fast GPU math switches back to exact math (renders get slower from there). Off: zoom in as far as 64-bit numbers allow.");
+                    let response = ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.limit_zoom, "Limit the zoom to fast GPU math")).on_hover_text("Nothing deeper than a scale of about 10⁻⁹ is rendered, where the fast GPU math would switch back to exact math (renders get slower from there): zooming in, Go to view, Back and Forward and flights to deeper places are refused, and anything else (a larger window) zooms out to the limit. Off: as deep as 64-bit numbers allow.");
+                    if response.changed() && self.limit_zoom && self.zoom_refused(&self.c.clone()) {
+                        self.render("Zoomed out to the zoom limit");
+                    }
                 });
             }
             None => {
@@ -292,6 +294,9 @@ impl MandelbrotApp {
                 }
             });
         });
+        if ui.checkbox(&mut self.m.smooth_coloring, "Smooth colors").on_hover_text("Colors flow smoothly from one iteration count to the next (the fractional iteration count). Off: every pixel gets the color of its whole iteration count, which shows bands of color and saves two logarithms per pixel outside the set. Saved images use this setting too.").changed() {
+            self.render(&format!("Turned smooth colors {}", if self.m.smooth_coloring { "on" } else { "off" }));
+        }
         ui.horizontal(|ui| {
             ui.label("Color channels (R, G, B):");
             let current = format!("{:?}", self.p.color_channel_mapping);

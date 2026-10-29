@@ -145,10 +145,8 @@ pub struct MandelbrotApp {
     /// How fast a flight to a point of interest goes (fast by default), and the flight that is under way, see `flight`
     pace: flight::Pace,
     flight: Option<points::PointFlight>,
-    /// How complete the frames of a flight have to be (low res by default), see `flight::FlightRendering`
+    /// How complete the frames of a flight have to be (best effort by default), see `flight::FlightRendering`
     flight_rendering: flight::FlightRendering,
-    /// Whether the frames of a flight use smooth coloring (off by default); off, they color by the iteration count, which is faster. The arrival is always smooth
-    smooth_flights: bool,
     /// Immersion: the screen never shows black where nothing is rendered yet; the view only moves once the new view has at least a complete low-resolution frame
     immersion: bool,
     /// Whether the render of the current view has shown a frame that is complete enough (see `required_readiness`), and whether it has shown any frame
@@ -192,7 +190,7 @@ pub struct MandelbrotApp {
     use_gpu: bool,
     /// Whether the GPU uses its fast double-float loop (on by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
     fast_gpu: bool,
-    /// Whether zooming in stops where the fast GPU math ends (on by default), see `zoom_refused`
+    /// Whether nothing deeper than the fast GPU math is rendered (off by default), see `zoom_refused` and `keep_within_zoom_limit`
     limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
 }
@@ -245,8 +243,7 @@ impl MandelbrotApp {
             new_point: None,
             pace: flight::Pace::Fast,
             flight: None,
-            flight_rendering: flight::FlightRendering::LowRes,
-            smooth_flights: false,
+            flight_rendering: flight::FlightRendering::BestEffort,
             immersion: false,
             frame_ready: false,
             frame_accepted: false,
@@ -270,7 +267,7 @@ impl MandelbrotApp {
             gpu: None,
             use_gpu: true,
             fast_gpu: true,
-            limit_zoom: true,
+            limit_zoom: false,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
                 let (sender, receiver) = mpsc::channel();
@@ -303,6 +300,18 @@ impl MandelbrotApp {
             self.log(ZOOM_LIMIT_TEXT);
         }
         true
+    }
+
+    /// Keeps the view within the zoom limit (see `zoom_refused`) whatever led past it (a larger window, the limit or the fast GPU math switched on at a deep view):
+    /// zooms out around the center to the limit, with the warning. Every render starts with this, so nothing deeper is ever rendered while the limit is on
+    pub(super) fn keep_within_zoom_limit(&mut self) {
+        for _ in 0..64 {
+            if !self.zoom_refused(&self.c.clone()) {
+                return;
+            }
+            let factor = rendering::FAST_GPU_STEPS / self.c.precision_steps().max(f64::MIN_POSITIVE);
+            self.c.scale(factor.clamp(1.0, 1e6) * 1.001);
+        }
     }
 
     pub(super) fn log(&mut self, message: impl Into<String>) {

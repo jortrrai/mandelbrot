@@ -988,7 +988,7 @@ fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives()
 #[test]
 fn going_to_a_point_flies_there_at_a_cinematic_pace() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
-    assert_eq!((app.pace, app.flight_rendering), (super::flight::Pace::Fast, super::flight::FlightRendering::LowRes), "the defaults, for speed");
+    assert_eq!((app.pace, app.flight_rendering), (super::flight::Pace::Fast, super::flight::FlightRendering::BestEffort), "the defaults, for speed");
     (app.pace, app.flight_rendering) = (super::flight::Pace::Cinematic, super::flight::FlightRendering::BestEffort);
     let ctx = egui::Context::default();
     let history = app.history.len();
@@ -1343,38 +1343,33 @@ fn every_kind_of_render_decides_its_layers_its_limit_and_its_history() {
 }
 
 #[test]
-fn flight_frames_without_smooth_colors_color_by_the_iteration_count_and_the_arrival_is_smooth() {
+fn the_smooth_colors_setting_applies_to_every_render_and_the_window_keeps_it() {
     use super::render_job::RenderKind;
     let config = Config::sized(64, 48, 50, 1);
     let mut app = manual_app(&config);
-    assert!(!app.smooth_flights, "off by default");
+    assert!(app.m.smooth_coloring, "on by default");
     let smooth = app.p.pixels.clone();
     app.m.smooth_coloring = false;
-    app.render("Integer colors");
+    app.render("Turned smooth colors off");
     wait_for_job(&mut app);
     let integer = app.p.pixels.clone();
-    assert_ne!(smooth, integer);
+    assert_ne!(smooth, integer, "whole iteration counts give other colors");
+    assert!(!app.m.smooth_coloring, "the window keeps its setting after the render");
+    app.start_render_as("A flight frame", RenderKind::FlightFrame);
+    wait_for_job(&mut app);
+    assert_eq!(app.p.pixels, integer, "a flight frame follows the setting like any render");
     app.m.smooth_coloring = true;
-
-    app.smooth_flights = true;
-    app.start_render_as("A flight frame", RenderKind::FlightFrame);
+    app.render("Turned smooth colors on");
     wait_for_job(&mut app);
-    assert_eq!(app.p.pixels, smooth, "on: a flight frame is smooth like any render");
-    app.smooth_flights = false;
-    app.start_render_as("A flight frame", RenderKind::FlightFrame);
-    wait_for_job(&mut app);
-    assert_eq!(app.p.pixels, integer, "off: a flight frame colors by the count");
-    assert!(app.m.smooth_coloring, "the setting of the window stays smooth");
-    app.render("The arrival");
-    wait_for_job(&mut app);
-    assert_eq!(app.p.pixels, smooth, "every other render is smooth");
+    assert_eq!(app.p.pixels, smooth);
 }
 
 #[test]
 fn the_zoom_stops_where_the_fast_gpu_math_ends_with_a_warning_in_the_log() {
     let config = Config::sized(64, 48, 50, 1);
     let mut app = manual_app(&config);
-    assert!(app.fast_gpu && app.limit_zoom, "both on by default");
+    assert!(app.fast_gpu && !app.limit_zoom, "fast GPU math on, the limit off by default");
+    app.limit_zoom = true;
     let mut deep = app.c.clone();
     deep.set_view(&View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-11));
     let mut shallow = app.c.clone();
@@ -1424,8 +1419,69 @@ fn a_flight_counts_its_frames_shows_the_frame_rate_and_logs_the_average() {
     let last = *flight.frames.last().unwrap();
     assert_eq!(flight.fps(last), flight.frames.iter().filter(|shown| last.duration_since(**shown) <= Duration::from_secs(1)).count());
     assert_eq!(flight.fps(last + Duration::from_secs(5)), 0, "the frames of the second before");
+    assert!(flight.frames.len() <= 4, "one frame per view on the way (the finer images of a view do not count): {}", flight.frames.len());
+    //The progress bar shows the rate of the second before, updated once a second so it can be read
+    let flight = app.flight.as_mut().unwrap();
+    let updated = flight.fps_updated;
+    flight.update_fps(updated + Duration::from_millis(500));
+    assert_eq!(flight.fps_shown, 0, "not yet a second");
+    flight.update_fps(last.max(updated + Duration::from_secs(1)));
+    assert_eq!(flight.fps_shown, flight.fps(last.max(updated + Duration::from_secs(1))));
     app.skip_flight();
     assert!(app.log.iter().any(|line| line.starts_with("The flight to Test Place was skipped: ") && line.contains(" frames in ") && line.ends_with(" FPS on average")), "{:?}", app.log);
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn nothing_beyond_the_zoom_limit_is_rendered_whatever_leads_there() {
+    const DEEP_PLACE: &str = r#"{ "format_version": 1, "name": "Deep Place", "location": { "center": { "real": -0.743643887037151, "imaginary": 0.13182590420533 }, "scale": 1e-11, "max_iterations": 500 } }"#;
+    let (mut app, folder) = app_with_points(&[("deep-place.json", DEEP_PLACE)]);
+    let deep = View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-11);
+    //A deep view in the history, from before the limit applied (no GPU yet)
+    app.c.set_view(&deep);
+    app.render("Deep");
+    wait_for_job(&mut app);
+    app.c.set_view(&View::new(-0.75, 0.0, 1.0));
+    app.render("Shallow");
+    wait_for_job(&mut app);
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    app.gpu_opening = Some(receiver);
+    app.limit_zoom = true; //The limit applies from now on
+    let shallow = format!("{:?}", app.c.get_view());
+    let unchanged = |app: &MandelbrotApp, what: &str| assert_eq!(format!("{:?}", app.c.get_view()), shallow, "{what}: the view stays");
+    let warned = |app: &MandelbrotApp| app.log.iter().rev().take(2).any(|line| line.starts_with("Zoom limit: "));
+
+    app.go_back();
+    unchanged(&app, "Back");
+    assert!(warned(&app) && app.history.can_go_back(), "the history stays where it was");
+    app.view_inputs = [String::from("-0.743643887037151"), String::from("0.13182590420533"), String::from("1e-11")];
+    app.go_to_view();
+    unchanged(&app, "Go to view");
+    app.go_to_point_of_interest(0);
+    assert!(app.flight.is_none(), "no flight to a place beyond the limit");
+    unchanged(&app, "a flight");
+    assert!(!app.is_busy(), "and nothing is rendered");
+
+    //Anything else that leads past the limit zooms out to it before rendering
+    app.c.set_view(&deep);
+    app.render("Somehow deep");
+    assert!(app.c.precision_steps() >= rendering::FAST_GPU_STEPS && app.c.get_scale() > 1e-11, "zoomed out to the limit: scale {}", app.c.get_scale());
+    assert!(app.c.precision_steps() < rendering::FAST_GPU_STEPS * 1.1, "but not further than needed");
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn go_to_view_keeps_the_current_scale_when_the_scale_is_empty() {
+    let mut app = manual_app(&Config::sized(64, 48, 50, 1));
+    app.c.set_view(&View::new(-0.75, 0.0, 0.25));
+    app.view_inputs = [String::from("-0.5"), String::from("0.1"), String::from(" ")];
+    app.go_to_view();
+    assert!((app.c.center().x + 0.5).abs() < 1e-12 && (app.c.center().y - 0.1).abs() < 1e-12, "the entered center");
+    assert!((app.c.get_scale() - 0.25).abs() < 1e-15, "the current scale: {}", app.c.get_scale());
+    wait_for_job(&mut app);
+    app.view_inputs = [String::from("-0.5"), String::from("0.1"), String::from("abc")];
+    app.go_to_view();
+    assert!(app.log.last().unwrap().starts_with("Could not go to the view"), "a scale that is not a number is still refused");
 }

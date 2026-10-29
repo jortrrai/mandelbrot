@@ -131,14 +131,14 @@ impl MandelbrotApp {
                     let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::FullResolution } else { Readiness::Complete };
                     //(a layer that is held back still counts for the progress bar below)
                     if readiness >= self.required_readiness() {
+                        if let (false, Some(flight)) = (self.frame_accepted, &mut self.flight) {
+                            flight.frames.push(Instant::now()); //A new frame of the flight (not a finer image of the same view), for its frame rate
+                        }
                         self.frame_ready = true;
                         self.frame_accepted = true;
                         self.p.colors = colors;
                         self.shown_plane = plane;
                         self.texture_outdated = true;
-                        if let Some(flight) = &mut self.flight {
-                            flight.frames.push(Instant::now()); //A frame of the flight, for its frame rate
-                        }
                         self.layer_shown = pass > 0;
                         self.preview_block = preview_block;
                     }
@@ -167,7 +167,7 @@ impl MandelbrotApp {
                 Ok(JobMessage::Done { c, p, m, message, elapsed, completed, reported }) => {
                     self.job = None;
                     self.limit_pending = false;
-                    //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the coloring of the window (a flight frame can be without smooth coloring)
+                    //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
                     self.m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring, ..m };
                     self.buffer_is_complete = completed && self.settle.is_none(); //A render during a gesture has only the first layer
                     self.layer_shown |= completed;
@@ -245,7 +245,9 @@ impl MandelbrotApp {
     ///
     /// Every render continues the samples of the render before it (`SampleState`): the job waits for the state of the job it interrupts, which keeps everything that
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
+    #[allow(clippy::too_many_lines)] // One place that sets up every render: its settings, its state and the thread that runs it
     pub(super) fn start_render_as(&mut self, message: &str, kind: RenderKind) {
+        self.keep_within_zoom_limit();
         let (moved, during_gesture, all_layers) = (kind.moved(), kind.passing(), kind.all_layers());
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();
@@ -284,8 +286,7 @@ impl MandelbrotApp {
             self.m.max_iterations = self.max_iterations_input;
             self.m.palette_scale = None;
         }
-        //Without smooth flights, a flight frame skips the smooth position of every escaped point: faster, with bands of color
-        let mut m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring && (self.smooth_flights || kind != RenderKind::FlightFrame), ..self.m.clone() };
+        let mut m = self.m.clone();
         let supersampling_amount = if all_layers { self.supersampling_amount } else { 1 };
         let coloring_function = self.coloring_function;
         let (width, height) = (p.pixel_plane.width, p.pixel_plane.height);
