@@ -72,6 +72,9 @@ fn colors_to_rgb_bytes(colors: &[TrueColor], mapping: ColorChannelMapping) -> Ve
 }
 
 /// The part of a texture that covers the whole image
+/// The warning in the status log when zooming in stops at the end of the fast GPU math, see `MandelbrotApp::zoom_refused`
+const ZOOM_LIMIT_TEXT: &str = "Zoom limit: deeper than a scale of about 10⁻⁹ the fast GPU math switches back to exact (slower) math. Turn off \"Limit the zoom to fast GPU math\" to zoom deeper.";
+
 const FULL_TEXTURE: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
 /// The texture of a coarse preview with blocks of `block` x `block` pixels: one texel per block, with the color of its top-left pixel (the pixel whose sample the block shows),
@@ -187,8 +190,10 @@ pub struct MandelbrotApp {
     /// The GPU that helps with rendering once it is opened and checked (see `rendering::gpu`), whether to use it, and where the result of opening it arrives
     gpu: Option<std::sync::Arc<rendering::gpu::GpuIterator>>,
     use_gpu: bool,
-    /// Whether the GPU uses its fast double-float loop (off by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
+    /// Whether the GPU uses its fast double-float loop (on by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
     fast_gpu: bool,
+    /// Whether zooming in stops where the fast GPU math ends (on by default), see `zoom_refused`
+    limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
 }
 
@@ -264,7 +269,8 @@ impl MandelbrotApp {
             notices,
             gpu: None,
             use_gpu: true,
-            fast_gpu: false,
+            fast_gpu: true,
+            limit_zoom: true,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
                 let (sender, receiver) = mpsc::channel();
@@ -286,6 +292,19 @@ impl MandelbrotApp {
     }
 
     /// Adds a message to the status box, and prints it to the terminal for developers
+    /// Whether zooming in to `zoomed` is refused because the zoom is limited to the views of the fast GPU math (`limit_zoom`, with the fast GPU math on, and a GPU
+    /// that is open or still opening); then the warning is logged, once for a row of refused zooms
+    pub(super) fn zoom_refused(&mut self, zoomed: &ComplexPlane) -> bool {
+        let limited = self.limit_zoom && self.fast_gpu && self.use_gpu && (self.gpu.is_some() || self.gpu_opening.is_some());
+        if !limited || zoomed.precision_steps() >= rendering::FAST_GPU_STEPS {
+            return false;
+        }
+        if self.log.last().map(String::as_str) != Some(ZOOM_LIMIT_TEXT) {
+            self.log(ZOOM_LIMIT_TEXT);
+        }
+        true
+    }
+
     pub(super) fn log(&mut self, message: impl Into<String>) {
         let message = message.into();
         println!("{message}");

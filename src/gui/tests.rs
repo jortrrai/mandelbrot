@@ -1368,3 +1368,27 @@ fn flight_frames_without_smooth_colors_color_by_the_iteration_count_and_the_arri
     wait_for_job(&mut app);
     assert_eq!(app.p.pixels, smooth, "every other render is smooth");
 }
+
+#[test]
+fn the_zoom_stops_where_the_fast_gpu_math_ends_with_a_warning_in_the_log() {
+    let config = Config::sized(64, 48, 50, 1);
+    let mut app = manual_app(&config);
+    assert!(app.fast_gpu && app.limit_zoom, "both on by default");
+    let mut deep = app.c.clone();
+    deep.set_view(&View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-11));
+    let mut shallow = app.c.clone();
+    shallow.set_view(&View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-8));
+    assert!(!app.zoom_refused(&deep), "without a GPU there is no fast GPU math to stay with");
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    app.gpu_opening = Some(receiver); //A GPU that is still opening counts
+    let logged = app.log.len();
+    assert!(!app.zoom_refused(&shallow));
+    assert!(app.zoom_refused(&deep));
+    assert!(app.zoom_refused(&deep));
+    assert_eq!(app.log.len(), logged + 1, "one warning for a row of refused zooms");
+    assert!(app.log.last().unwrap().starts_with("Zoom limit: "), "{:?}", app.log.last());
+    app.limit_zoom = false;
+    assert!(!app.zoom_refused(&deep), "the limit switched off");
+    (app.limit_zoom, app.fast_gpu) = (true, false);
+    assert!(!app.zoom_refused(&deep), "without the fast GPU math there is no limit");
+}

@@ -16,7 +16,7 @@ mod state;
 
 pub use adaptive::{adaptive_mask, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 pub use buffer::{render_complex_plane_into_buffer, render_complex_plane_into_buffer_with_gpu};
-pub use progressive::{Render, PREVIEW_BLOCKS};
+pub use progressive::{Render, FAST_GPU_STEPS, PREVIEW_BLOCKS};
 pub use region::{move_complex_plane_by_pixels, pixel_shift, ExposedRegion};
 pub use state::SampleState;
 

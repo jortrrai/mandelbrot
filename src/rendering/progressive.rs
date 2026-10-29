@@ -452,10 +452,11 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     processed.into_inner()
 }
 
-/// The fast GPU arithmetic (see `Render::fast_gpu`) is only used where neighboring pixels are at least this many steps of a 64-bit number apart (see
-/// `ComplexPlane::precision_steps`): its numbers have about 48 bits instead of 53, 16 times coarser, so this is the 1024 steps where 64-bit numbers start to
+/// The fast GPU arithmetic (see `Render::fast_gpu`) is only used where neighboring pixels are at least this many steps of a 64-bit number apart.
+///
+/// See `ComplexPlane::precision_steps`. Its numbers have about 48 bits instead of 53, 16 times coarser, so this is the 1024 steps where 64-bit numbers start to
 /// degrade (`PRECISION_WARNING_STEPS`) times 16. That is a scale of about 10⁻⁹ at 1200 pixels wide; deeper views use the exact loop.
-pub(super) const FAST_GPU_STEPS: f64 = 16.0 * crate::complex_plane::PRECISION_WARNING_STEPS;
+pub const FAST_GPU_STEPS: f64 = 16.0 * crate::complex_plane::PRECISION_WARNING_STEPS;
 
 /// A pass is only given to the GPU when the CPU threads alone would take longer than this for it: starting the GPU worker for a short pass costs more than it saves
 /// (measured with the refilling CPU loop: the default view at 32x adaptive took 60.6 ms with 12 ms here, 56.8 ms with 20 ms, and 56.2 ms without the GPU; 30 ms
