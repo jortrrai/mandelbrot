@@ -988,7 +988,7 @@ fn previews_of_the_whole_view_are_uploaded_small_until_the_first_layer_arrives()
 #[test]
 fn going_to_a_point_flies_there_at_a_cinematic_pace() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
-    assert_eq!((app.pace, app.flight_rendering), (super::flight::Pace::Fast, super::flight::FlightRendering::LowRes), "the defaults, for speed");
+    assert_eq!((app.pace, app.flight_rendering), (super::flight::Pace::Fast, super::flight::FlightRendering::BestEffort), "the defaults, for speed");
     (app.pace, app.flight_rendering) = (super::flight::Pace::Cinematic, super::flight::FlightRendering::BestEffort);
     let ctx = egui::Context::default();
     let history = app.history.len();
@@ -1368,7 +1368,8 @@ fn the_smooth_colors_setting_applies_to_every_render_and_the_window_keeps_it() {
 fn the_zoom_stops_where_the_fast_gpu_math_ends_with_a_warning_in_the_log() {
     let config = Config::sized(64, 48, 50, 1);
     let mut app = manual_app(&config);
-    assert!(app.fast_gpu && app.limit_zoom, "both on by default");
+    assert!(app.fast_gpu && !app.limit_zoom, "fast GPU math on, the limit off by default");
+    app.limit_zoom = true;
     let mut deep = app.c.clone();
     deep.set_view(&View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-11));
     let mut shallow = app.c.clone();
@@ -1430,7 +1431,8 @@ fn nothing_beyond_the_zoom_limit_is_rendered_whatever_leads_there() {
     app.render("Shallow");
     wait_for_job(&mut app);
     let (_sender, receiver) = std::sync::mpsc::channel();
-    app.gpu_opening = Some(receiver); //The limit applies from now on
+    app.gpu_opening = Some(receiver);
+    app.limit_zoom = true; //The limit applies from now on
     let shallow = format!("{:?}", app.c.get_view());
     let unchanged = |app: &MandelbrotApp, what: &str| assert_eq!(format!("{:?}", app.c.get_view()), shallow, "{what}: the view stays");
     let warned = |app: &MandelbrotApp| app.log.iter().rev().take(2).any(|line| line.starts_with("Zoom limit: "));
@@ -1453,4 +1455,18 @@ fn nothing_beyond_the_zoom_limit_is_rendered_whatever_leads_there() {
     assert!(app.c.precision_steps() < rendering::FAST_GPU_STEPS * 1.1, "but not further than needed");
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn go_to_view_keeps_the_current_scale_when_the_scale_is_empty() {
+    let mut app = manual_app(&Config::sized(64, 48, 50, 1));
+    app.c.set_view(&View::new(-0.75, 0.0, 0.25));
+    app.view_inputs = [String::from("-0.5"), String::from("0.1"), String::from(" ")];
+    app.go_to_view();
+    assert!((app.c.center().x + 0.5).abs() < 1e-12 && (app.c.center().y - 0.1).abs() < 1e-12, "the entered center");
+    assert!((app.c.get_scale() - 0.25).abs() < 1e-15, "the current scale: {}", app.c.get_scale());
+    wait_for_job(&mut app);
+    app.view_inputs = [String::from("-0.5"), String::from("0.1"), String::from("abc")];
+    app.go_to_view();
+    assert!(app.log.last().unwrap().starts_with("Could not go to the view"), "a scale that is not a number is still refused");
 }

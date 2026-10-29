@@ -145,7 +145,7 @@ pub struct MandelbrotApp {
     /// How fast a flight to a point of interest goes (fast by default), and the flight that is under way, see `flight`
     pace: flight::Pace,
     flight: Option<points::PointFlight>,
-    /// How complete the frames of a flight have to be (low res by default), see `flight::FlightRendering`
+    /// How complete the frames of a flight have to be (best effort by default), see `flight::FlightRendering`
     flight_rendering: flight::FlightRendering,
     /// Immersion: the screen never shows black where nothing is rendered yet; the view only moves once the new view has at least a complete low-resolution frame
     immersion: bool,
@@ -190,7 +190,7 @@ pub struct MandelbrotApp {
     use_gpu: bool,
     /// Whether the GPU uses its fast double-float loop (on by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
     fast_gpu: bool,
-    /// Whether nothing deeper than the fast GPU math is rendered (on by default), see `zoom_refused` and `keep_within_zoom_limit`
+    /// Whether nothing deeper than the fast GPU math is rendered (off by default), see `zoom_refused` and `keep_within_zoom_limit`
     limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
 }
@@ -243,7 +243,7 @@ impl MandelbrotApp {
             new_point: None,
             pace: flight::Pace::Fast,
             flight: None,
-            flight_rendering: flight::FlightRendering::LowRes,
+            flight_rendering: flight::FlightRendering::BestEffort,
             immersion: false,
             frame_ready: false,
             frame_accepted: false,
@@ -267,7 +267,7 @@ impl MandelbrotApp {
             gpu: None,
             use_gpu: true,
             fast_gpu: true,
-            limit_zoom: true,
+            limit_zoom: false,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
                 let (sender, receiver) = mpsc::channel();

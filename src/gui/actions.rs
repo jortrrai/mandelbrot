@@ -109,9 +109,11 @@ impl MandelbrotApp {
         Resolution::new(self.p.pixel_plane.width, self.p.pixel_plane.height)
     }
 
-    /// Goes to the view that was typed in the three "go to view" fields (x, y and scale); a message in the status log if they are not numbers or the scale is not positive
+    /// Goes to the view that was typed in the three "go to view" fields (x, y and scale; an empty scale keeps the current scale); a message in the status log if they
+    /// are not numbers or the scale is not positive
     pub(super) fn go_to_view(&mut self) {
-        let parsed: Vec<Result<f64, _>> = self.view_inputs.iter().map(|text| text.trim().parse::<f64>()).collect();
+        let current_scale = self.c.get_scale().to_string();
+        let parsed: Vec<Result<f64, _>> = self.view_inputs.iter().enumerate().map(|(index, text)| if index == 2 && text.trim().is_empty() { current_scale.as_str() } else { text.trim() }.parse::<f64>()).collect();
         match parsed.as_slice() {
             [Ok(x), Ok(y), Ok(scale)] if *scale > 0.0 => {
                 let mut entered = self.c.clone();
@@ -121,7 +123,7 @@ impl MandelbrotApp {
                     self.render("Moved to the entered view");
                 }
             }
-            _ => self.log("Could not go to the view: x, y and scale should be numbers, and scale should be positive"),
+            _ => self.log("Could not go to the view: x, y and scale should be numbers (an empty scale keeps the current one), and scale should be positive"),
         }
     }
 
