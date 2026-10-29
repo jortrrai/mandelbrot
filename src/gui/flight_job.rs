@@ -2,6 +2,10 @@
 //! other. As soon as a frame is complete enough it goes to the window and the job starts the view of the next frame, without waiting for the next frame of the
 //! window: the CPU threads and the GPU go from frame to frame without a pause, and the finer layers of a frame that the flight leaves behind are not computed.
 //!
+//! A frame that waits for one full layer keeps only its colors (`Render::colors_only`), as the next frame replaces it; the frame at the destination keeps its
+//! samples, so the render after the arrival continues from them. Once a frame has taken longer than the join delay of the GPU, the next frames give the GPU work
+//! at once: a flight frame is never one of the fast renders the delay is for.
+//!
 //! The flight clock moves on by the time a frame took, at most one frame of the screen (`frame_interval`, and at most `MAX_WAITING_STEP`): a slow view makes a
 //! slow, smooth crawl instead of jumps. The job renders no more frames per second than the screen shows. A best-effort flight follows the clock instead, see
 //! `points::fly_at`.
@@ -52,6 +56,8 @@ impl MandelbrotApp {
             let mut samples = previous_samples.and_then(|receiver| receiver.recv().ok()).unwrap_or_default();
             let mut plane = ComplexPlane::new(width, height);
             let mut frame_started = Instant::now();
+            //The join delay of the GPU for the next frame: none once a frame has taken longer than a few delays
+            let mut join_after = GPU_JOIN_AFTER;
             while !thread_stop.load(Ordering::SeqCst) {
                 thread_cancel.store(false, Ordering::SeqCst);
                 if thread_stop.load(Ordering::SeqCst) {
@@ -67,8 +73,11 @@ impl MandelbrotApp {
                 }
                 let preview = (!levels.is_empty() && first_layer_per_pixel.is_none_or(|per_pixel| per_pixel * pixels > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
                 let (mut previews, mut shown, mut layer_started) = (0, false, Instant::now());
-                Render::new(&plane, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels)
-                    .gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).fast_gpu(fast_gpu).cancel_with(&thread_cancel).run(|colors, pass| {
+                let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels)
+                    .gpu(gpu.as_deref().map(|gpu| (gpu, join_after))).fast_gpu(fast_gpu).cancel_with(&thread_cancel);
+                let last = path.arrived(elapsed);
+                let render = if required == Readiness::FULL_RESOLUTION && !last { render.colors_only() } else { render };
+                render.run(|colors, pass| {
                         if pass == 1 {
                             first_layer_per_pixel = Some(layer_started.elapsed() / pixels.max(1));
                         }
@@ -83,7 +92,10 @@ impl MandelbrotApp {
                         let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: plane.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
                         thread_cancel.store(true, Ordering::SeqCst); //Complete enough: on to the next frame
                     });
-                if !shown || path.arrived(elapsed) {
+                if frame_started.elapsed() > 4 * GPU_JOIN_AFTER {
+                    join_after = Duration::ZERO; //(Measured before the wait for the screen below)
+                }
+                if !shown || last {
                     break; //Stopped by the window, or the frame at the destination is there
                 }
                 //No more frames than the screen shows; the clock moves on by the time the frame took, at most one step

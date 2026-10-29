@@ -60,6 +60,11 @@ impl SampleState {
         SampleState::default()
     }
 
+    /// A state of `width` x `height` pixels that keeps no samples: its grids are empty, see `Render::colors_only`
+    pub(super) fn without_samples(width: usize, height: usize) -> SampleState {
+        SampleState { width, height, ..SampleState::default() }
+    }
+
     /// A state of the same view, settings and sample placement without any samples: rendering it gives the image that this state would have if it had never been
     /// interrupted or moved, to compare with in tests
     #[cfg(test)]
