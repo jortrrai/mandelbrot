@@ -1,6 +1,7 @@
 //! The controls of the window: moving, zooming, the places, the iterations, the quality, the colors and saving.
 
 
+use super::blur::Quality;
 use eframe::egui::{self};
 
 use super::flight::{FlightRendering, Pace};
@@ -278,12 +279,19 @@ impl MandelbrotApp {
             });
         }
         ui.horizontal(|ui| {
-            ui.label("Quality (supersampling, 1x-64x):");
-            let response = ui.add(egui::DragValue::new(&mut self.supersampling_input).range(1..=64).suffix("x"));
-            if (response.drag_stopped() || response.lost_focus()) && self.supersampling_input != self.supersampling_amount {
-                self.supersampling_amount = self.supersampling_input;
-                self.image_supersampling_amount = self.supersampling_input;
-                self.render(&format!("Set the supersampling to {}x", self.supersampling_amount));
+            ui.label("Quality:");
+            let current = Quality { samples: self.supersampling_amount, blurred: self.quality_blur };
+            let mut chosen = current;
+            egui::ComboBox::from_id_salt("quality").selected_text(current.name()).show_ui(ui, |ui| {
+                for preset in Quality::PRESETS.into_iter().filter(|preset| !preset.blurred || self.blur.is_some()) {
+                    ui.selectable_value(&mut chosen, preset, preset.name());
+                }
+            }).response.on_hover_text("Samples per pixel (supersampling): more is smoother and sharper at the edges of the set, and takes longer. The blur preset takes one sample per pixel and blurs the image a little (σ 0.8 pixel), which comes close to 4x for the time of 1x.");
+            if chosen != current {
+                (self.supersampling_amount, self.supersampling_input, self.quality_blur) = (chosen.samples, chosen.samples, chosen.blurred);
+                (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
+                self.texture_outdated = true;
+                self.render(&format!("Set the quality to {}", chosen.name()));
             }
         });
     }
@@ -332,7 +340,14 @@ impl MandelbrotApp {
         ui.heading("Save Image");
         ui.horizontal(|ui| {
             ui.label("Saved image quality:");
-            ui.add(egui::DragValue::new(&mut self.image_supersampling_amount).range(1..=64).suffix("x"));
+            let current = Quality { samples: self.image_supersampling_amount, blurred: self.image_quality_blur };
+            let mut chosen = current;
+            egui::ComboBox::from_id_salt("saved_quality").selected_text(current.name()).show_ui(ui, |ui| {
+                for preset in Quality::PRESETS {
+                    ui.selectable_value(&mut chosen, preset, preset.name());
+                }
+            });
+            (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
         });
         self.save_size_controls(ui);
         if ui.button("Save image").clicked() {

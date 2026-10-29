@@ -108,3 +108,64 @@ impl Blur {
         Some(egui::PaintCallback { rect, callback: Arc::new(callback) })
     }
 }
+
+/// The colors of a `width` x `height` image blurred by a Gaussian of `sigma` pixels, like the shader of `Blur` (gamma-space colors, radius 2.5 sigma at most
+/// `MAX_RADIUS`, the edge pixels repeated), on all render threads: for saving an image of the blurred quality preset
+pub(super) fn blurred(colors: &[crate::coloring::TrueColor], width: usize, height: usize, sigma: f32) -> Vec<crate::coloring::TrueColor> {
+    let radius: isize = ((2.5 * sigma).ceil() as isize).clamp(1, isize::try_from(MAX_RADIUS).unwrap_or(6));
+    let weights: Vec<f32> = (-radius..=radius).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+    let total: f32 = weights.iter().sum();
+    let weights: Vec<f32> = weights.iter().map(|weight| weight / total).collect();
+    //One pass along a direction: `horizontal`, or down the columns
+    let pass = |source: &[[f32; 3]], horizontal: bool| -> Vec<[f32; 3]> {
+        let mut out = vec![[0.0; 3]; width * height];
+        let rows_per_chunk = height.div_ceil(crate::rendering::render_thread_count()).max(1);
+        std::thread::scope(|scope| {
+            for (chunk, block) in out.chunks_mut(rows_per_chunk * width).enumerate() {
+                let weights = &weights;
+                scope.spawn(move || {
+                    for (index, pixel) in block.iter_mut().enumerate() {
+                        let (x, y) = (index % width, chunk * rows_per_chunk + index / width);
+                        let mut sum = [0.0; 3];
+                        for (offset, weight) in (-radius..=radius).zip(weights) {
+                            //(The edge pixels are repeated)
+                            let (sx, sy) = if horizontal { (x.saturating_add_signed(offset).min(width - 1), y) } else { (x, y.saturating_add_signed(offset).min(height - 1)) };
+                            for (channel, value) in sum.iter_mut().zip(source[sy * width + sx]) {
+                                *channel += value * weight;
+                            }
+                        }
+                        *pixel = sum;
+                    }
+                });
+            }
+        });
+        out
+    };
+    let image: Vec<[f32; 3]> = colors.iter().map(|color| [f32::from(color.red), f32::from(color.green), f32::from(color.blue)]).collect();
+    pass(&pass(&image, true), false).iter().map(|[red, green, blue]| crate::coloring::TrueColor::new(red.round() as u8, green.round() as u8, blue.round() as u8)).collect()
+}
+
+/// A quality preset: samples per pixel, and whether the image is blurred (the blur preset: one sample and the blur of a full-resolution frame, σ 0.8, see #118)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Quality {
+    pub(super) samples: u8,
+    pub(super) blurred: bool,
+}
+
+impl Quality {
+    /// The presets of the quality lists, fastest first
+    pub(super) const PRESETS: [Quality; 8] = [
+        Quality { samples: 1, blurred: false }, Quality { samples: 1, blurred: true }, Quality { samples: 2, blurred: false }, Quality { samples: 4, blurred: false },
+        Quality { samples: 8, blurred: false }, Quality { samples: 16, blurred: false }, Quality { samples: 32, blurred: false }, Quality { samples: 64, blurred: false },
+    ];
+
+    /// The name in the list
+    pub(super) fn name(self) -> String {
+        match (self.samples, self.blurred) {
+            (1, false) => String::from("1x (fastest)"),
+            (_, true) => format!("{}x + blur (smooth, fast)", self.samples),
+            (64, false) => String::from("64x (best)"),
+            (samples, false) => format!("{samples}x"),
+        }
+    }
+}
