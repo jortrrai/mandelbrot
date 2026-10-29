@@ -236,6 +236,11 @@ impl MandelbrotApp {
         self.start_render_as(message, if self.gesture_active { RenderKind::GestureFrame { moved } } else { RenderKind::Settled { moved } });
     }
 
+    /// Whether the screen shows the previews of a render of `kind`: not for a flight frame that waits for a full layer (it never shows less), so it skips them
+    pub(super) fn shows_previews(&self, kind: RenderKind) -> bool {
+        !(kind == RenderKind::FlightFrame && self.flight_readiness() >= Readiness::FullResolution)
+    }
+
     /// Starts a render like `start_render`, of the `kind` that says what it is for (see `RenderKind`).
     ///
     /// Every render continues the samples of the render before it (`SampleState`): the job waits for the state of the job it interrupts, which keeps everything that
@@ -288,7 +293,7 @@ impl MandelbrotApp {
         let pixels_total = width * height;
         //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
         let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
-        let preview = (!layer_on_screen && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
+        let preview = (!layer_on_screen && self.shows_previews(kind) && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
         let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);

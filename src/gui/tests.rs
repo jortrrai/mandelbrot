@@ -1390,6 +1390,21 @@ fn the_zoom_stops_where_the_fast_gpu_math_ends_with_a_warning_in_the_log() {
 }
 
 #[test]
+fn a_flight_frame_that_waits_for_a_full_layer_skips_the_previews_it_would_never_show() {
+    use super::flight::FlightRendering;
+    use super::render_job::RenderKind;
+    let mut app = manual_app(&Config::sized(64, 48, 50, 1));
+    for (mode, previews) in [(FlightRendering::BestEffort, true), (FlightRendering::LowRes, true), (FlightRendering::MaxQuality, false), (FlightRendering::SuperSampled, false)] {
+        app.flight_rendering = mode;
+        assert_eq!(app.shows_previews(RenderKind::FlightFrame), previews, "{mode:?}");
+        assert!(app.shows_previews(RenderKind::Settled { moved: false }) && app.shows_previews(RenderKind::GestureFrame { moved: true }), "other renders keep them");
+    }
+    app.flight_rendering = FlightRendering::BestEffort;
+    app.immersion = true;
+    assert!(app.shows_previews(RenderKind::FlightFrame), "immersion shows complete previews");
+}
+
+#[test]
 fn a_flight_counts_its_frames_shows_the_frame_rate_and_logs_the_average() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     app.flight_rendering = super::flight::FlightRendering::BestEffort;
