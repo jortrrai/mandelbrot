@@ -22,7 +22,9 @@ fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
 }
 
 /// A palette of integer arithmetic only, so that the colors do not depend on any floating point function
-fn integer_palette(iterations: u32, max_iterations: u32) -> TrueColor {
+fn integer_palette(position: f64, length: f64) -> TrueColor {
+    //(Stretched over the limit, the position is the whole iteration count, see `MandelbrotSet::color`)
+    let (iterations, max_iterations) = (position as u32, length as u32);
     if iterations >= max_iterations {
         TrueColor::new(255, 255, 255)
     } else {

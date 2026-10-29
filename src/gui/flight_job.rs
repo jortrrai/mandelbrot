@@ -25,7 +25,7 @@ impl MandelbrotApp {
     /// followed by the `Pass` of the frame; it stops when it has rendered the frame at the destination (the window then arrives, see `points::fly_at`)
     pub(super) fn start_flight_job(&mut self, frame_interval: Duration) {
         let Some(flight) = &mut self.flight else { return };
-        let (path, mut elapsed, mut limits) = (flight.flight.clone(), flight.elapsed, flight.limits.take());
+        let (path, mut elapsed, mut limits, palettes) = (flight.flight.clone(), flight.elapsed, flight.limits.take(), flight.palettes);
         self.cancel_thumbnail_job();
         self.interrupt_progressive_render();
         (self.frame_ready, self.frame_accepted, self.buffer_is_complete, self.layer_shown) = (false, false, false, false);
@@ -41,7 +41,7 @@ impl MandelbrotApp {
         let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
         let mut m = self.m.clone();
         if !self.auto_iterations {
-            (m.max_iterations, m.palette_scale) = (self.max_iterations_input, None);
+            m.max_iterations = self.max_iterations_input;
         }
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
@@ -65,12 +65,12 @@ impl MandelbrotApp {
                 }
                 plane.set_view(&path.camera_at(elapsed).view());
                 if let Some(settings) = &auto_settings {
-                    //The limit of the zoom of this frame (see `points::FlightLimits`), and the palette of its zoom, which is what auto iterations uses
+                    //The limit of the zoom of this frame (see `points::FlightLimits`)
                     let scale = plane.get_scale();
-                    let palette = settings.initial_limit(scale);
-                    m.max_iterations = limits.as_mut().map_or(palette, |limits| limits.limit_at(scale, settings));
-                    m.palette_scale = Some(palette);
+                    m.max_iterations = limits.as_mut().map_or_else(|| settings.initial_limit(scale), |limits| limits.limit_at(scale, settings));
                 }
+                //The color cycle of this frame, on the way from the start to the place's (see `points::PointFlight::palettes`)
+                m.palette = palettes.0.blend(palettes.1, path.share_of_path(elapsed));
                 let preview = (!levels.is_empty() && first_layer_per_pixel.is_none_or(|per_pixel| per_pixel * pixels > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
                 let (mut previews, mut shown, mut layer_started) = (0, false, Instant::now());
                 let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels)
@@ -88,7 +88,7 @@ impl MandelbrotApp {
                             return;
                         }
                         shown = true;
-                        let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette_scale: m.palette_scale, preview: previews });
+                        let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette: m.palette, preview: previews });
                         let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: plane.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
                         thread_cancel.store(true, Ordering::SeqCst); //Complete enough: on to the next frame
                     });

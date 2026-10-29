@@ -62,7 +62,7 @@ fn checksum(colors: &[TrueColor]) -> u64 {
     })
 }
 
-fn render(workload: &Workload, coloring_function: fn(u32, u32) -> TrueColor) -> Vec<TrueColor> {
+fn render(workload: &Workload, coloring_function: fn(f64, f64) -> TrueColor) -> Vec<TrueColor> {
     let mut c = ComplexPlane::new(WIDTH, HEIGHT);
     c.set_view(&workload.view);
     let m = MandelbrotSet::new(workload.max_iterations, 2.0);
@@ -84,7 +84,7 @@ fn main() {
     println!("The checksums identify the rendered image, they should not change between versions that render the same image.\n");
 
     for workload in workloads().iter().filter(|w| filter.as_ref().is_none_or(|f| w.name.contains(f.as_str()))) {
-        for (coloring_name, coloring_function) in [("bernstein", TrueColor::new_from_bernstein_polynomials as fn(u32, u32) -> TrueColor), ("hsv", TrueColor::new_from_hsv_colors)] {
+        for (coloring_name, coloring_function) in [("bernstein", TrueColor::new_from_bernstein_polynomials as fn(f64, f64) -> TrueColor), ("hsv", TrueColor::new_from_hsv_colors)] {
             let label = format!("render {} ({coloring_name}, {} it, {}x)", workload.name, workload.max_iterations, workload.supersampling_amount);
             let checksum = checksum(&render(workload, coloring_function));
             let times = time_runs(runs, || {
@@ -147,7 +147,7 @@ fn main() {
     //What the window does: one sample state that every render continues (`Render::resume`), next to the plain render and the old strip render of a move
     if filter.as_ref().is_none_or(|f| "window-state".contains(f.as_str())) {
         let m = MandelbrotSet::new(1000, 2.0);
-        let coloring = TrueColor::new_from_bernstein_polynomials as fn(u32, u32) -> TrueColor;
+        let coloring = TrueColor::new_from_bernstein_polynomials as fn(f64, f64) -> TrueColor;
         let views = [View::new(-0.75, 0.0, 1.0), View::new(-0.75, 0.0, 0.9)].map(|view| {
             let mut c = ComplexPlane::new(WIDTH, HEIGHT);
             c.set_view(&view);

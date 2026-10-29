@@ -157,16 +157,16 @@ impl TrueColor {
     /// Maps a normalized value t to a continous 3D color space
     /// ![img](https://solarianprogrammer.com/images/2013/02/28/rgb_smooth.png)\
     /// Source: [Bernstein polynomial coloring](https://solarianprogrammer.com/2013/02/28/mandelbrot-set-cpp-11/)
-    pub fn new_from_bernstein_polynomials(iterations: u32, max_iterations: u32) -> TrueColor {
-        let t: f64 = f64::from(iterations) / f64::from(max_iterations);
+    pub fn new_from_bernstein_polynomials(position: f64, length: f64) -> TrueColor {
+        let t: f64 = position / length;
         TrueColor::new_from_bernstein_polynomials_normalized(t)
     }
 
-    ///A `coloring_function`
-    pub fn new_from_hsv_colors(iterations: u32, max_iterations: u32) -> TrueColor {
-        let hue = 0.3 * f64::from(iterations);
+    ///A `coloring_function`: the hue goes round every 1200 steps of the palette (`length` only decides what is inside: from `length` on, black)
+    pub fn new_from_hsv_colors(position: f64, length: f64) -> TrueColor {
+        let hue = 0.3 * position;
         let saturation = 1.0;//0.8;
-        let value: f64 = if iterations < max_iterations {1.0} else {0.0};
+        let value: f64 = if position < length {1.0} else {0.0};
         let hue_degree = Deg(hue % 359.999);
         let hsv = Hsv::new(hue_degree,saturation,value);
         let rgb = Rgb::from_color(&hsv);
@@ -221,7 +221,7 @@ mod tests {
         let mut plateau = (0, 0, 0);
         for i in 0..=1000u32 {
             let t = f64::from(i) / 1000.0;
-            let color = TrueColor::new_from_bernstein_polynomials(i, 1000);
+            let color = TrueColor::new_from_bernstein_polynomials(f64::from(i), 1000.0);
             let (r, g, b) = reference(t.min(0.999));
             assert!(r < 255.0 && g < 255.0 && b < 255.0, "t = {t}: a channel would be clipped");
             assert_eq!((color.red, color.green, color.blue), (r as u8, g as u8, b as u8), "t = {t}");
@@ -230,7 +230,7 @@ mod tests {
         }
         assert_eq!((plateau.1, plateau.2), (0, 0), "no channel is saturated");
         //The old powers saturated green over t in [0.31, 0.92]
-        let mid = TrueColor::new_from_bernstein_polynomials(600, 1000);
+        let mid = TrueColor::new_from_bernstein_polynomials(600.0, 1000.0);
         assert!(mid.green < 255 && mid.blue < 255);
     }
 
@@ -300,22 +300,22 @@ mod tests {
             assert!(a.iter().zip(e).all(|(a, e)| a.abs_diff(e) <= 1), "{a:?} is not near {e:?}");
         };
         //Bernstein polynomials of t = iterations / max_iterations: black at t = 0 and almost black inside the set (t = 1 is clamped to 0.999, which leaves a little red)
-        near(TrueColor::new_from_bernstein_polynomials(0, 1000), (0, 0, 0));
-        near(TrueColor::new_from_bernstein_polynomials(100, 1000), (2, 30, 158));
-        near(TrueColor::new_from_bernstein_polynomials(200, 1000), (14, 97, 221));
-        near(TrueColor::new_from_bernstein_polynomials(400, 1000), (88, 220, 187));
-        near(TrueColor::new_from_bernstein_polynomials(500, 1000), (143, 239, 135));
-        near(TrueColor::new_from_bernstein_polynomials(750, 1000), (242, 134, 25));
-        near(TrueColor::new_from_bernstein_polynomials(1000, 1000), (2, 0, 0));
+        near(TrueColor::new_from_bernstein_polynomials(0.0, 1000.0), (0, 0, 0));
+        near(TrueColor::new_from_bernstein_polynomials(100.0, 1000.0), (2, 30, 158));
+        near(TrueColor::new_from_bernstein_polynomials(200.0, 1000.0), (14, 97, 221));
+        near(TrueColor::new_from_bernstein_polynomials(400.0, 1000.0), (88, 220, 187));
+        near(TrueColor::new_from_bernstein_polynomials(500.0, 1000.0), (143, 239, 135));
+        near(TrueColor::new_from_bernstein_polynomials(750.0, 1000.0), (242, 134, 25));
+        near(TrueColor::new_from_bernstein_polynomials(1000.0, 1000.0), (2, 0, 0));
         //HSV: the hue turns 0.3 degrees per iteration (a full turn after about 1200), full value outside the set and black inside it
-        near(TrueColor::new_from_hsv_colors(0, 1000), (255, 0, 0));
-        near(TrueColor::new_from_hsv_colors(100, 1000), (255, 127, 0));
-        near(TrueColor::new_from_hsv_colors(200, 1000), (255, 255, 0));
-        near(TrueColor::new_from_hsv_colors(400, 1000), (0, 255, 0));
-        near(TrueColor::new_from_hsv_colors(500, 1000), (0, 255, 127));
-        near(TrueColor::new_from_hsv_colors(750, 1000), (0, 63, 255));
-        near(TrueColor::new_from_hsv_colors(999, 1000), (253, 0, 255));
-        near(TrueColor::new_from_hsv_colors(1000, 1000), (0, 0, 0));
+        near(TrueColor::new_from_hsv_colors(0.0, 1000.0), (255, 0, 0));
+        near(TrueColor::new_from_hsv_colors(100.0, 1000.0), (255, 127, 0));
+        near(TrueColor::new_from_hsv_colors(200.0, 1000.0), (255, 255, 0));
+        near(TrueColor::new_from_hsv_colors(400.0, 1000.0), (0, 255, 0));
+        near(TrueColor::new_from_hsv_colors(500.0, 1000.0), (0, 255, 127));
+        near(TrueColor::new_from_hsv_colors(750.0, 1000.0), (0, 63, 255));
+        near(TrueColor::new_from_hsv_colors(999.0, 1000.0), (253, 0, 255));
+        near(TrueColor::new_from_hsv_colors(1000.0, 1000.0), (0, 0, 0));
     }
 
     #[test]

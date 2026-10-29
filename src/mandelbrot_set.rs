@@ -19,12 +19,51 @@ pub struct MandelbrotSet {
     pub max_iterations: u32,
     /// If `z` stays within the `orbit_radius` for `max_iterations` steps, `c` is assumed not to tend to infinity
     pub orbit_radius: f64,    
-    ///When set (automatic iteration limit), the palette is scaled to this many iterations instead of `max_iterations`, so raising the limit does not recolor the image,
-    ///see `MandelbrotSet::color`
-    pub palette_scale: Option<u32>,
+    ///How iteration counts map onto the palette, see `ColorCycle` and `MandelbrotSet::color`
+    pub palette: ColorCycle,
     ///Whether colors use the smooth (fractional) iteration position of `iterate_smooth` instead of the integer iteration count, see `MandelbrotSet::position`
     pub smooth_coloring: bool,
 }
+
+/// How iteration counts map onto the palette, as in Kalles Fraktaler.
+///
+/// Around and around a palette of `PALETTE_LENGTH` steps, `divide` iterations a step and starting `offset` steps into it, or stretched once over the iteration limit.
+/// As a cycle, a point keeps its color whatever the limit and the zoom, so a manual limit and an automatic one give the same image, and a flight does not recolor
+/// what it zooms into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorCycle {
+    /// Iterations per step of the palette: 1 changes color fastest, more gives broader bands (deep views, whose counts are high and far apart, need more)
+    pub divide: f64,
+    /// Where the palette starts, in steps (0 to `PALETTE_LENGTH`)
+    pub offset: f64,
+    /// Whether the palette is stretched once over the iteration limit instead (`divide` and `offset` are not used then)
+    pub stretch: bool,
+}
+
+impl ColorCycle {
+    /// The palette stretched once over the limit: the coloring of the renderer before color cycles, which the library keeps by default
+    pub const STRETCHED: ColorCycle = ColorCycle { divide: 1.0, offset: 0.0, stretch: true };
+    /// A cycle of the palette every `PALETTE_LENGTH` iterations from its start: the default of the window (a view at zoom 1 looks as with the automatic limit before)
+    pub const CYCLE: ColorCycle = ColorCycle { divide: 1.0, offset: 0.0, stretch: false };
+
+    /// The cycle a fraction `t` (0 to 1) of the way from `self` to `to`: the divide in equal ratios (it spans orders of magnitude), the offset the short way round
+    /// the palette; stretched only if both are
+    pub fn blend(self, to: ColorCycle, t: f64) -> ColorCycle {
+        let t = t.clamp(0.0, 1.0);
+        let divide = self.divide.max(MIN_DIVIDE) * (to.divide.max(MIN_DIVIDE) / self.divide.max(MIN_DIVIDE)).powf(t);
+        let mut turn = (to.offset - self.offset).rem_euclid(PALETTE_LENGTH);
+        if turn > PALETTE_LENGTH / 2.0 {
+            turn -= PALETTE_LENGTH;
+        }
+        ColorCycle { divide, offset: (self.offset + turn * t).rem_euclid(PALETTE_LENGTH), stretch: self.stretch && to.stretch }
+    }
+}
+
+/// The steps of the palette of a `ColorCycle`: with a divide of 1, the colors repeat every this many iterations
+pub const PALETTE_LENGTH: f64 = 500.0;
+
+/// The smallest iteration divide (a step of the palette for every thousandth of an iteration)
+pub const MIN_DIVIDE: f64 = 0.001;
 
 /// The amount of points `MandelbrotSet::position_lanes` iterates at the same time
 pub const LANES: usize = 4;
@@ -49,20 +88,24 @@ pub(crate) const CHECK_INTERVAL: u32 = 4;
 const STREAM_LANES: usize = 4;
 
 impl MandelbrotSet {
-    /// Creates the set with `max_iterations` and `orbit_radius`; smooth coloring is on and there is no palette scale
+    /// Creates the set with `max_iterations` and `orbit_radius`; smooth coloring is on and the palette is stretched over the limit (`ColorCycle::STRETCHED`)
     pub fn new(max_iterations: u32, orbit_radius: f64) -> MandelbrotSet {
-        MandelbrotSet { max_iterations, orbit_radius, palette_scale: None, smooth_coloring: true }
+        MandelbrotSet { max_iterations, orbit_radius, palette: ColorCycle::STRETCHED, smooth_coloring: true }
     }
 
-    /// The color of a point with the given iteration count. Without a `palette_scale` this is exactly `coloring_function(iterations, max_iterations)`.
-    /// With one, points inside the set (`iterations == max_iterations`) get the color the palette gives to its last iteration, and escaped points repeat the palette every `palette_scale` iterations,
-    /// so a point that escaped keeps its color when the limit is raised.
-    pub fn color(&self, coloring_function: fn(u32, u32) -> crate::coloring::TrueColor, iterations: u32) -> crate::coloring::TrueColor {
-        match self.palette_scale {
-            None => coloring_function(iterations, self.max_iterations),
-            Some(scale) if iterations >= self.max_iterations => coloring_function(scale, scale),
-            Some(scale) => coloring_function(iterations % scale, scale),
+    /// The color of a point with the given iteration count, see `ColorCycle`. Stretched over the limit, this is exactly `coloring_function(iterations, max_iterations)`.
+    /// As a cycle, an escaped point is at `iterations / divide + offset` steps of the palette, around and around a palette of `PALETTE_LENGTH` steps, whatever the limit
+    /// and the zoom; points inside the set (`iterations == max_iterations`) get the color of the end of the palette, as when stretched.
+    pub fn color(&self, coloring_function: fn(f64, f64) -> crate::coloring::TrueColor, iterations: u32) -> crate::coloring::TrueColor {
+        let ColorCycle { divide, offset, stretch } = self.palette;
+        if stretch {
+            return coloring_function(f64::from(iterations), f64::from(self.max_iterations));
         }
+        if iterations >= self.max_iterations {
+            return coloring_function(PALETTE_LENGTH, PALETTE_LENGTH);
+        }
+        let position = (f64::from(iterations) / divide.max(MIN_DIVIDE) + offset).rem_euclid(PALETTE_LENGTH);
+        coloring_function(position, PALETTE_LENGTH)
     }
 
     /// Whether `c` is certified to be inside the set by the cardioid and period-two bulb test, see `is_known_interior`
@@ -439,21 +482,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_palette_scale_keeps_the_color_of_escaped_points_when_the_limit_changes() {
+    fn a_color_cycle_keeps_the_color_of_escaped_points_when_the_limit_changes() {
         let f = crate::coloring::TrueColor::new_from_bernstein_polynomials;
-        let manual = MandelbrotSet::new(1000, 2.0);
+        let rgb = |c: crate::coloring::TrueColor| (c.red, c.green, c.blue);
+        let stretched = MandelbrotSet::new(1000, 2.0);
         for i in [0, 1, 17, 500, 999, 1000] {
-            let (a, b) = (manual.color(f, i), f(i, 1000));
-            assert_eq!((a.red, a.green, a.blue), (b.red, b.green, b.blue), "manual mode colors as before");
+            assert_eq!(rgb(stretched.color(f, i)), rgb(f(f64::from(i), 1000.0)), "stretched over the limit: as before");
         }
         let (mut low, mut high) = (MandelbrotSet::new(400, 2.0), MandelbrotSet::new(9000, 2.0));
-        (low.palette_scale, high.palette_scale) = (Some(400), Some(400));
+        (low.palette, high.palette) = (ColorCycle::CYCLE, ColorCycle::CYCLE);
         for i in [0, 1, 17, 200, 399] {
-            let (a, b) = (low.color(f, i), high.color(f, i));
-            assert_eq!((a.red, a.green, a.blue), (b.red, b.green, b.blue), "iteration {i} keeps its color");
+            assert_eq!(rgb(low.color(f, i)), rgb(high.color(f, i)), "iteration {i} keeps its color");
+            assert_eq!(rgb(high.color(f, i)), rgb(high.color(f, i + 500)), "the palette repeats every {PALETTE_LENGTH} iterations");
         }
-        let (a, b) = (low.color(f, 400), high.color(f, 9000));
-        assert_eq!((a.red, a.green, a.blue), (b.red, b.green, b.blue), "inside the set has the same color at any limit");
+        assert_eq!(rgb(low.color(f, 400)), rgb(high.color(f, 9000)), "inside the set has the same color at any limit");
+        //The divide slows the colors down, the offset shifts them
+        let mut slow = high;
+        slow.palette = ColorCycle { divide: 4.0, offset: 10.0, stretch: false };
+        assert_eq!(rgb(slow.color(f, 400)), rgb(f(110.0, PALETTE_LENGTH)));
+        assert_eq!(rgb(slow.color(f, 2000)), rgb(f(10.0, PALETTE_LENGTH)), "around again after 4 x 500 iterations");
+    }
+
+    #[test]
+    fn a_blend_of_color_cycles_goes_the_short_way_round_and_in_equal_ratios() {
+        let (a, b) = (ColorCycle { divide: 1.0, offset: 480.0, stretch: false }, ColorCycle { divide: 100.0, offset: 20.0, stretch: false });
+        let half = a.blend(b, 0.5);
+        assert!((half.divide - 10.0).abs() < 1e-9 && half.offset.abs() < 1e-9, "{half:?}");
+        assert_eq!(a.blend(b, 0.0), a);
+        assert!((a.blend(b, 1.0).divide - 100.0).abs() < 1e-9 && (a.blend(b, 1.0).offset - 20.0).abs() < 1e-9);
     }
 
     const ORBIT_RADII: [f64; 3] = [2.0, 4.0, 1.0];

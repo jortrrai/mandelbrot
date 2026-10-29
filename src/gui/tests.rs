@@ -6,6 +6,7 @@ use std::time::Duration;
 use eframe::egui::{self, ColorImage, TextureOptions};
 
 use super::*;
+use crate::mandelbrot_set::ColorCycle;
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::{ColorChannelMapping, TrueColor};
 use crate::complex::Complex;
@@ -202,7 +203,7 @@ fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
     let config = Config::sized(64, 48, 50, 32);
     let mut app = manual_app(&config);
     assert_eq!(app.m.max_iterations, 50);
-    assert_eq!(app.m.palette_scale, None, "manual mode colors exactly as before");
+    assert_eq!(app.m.palette, ColorCycle::CYCLE, "the colors do not depend on the limit");
     let manual_pixels = app.p.pixels.clone();
 
     //Turn auto on: the limit is chosen for the zoom, and shown in the max. iterations field
@@ -210,7 +211,7 @@ fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
     app.render("Turned auto iterations on");
     wait_for_job(&mut app);
     let limit = app.m.max_iterations;
-    assert_eq!(app.m.palette_scale, Some(app.auto_settings.initial_limit(app.c.get_scale())));
+    assert_eq!(app.m.palette, ColorCycle::CYCLE, "auto iterations do not change the colors");
     assert!(app.log.last().unwrap().contains("auto iterations: limit"), "{:?}", app.log.last());
     assert_eq!(app.max_iterations_input, 50, "the manual value is kept while auto is on");
 
@@ -233,7 +234,7 @@ fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
     app.render("Turned auto iterations off");
     wait_for_job(&mut app);
     assert_eq!(app.m.max_iterations, 50);
-    assert_eq!(app.m.palette_scale, None);
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
     assert_eq!(app.p.pixels, manual_pixels, "back in manual mode the same view renders the same image");
 }
 
@@ -247,7 +248,7 @@ fn moving_after_turning_auto_off_does_not_reuse_an_auto_colored_buffer() {
     app.auto_iterations = false;
     app.translate("up", 10, 0);
     wait_for_job(&mut app);
-    assert_eq!(app.m.palette_scale, None);
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
     assert_eq!(app.bars.as_ref().unwrap().pixels_total, 64 * 48, "the buffer was colored with the auto palette and is rendered again");
 }
 
@@ -268,7 +269,7 @@ fn presets_and_adaptive_supersampling_toggle_independently_of_auto_iterations() 
     app.adaptive_supersampling = true;
     app.render("adaptive on");
     wait_for_job(&mut app);
-    assert_eq!(app.m.palette_scale, None);
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
     assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 4, "every layer is still reported");
     app.adaptive_supersampling = false;
     app.render("adaptive off");
@@ -288,7 +289,7 @@ fn presets_and_adaptive_supersampling_toggle_independently_of_auto_iterations() 
     app.render("performance");
     wait_for_job(&mut app);
     assert!(app.m.max_iterations <= high);
-    assert_eq!(app.m.palette_scale, Some(AutoPreset::Performance.settings().initial_limit(app.c.get_scale())));
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
 }
 
 #[test]
@@ -305,7 +306,7 @@ fn selecting_a_preset_shows_its_limit_immediately_and_stale_renders_cannot_overw
     //Selecting: the starting limit of the preset is shown before any poll, while the render is only starting
     app.select_preset(AutoPreset::HighDetail);
     let initial = AutoPreset::HighDetail.settings().initial_limit(app.c.get_scale());
-    assert_eq!((app.m.max_iterations, app.m.palette_scale), (initial, Some(initial)), "published synchronously on selection");
+    assert_eq!(app.m.max_iterations, initial, "published synchronously on selection");
     assert!(app.limit_pending && app.is_busy());
     assert_ne!(app.m.max_iterations, balanced);
 
@@ -329,7 +330,7 @@ fn selecting_a_preset_shows_its_limit_immediately_and_stale_renders_cannot_overw
     let balanced_initial = AutoPreset::Balanced.settings().initial_limit(app.c.get_scale());
     assert_eq!(app.m.max_iterations, balanced_initial);
     wait_for_job(&mut app);
-    assert_eq!(app.m.palette_scale, Some(balanced_initial));
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
     assert_eq!(app.m.max_iterations, balanced, "the same view and preset give the same limit as before, not the Performance one");
     assert!(!app.limit_pending);
 }
@@ -628,8 +629,8 @@ fn the_resident_thumbnails_are_bounded_and_follow_the_appearance_that_going_to_a
     }
     //The thumbnail looks like the place does when going to it: with the current appearance, or the saved one when appearances are restored
     let point = app.points[0].clone();
-    let current = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, false, app.p.color_channel_mapping, (64, 48));
-    let restored = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, true, app.p.color_channel_mapping, (64, 48));
+    let current = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, false, app.p.color_channel_mapping, app.m.palette, (64, 48));
+    let restored = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, true, app.p.color_channel_mapping, app.m.palette, (64, 48));
     assert_eq!(current.coloring, Coloring::Bernstein, "the current appearance of the window");
     assert_eq!(restored.coloring, Coloring::Hsv, "the saved appearance of the file");
     assert_ne!(current.key(), restored.key(), "another appearance is another thumbnail");
@@ -1215,7 +1216,7 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_a_flight_and_reaches_the_l
     destination.set_view(&View::new(location.real, location.imaginary, location.scale));
     let mut m = app.m.clone();
     let initial = app.auto_settings.initial_limit(destination.get_scale());
-    (m.max_iterations, m.palette_scale) = (initial, Some(initial));
+    m.max_iterations = initial;
     let destination_limit = crate::auto_iterations::choose_limit(&destination, &m, 64, 48, &app.auto_settings, 2, &std::sync::atomic::AtomicBool::new(false)).unwrap().limit;
     assert!(destination_limit > initial, "the probes raise the limit above the zoom rule here: {destination_limit} > {initial}");
 
@@ -1225,7 +1226,7 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_a_flight_and_reaches_the_l
     for share in [0.2, 0.4, 0.6, 0.8, 0.9999] {
         app.fly_at(start + duration.mul_f64(share));
         let scale = app.c.get_scale();
-        assert_eq!(app.m.palette_scale, Some(app.auto_settings.initial_limit(scale)), "the palette of the zoom, as auto iterations uses it");
+        assert_eq!(app.m.palette, ColorCycle::CYCLE, "the colors stay the same on the way");
         limits.push((scale, app.m.max_iterations));
         wait_for_job(&mut app);
         assert_eq!(app.m.max_iterations, limits.last().unwrap().1, "the frame is rendered with it");
@@ -1589,4 +1590,26 @@ fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visibl
     //Inside the area: unchanged; outside: nothing to draw
     assert_eq!(visible_part(rect(10.0, 10.0, 90.0, 90.0), rect(0.0, 0.0, 100.0, 100.0), full), Some((rect(10.0, 10.0, 90.0, 90.0), full)));
     assert_eq!(visible_part(rect(200.0, 0.0, 300.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), full), None);
+}
+
+#[test]
+fn another_color_cycle_keeps_the_limit_and_shows_the_recolored_image_at_once() {
+    let config = Config::sized(64, 48, 50, 8);
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    assert!(app.auto_iterations);
+    app.fast_gpu = false; //Compared with the CPU bit for bit below: the samples of the fast math are not continued (see `SampleKey`)
+    app.render("Exact");
+    wait_for_job(&mut app);
+    let limit = app.m.max_iterations;
+    app.m.palette = ColorCycle { divide: 2.0, offset: 50.0, stretch: false };
+    app.render_moved("Set the colors");
+    assert_eq!(app.m.max_iterations, limit, "the limit is kept: the samples are only recolored");
+    wait_for_job(&mut app);
+    //The image is the image of a new render of these colors
+    let (width, height) = (app.p.pixel_plane.width, app.p.pixel_plane.height);
+    let mut fresh = Vec::new();
+    rendering::Render::new(&app.c, &app.m, width, height, app.coloring_function).supersampling(app.supersampling_amount).adaptive(app.adaptive_supersampling.then(rendering::AdaptiveSampling::default)).run(|colors, _| fresh = colors.to_vec());
+    let differ = app.p.colors.iter().zip(&fresh).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+    assert_eq!(differ, 0, "of {} pixels; log {:?}", fresh.len(), &app.log[app.log.len().saturating_sub(3)..]);
 }
