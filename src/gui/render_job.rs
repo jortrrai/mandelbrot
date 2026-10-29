@@ -136,6 +136,9 @@ impl MandelbrotApp {
                         self.p.colors = colors;
                         self.shown_plane = plane;
                         self.texture_outdated = true;
+                        if let Some(flight) = &mut self.flight {
+                            flight.frames.push(Instant::now()); //A frame of the flight, for its frame rate
+                        }
                         self.layer_shown = pass > 0;
                         self.preview_block = preview_block;
                     }
