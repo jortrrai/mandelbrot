@@ -736,6 +736,7 @@ fn the_render_size_follows_the_window_and_keeps_the_view() {
     assert!(config.fit_window);
     let mut app = manual_app(&config);
     assert_eq!(app.view_resolution(), Resolution::new(1200, 800), "the first render has the default size");
+    app.fast_gpu = false; //Compared with the CPU bit for bit below: the fast GPU math may differ in a few pixels
     app.c.set_view(&View::new(-0.7498, 0.0203, 0.064));
     app.render("Went to a view");
     wait_for_job(&mut app);
