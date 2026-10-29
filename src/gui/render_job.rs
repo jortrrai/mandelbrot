@@ -20,8 +20,9 @@ use super::{MandelbrotApp, Readiness};
 /// A preview of a new view is only shown if the first layer is expected to take longer than this, about a frame: a faster first layer is shown directly, see `Render::preview`
 const PREVIEW_WORTHWHILE: Duration = Duration::from_millis(16);
 
-/// The GPU joins a pass of a render once the pass has run for this long, so passes that are fast on the CPU alone never wait for it, see `Render::gpu`
-const GPU_JOIN_AFTER: Duration = Duration::from_millis(8);
+/// The GPU joins the first pass of a render once it has run for this long (measured: 3 ms takes 3 ms off a deep 1x render and leaves the 6 ms default view as it
+/// is; 0 ms slows that view down), so passes that are fast on the CPU alone never wait for it. Later passes that are known to be slow get it at once, see `Render::gpu`
+const GPU_JOIN_AFTER: Duration = Duration::from_millis(3);
 
 /// The full-quality render after a drag or a wheel zoom starts when the gesture stops, or when it has not changed the view for this long (a mouse button held still)
 const GESTURE_PAUSE: Duration = Duration::from_millis(150);

@@ -1,12 +1,12 @@
 //! The progressive renderer: one supersampling layer at a time, so every layer can be shown as soon as it is computed.
 
-use std::{thread, sync::{Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
+use std::{collections::VecDeque, thread, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
 
 use super::adaptive::{mask_where, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 use super::jitter::sample_jitter;
 use super::region::ExposedRegion;
 use super::render_thread_count;
-use super::gpu::GpuIterator;
+use super::gpu::{GpuIterator, Outcome, BATCH};
 use super::state::{SampleKey, SampleState, FOREIGN};
 use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, mandelbrot_set::{MandelbrotSet, LANES}};
 
@@ -120,8 +120,9 @@ impl<'a> Render<'a> {
         self
     }
 
-    /// With `Some((gpu, join_after))`, the GPU helps with every pass that has run for `join_after` (see `sample_pass`): it computes bit for bit the same samples
-    /// (see `gpu`), so the image is the same; a pass that is done before `join_after` never waits for the GPU.
+    /// With `Some((gpu, join_after))`, the GPU helps with the passes (see `sample_pass`): it computes bit for bit the same samples (see `gpu`), so the image is the same.
+    /// It joins the first pass once that has run for `join_after`, so a pass that is done before never waits for it; a later pass gets it from the start when the
+    /// CPU threads alone would take longer than `GPU_WORTHWHILE` for it, and not at all otherwise.
     #[must_use]
     pub fn gpu(mut self, gpu: Option<(&'a GpuIterator, Duration)>) -> Self {
         self.gpu = gpu;
@@ -220,13 +221,17 @@ impl<'a> Render<'a> {
             let eligible = if mask.is_some() { masked[index] } else { pending[index] };
             //The pixels that get no sample in this pass count as done
             pixels_done.store(total - eligible, Ordering::Relaxed);
-            //The GPU only for a pass that is expected to be slow, from the time per sample of the pass before (unknown for the first pass: then the join delay decides)
+            //The GPU only for a pass that the CPU threads alone would take long for, from their time per sample in the pass before; then it joins at once.
+            //For the first pass that time is unknown: then the join delay decides
             let expected = time_per_sample.map(|per_sample| per_sample * u32::try_from(eligible).unwrap_or(u32::MAX));
-            let pass_gpu = gpu.filter(|_| cpu_threads == 0 || expected.is_none_or(|expected| expected > GPU_WORTHWHILE)).map(|(gpu, join_after)| (gpu, join_after, gpu_samples));
-            let pass_started = Instant::now();
+            let pass_gpu = gpu.filter(|_| cpu_threads == 0 || expected.is_none_or(|expected| expected > GPU_WORTHWHILE))
+                .map(|(gpu, join_after)| (gpu, if expected.is_some() { Duration::ZERO } else { join_after }, gpu_samples));
+            let (pass_started, gpu_before) = (Instant::now(), gpu_samples.load(Ordering::Relaxed));
             let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
-            if processed > 0 {
-                time_per_sample = Some(pass_started.elapsed() / u32::try_from(processed).unwrap_or(u32::MAX));
+            //The time per sample of the CPU threads alone: the samples of the GPU do not count, so a pass that the GPU made short does not keep it out of the next one
+            let on_cpu = processed.saturating_sub(gpu_samples.load(Ordering::Relaxed).saturating_sub(gpu_before));
+            if on_cpu > 0 {
+                time_per_sample = Some(pass_started.elapsed() / u32::try_from(on_cpu).unwrap_or(u32::MAX));
             }
             if cancel.load(Ordering::Relaxed) {
                 return false;
@@ -248,8 +253,10 @@ impl<'a> Render<'a> {
 /// sampled are complete in `state`. Without `track` (a state that is not kept) every pixel of the render has `sample` samples except the ones the previews computed,
 /// so the counts are not updated.
 ///
-/// With `gpu`, the GPU helps once the pass has run for its join delay (a fast pass never waits for it): it takes `GPU_ROWS` rows at a time from the same queue as
-/// the CPU threads, so the work divides itself by speed. The GPU computes the same positions bit for bit (see `gpu`), and the same code applies them to the rows.
+/// With `gpu`, the GPU helps once the pass has run for its join delay (a fast pass never waits for it). Its worker takes batches of rows from the same queue as the
+/// CPU threads, so the work divides itself by speed, and keeps two dispatches on the GPU so that it never waits: each about `GPU_BATCH_TIME` long at the speed
+/// measured in the pass, and at most a quarter of the rows that are left, so the CPU threads do not wait long for the last one. The GPU computes the same positions
+/// bit for bit (see `gpu`); the CPU threads turn its outcomes into positions and apply them with the same code as their own rows, so the worker only feeds the GPU.
 /// If the GPU fails, its rows are computed on the CPU and the GPU is not used for the rest of the pass.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The state of `Render::run` that a pass shares; the CPU threads and the GPU worker share its closures
 fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
@@ -314,17 +321,41 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     //The colors of the first two samples are only kept when they are needed (adaptive supersampling, a kept state); otherwise every row gets an empty slice
     let (first_rows, second_rows) = (rows_or_empty(&mut state.first, width, height), rows_or_empty(&mut state.second, width, height));
     let rows = Mutex::new(state.sums.chunks_mut(width).zip(state.counts.chunks_mut(width)).zip(first_rows).zip(second_rows).zip(colors.chunks_mut(width)).enumerate());
+    //The rows that the GPU computed, with their pixels and the outcomes of the batch from where they start (or `None` if the GPU failed: then the CPU computes them).
+    //The CPU threads turn the outcomes into positions and apply them, so the GPU worker only feeds the GPU and never competes with them for the cores.
+    let gpu_done: Mutex<Vec<GpuRow>> = Mutex::new(Vec::new());
+    //The rows that the GPU worker took from `rows` and has not put into `gpu_done` yet: the CPU threads wait for those before they stop
+    let gpu_pending = AtomicUsize::new(0);
+    let finish_gpu_row = |(y, ((((row, counts), first), second), color_row)): PassRow, xs: Vec<usize>, outcomes: Option<(Arc<Vec<Outcome>>, usize)>| {
+        let positions = match outcomes {
+            Some((all, offset)) => xs.iter().zip(&all[offset..]).map(|(x, outcome)| outcome.position(m, &sample_point(c, *x, y, sample, origin))).collect(),
+            None => on_cpu(y, &xs),
+        };
+        apply(y, row, counts, first, second, color_row, &xs, &positions);
+    };
     thread::scope(|scope| {
         for _ in 0..cpu_threads {
             scope.spawn(|| loop {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
+                let from_gpu = gpu_done.lock().unwrap().pop();
+                if let Some((row, xs, outcomes)) = from_gpu {
+                    finish_gpu_row(row, xs, outcomes);
+                    continue;
+                }
                 let next_row = rows.lock().unwrap().next();
-                let Some((y, ((((row, counts), first), second), color_row))) = next_row else { return };
-                let xs = select(y, counts);
-                let positions = on_cpu(y, &xs);
-                apply(y, row, counts, first, second, color_row, &xs, &positions);
+                if let Some((y, ((((row, counts), first), second), color_row))) = next_row {
+                    let xs = select(y, counts);
+                    let positions = on_cpu(y, &xs);
+                    apply(y, row, counts, first, second, color_row, &xs, &positions);
+                    continue;
+                }
+                //No rows left: the rows on the GPU still come back to these threads (`gpu_pending` drops only after they are in `gpu_done`)
+                if gpu_pending.load(Ordering::SeqCst) == 0 && gpu_done.lock().unwrap().is_empty() {
+                    return;
+                }
+                thread::sleep(Duration::from_micros(50));
             });
         }
         if let Some((gpu, join_after, gpu_samples)) = gpu.as_ref() {
@@ -336,27 +367,74 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                     }
                     thread::sleep(Duration::from_micros(200));
                 }
-                let mut gpu_works = true;
+                //Two dispatches on the GPU at a time, so it never waits for this thread; each about `GPU_BATCH_TIME` long at the speed measured so far,
+                //and at most a quarter of the rows that are left, so the CPU threads do not wait for a large last batch
+                let mut in_flight = VecDeque::new();
+                let (mut gpu_works, mut rate, mut points_per_row) = (true, None::<f64>, width as f64);
+                let gpu_started = Instant::now();
+                let mut points_finished = 0_usize;
                 loop {
+                    while gpu_works && in_flight.len() < 2 && !cancel.load(Ordering::Relaxed) {
+                        let wanted = rate.map_or(GPU_ROWS, |rate| (rate * GPU_BATCH_TIME.as_secs_f64() / points_per_row.max(1.0)) as usize);
+                        let batch: Vec<PassRow> = {
+                            let mut rows = rows.lock().unwrap();
+                            let take = wanted.min(rows.len().div_ceil(4)).min(BATCH / width.max(1)).max(1);
+                            let batch: Vec<PassRow> = rows.by_ref().take(take).collect();
+                            gpu_pending.fetch_add(batch.len(), Ordering::SeqCst); //While the rows are locked: a CPU thread never sees them neither in `rows` nor pending
+                            drop(rows);
+                            batch
+                        };
+                        if batch.is_empty() {
+                            break;
+                        }
+                        let rows_in_batch = batch.len();
+                        let selected: Vec<(PassRow, Vec<usize>)> = batch.into_iter().map(|row| {
+                            let xs = select(row.0, (row.1).0.0.0.1);
+                            (row, xs)
+                        }).collect();
+                        let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, sample, origin))).collect();
+                        points_per_row = points_per_row.mul_add(0.5, points.len() as f64 / rows_in_batch as f64 * 0.5);
+                        let submitted = (!points.is_empty()).then(|| gpu.submit(m, &points)); //Rows without pixels of this pass need no dispatch
+                        in_flight.push_back((selected, submitted, points.len()));
+                    }
+                    let Some((selected, submitted, count)) = in_flight.pop_front() else { break };
+                    let outcomes = submitted.map_or_else(|| Ok(Vec::new()), |submitted| submitted.and_then(|submitted| gpu.finish(submitted)));
+                    gpu_works = outcomes.is_ok();
+                    if gpu_works {
+                        gpu_samples.fetch_add(count, Ordering::Relaxed);
+                        points_finished += count;
+                        rate = Some(points_finished as f64 / gpu_started.elapsed().as_secs_f64().max(1e-6));
+                    }
+                    let outcomes = outcomes.ok().map(Arc::new);
+                    let rows_in_batch = selected.len();
+                    let mut offset = 0;
+                    let finished: Vec<_> = selected.into_iter().map(|(row, xs)| {
+                        let start = offset;
+                        offset += xs.len();
+                        (row, xs, outcomes.as_ref().map(|all| (Arc::clone(all), start)))
+                    }).collect();
+                    if cpu_threads == 0 {
+                        for (row, xs, outcomes) in finished {
+                            finish_gpu_row(row, xs, outcomes);
+                        }
+                    } else {
+                        gpu_done.lock().unwrap().extend(finished);
+                    }
+                    gpu_pending.fetch_sub(rows_in_batch, Ordering::SeqCst);
                     if cancel.load(Ordering::Relaxed) {
                         return;
                     }
-                    let batch: Vec<_> = rows.lock().unwrap().by_ref().take(GPU_ROWS).collect();
-                    if batch.is_empty() {
-                        return;
-                    }
-                    let selected: Vec<Vec<usize>> = batch.iter().map(|(y, ((((_, counts), _), _), _))| select(*y, counts)).collect();
-                    let points: Vec<Complex> = batch.iter().zip(&selected).flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, sample, origin))).collect();
-                    let from_gpu = if gpu_works { gpu.positions(m, &points).ok() } else { None };
-                    gpu_works = from_gpu.is_some();
-                    if gpu_works {
-                        gpu_samples.fetch_add(points.len(), Ordering::Relaxed);
-                    }
-                    let mut offset = 0;
-                    for ((y, ((((row, counts), first), second), color_row)), xs) in batch.into_iter().zip(&selected) {
-                        let positions = from_gpu.as_ref().map_or_else(|| on_cpu(y, xs), |all| all[offset..offset + xs.len()].to_vec());
-                        offset += xs.len();
-                        apply(y, row, counts, first, second, color_row, xs, &positions);
+                }
+                //Without CPU threads (a test) the rows that are left after the GPU failed are this thread's
+                if cpu_threads == 0 {
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let next_row = rows.lock().unwrap().next();
+                        let Some(row) = next_row else { return };
+                        let xs = select(row.0, (row.1).0.0.0.1);
+                        finish_gpu_row(row, xs, None);
                     }
                 }
             });
@@ -369,9 +447,18 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
 /// (measured: the default view at 32x adaptive, with many passes of a few milliseconds, took 90.5 ms with the GPU in every pass instead of 86.5 ms)
 const GPU_WORTHWHILE: Duration = Duration::from_millis(12);
 
-/// The rows the GPU takes from the queue of a pass at a time (about 38,000 pixels at 1200 x 800): enough to keep it busy, few enough that the CPU threads do not
-/// wait long for its last batch
+/// The rows the GPU takes from the queue of a pass for its first batch, before its speed is known (about 38,000 pixels at 1200 x 800)
 const GPU_ROWS: usize = 32;
+
+/// How long one dispatch of the GPU should take at the speed measured in the pass: long enough that the gaps between dispatches do not matter, short enough to
+/// keep the window responsive (the GPU also draws it)
+const GPU_BATCH_TIME: Duration = Duration::from_millis(10);
+
+/// A row that the GPU computed: the row, its pixels, and the outcomes of its batch with where the row starts in them (`None`: the GPU failed)
+type GpuRow<'r> = (PassRow<'r>, Vec<usize>, Option<(Arc<Vec<Outcome>>, usize)>);
+
+/// A row of a pass: its number, sums, counts, first and second colors, and colors
+type PassRow<'r> = (usize, ((((&'r mut [[u32; 3]], &'r mut [u8]), &'r mut [TrueColor]), &'r mut [TrueColor]), &'r mut [TrueColor]));
 
 /// Large color tables are built on all render threads. Starting the threads costs about 0.17 ms, so below this many entries one thread is as fast or faster
 /// (measured: 20,000 Bernstein entries take 0.08 ms on one thread and 0.18 ms on all; at 65,376 entries both take about 0.2 ms)
