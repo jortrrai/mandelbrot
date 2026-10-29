@@ -1385,6 +1385,14 @@ fn a_flight_counts_its_frames_shows_the_frame_rate_and_logs_the_average() {
     let last = *flight.frames.last().unwrap();
     assert_eq!(flight.fps(last), flight.frames.iter().filter(|shown| last.duration_since(**shown) <= Duration::from_secs(1)).count());
     assert_eq!(flight.fps(last + Duration::from_secs(5)), 0, "the frames of the second before");
+    assert!(flight.frames.len() <= 4, "one frame per view on the way (the finer images of a view do not count): {}", flight.frames.len());
+    //The progress bar shows the rate of the second before, updated once a second so it can be read
+    let flight = app.flight.as_mut().unwrap();
+    let updated = flight.fps_updated;
+    flight.update_fps(updated + Duration::from_millis(500));
+    assert_eq!(flight.fps_shown, 0, "not yet a second");
+    flight.update_fps(last.max(updated + Duration::from_secs(1)));
+    assert_eq!(flight.fps_shown, flight.fps(last.max(updated + Duration::from_secs(1))));
     app.skip_flight();
     assert!(app.log.iter().any(|line| line.starts_with("The flight to Test Place was skipped: ") && line.contains(" frames in ") && line.ends_with(" FPS on average")), "{:?}", app.log);
     wait_for_job(&mut app);

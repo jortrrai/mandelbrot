@@ -157,11 +157,11 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
         });
-        ui.checkbox(&mut self.smooth_flights, "Smooth colors during flights").on_hover_text("Off by default: the frames on the way color by whole iteration counts, which shows bands of color but skips the smooth color of every pixel (up to a third of the time of a shallow frame). The place itself is always rendered with smooth colors.");
+        ui.checkbox(&mut self.smooth_flights, "Smooth colors during flights").on_hover_text("Off by default: the frames on the way color by whole iteration counts (with \"Smooth colors\" on; off, every render does), which shows bands of color but skips the smooth color of every pixel (up to a third of the time of a shallow frame). The place itself is always rendered with smooth colors.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
             let share = flight.flight.share_of_path(flight.elapsed) as f32;
-            let text = format!("To {}: {:.0}% of the way, {} FPS", flight.point.name, share * 100.0, flight.fps(std::time::Instant::now()));
+            let text = format!("To {}: {:.0}% of the way, {} FPS", flight.point.name, share * 100.0, flight.fps_shown);
             ui.horizontal(|ui| {
                 if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
                     self.cancel_flight();
@@ -280,6 +280,9 @@ impl MandelbrotApp {
                 }
             });
         });
+        if ui.checkbox(&mut self.m.smooth_coloring, "Smooth colors").on_hover_text("Colors flow smoothly from one iteration count to the next (the fractional iteration count). Off: every pixel gets the color of its whole iteration count, which shows bands of color and saves two logarithms per pixel outside the set. Saved images use this setting too.").changed() {
+            self.render(&format!("Turned smooth colors {}", if self.m.smooth_coloring { "on" } else { "off" }));
+        }
         ui.horizontal(|ui| {
             ui.label("Color channels (R, G, B):");
             let current = format!("{:?}", self.p.color_channel_mapping);

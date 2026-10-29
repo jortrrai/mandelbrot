@@ -131,14 +131,14 @@ impl MandelbrotApp {
                     let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::FullResolution } else { Readiness::Complete };
                     //(a layer that is held back still counts for the progress bar below)
                     if readiness >= self.required_readiness() {
+                        if let (false, Some(flight)) = (self.frame_accepted, &mut self.flight) {
+                            flight.frames.push(Instant::now()); //A new frame of the flight (not a finer image of the same view), for its frame rate
+                        }
                         self.frame_ready = true;
                         self.frame_accepted = true;
                         self.p.colors = colors;
                         self.shown_plane = plane;
                         self.texture_outdated = true;
-                        if let Some(flight) = &mut self.flight {
-                            flight.frames.push(Instant::now()); //A frame of the flight, for its frame rate
-                        }
                         self.layer_shown = pass > 0;
                         self.preview_block = preview_block;
                     }

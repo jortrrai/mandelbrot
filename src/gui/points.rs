@@ -27,15 +27,25 @@ pub(super) struct PointFlight {
     pub(super) point: PointOfInterest,
     /// With auto iterations: the limits of the frames on the way
     pub(super) limits: Option<FlightLimits>,
-    /// When the flight started, and when each of its frames was shown (a render complete enough for the flight rendering), for the frame rate, see `fps`
+    /// When the flight started, and when each of its frames was shown (the first image of a view on the way that is complete enough for the flight rendering), for the frame rate, see `fps`
     pub(super) started: Instant,
     pub(super) frames: Vec<Instant>,
+    /// The frame rate in the progress bar, and when it was last updated: once a second, so it can be read (see `update_fps`)
+    pub(super) fps_shown: usize,
+    pub(super) fps_updated: Instant,
 }
 
 impl PointFlight {
     /// The frames shown in the second before `now`
     pub(super) fn fps(&self, now: Instant) -> usize {
         self.frames.iter().rev().take_while(|shown| now.saturating_duration_since(**shown) <= Duration::from_secs(1)).count()
+    }
+
+    /// Updates the frame rate in the progress bar to `fps(now)` when it is a second old
+    pub(super) fn update_fps(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.fps_updated) >= Duration::from_secs(1) {
+            (self.fps_shown, self.fps_updated) = (self.fps(now), now);
+        }
     }
 
     /// The frames shown so far, the time since the start, and the average frame rate, for the status log
@@ -346,7 +356,7 @@ impl MandelbrotApp {
         self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| self.flight_limits(to));
         let now = Instant::now();
-        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new() });
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
 
@@ -402,6 +412,7 @@ impl MandelbrotApp {
     /// most `MAX_WAITING_STEP`: the flight clock stands still while it waits, so a slow view makes a slow, smooth crawl instead of jumps.
     pub(super) fn fly_at(&mut self, now: Instant) {
         let Some(mut flight) = self.flight.take() else { return };
+        flight.update_fps(now);
         let since_last_frame = now.saturating_duration_since(flight.last_frame);
         flight.last_frame = now;
         if self.flight_readiness() == Readiness::Any {
