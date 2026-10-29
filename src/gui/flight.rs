@@ -1,8 +1,8 @@
 //! A flight of the camera from one view to another: smooth panning and zooming, used to go to a point of interest.
 //!
 //! A leg follows the path of van Wijk and Nuij, "Smooth and efficient zooming and panning" (IEEE Symposium on Information Visualization, 2003): to travel far it zooms out first and in again,
-//! so the picture moves at the same apparent speed at every zoom, and the length `S` of the path measures how much the view changes. A flight has one leg (the
-//! shortest route) or two (via the reset view). Its duration follows from the length at the speed of its pace, and the pace eases the start and the end.
+//! so the picture moves at the same apparent speed at every zoom, and the length `S` of the path measures how much the view changes. A flight always takes this shortest
+//! path. Its duration follows from the length at the speed of its pace, and the pace eases the start and the end.
 
 use std::time::Duration;
 
@@ -10,28 +10,6 @@ use crate::complex_plane::View;
 
 /// The curvature of the path: how much the camera zooms out to travel, the value that van Wijk and Nuij found pleasant (about sqrt(2))
 const RHO: f64 = 1.42;
-
-/// The way a flight goes to its destination
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Route {
-    /// Straight to the destination: zooming out only as far as the distance needs
-    Shortest,
-    /// First to the reset view (the whole set), then to the destination
-    ViaReset,
-}
-
-impl Route {
-    /// Every route, in the order of the drop-down (the default, see `MandelbrotApp::new`, first)
-    pub const ALL: [Route; 2] = [Route::Shortest, Route::ViaReset];
-
-    /// The name in the drop-down
-    pub const fn name(self) -> &'static str {
-        match self {
-            Route::Shortest => "Shortest route",
-            Route::ViaReset => "Via reset",
-        }
-    }
-}
 
 /// How fast and how smoothly a flight moves
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,22 +149,18 @@ impl Leg {
 /// A flight from one view to another, see the module
 #[derive(Clone, Debug)]
 pub struct Flight {
-    legs: Vec<Leg>,
+    leg: Leg,
     pace: Pace,
     duration: Duration,
 }
 
 impl Flight {
-    /// A flight from `from` to `to` by `route` at `pace`; `reset` is the reset view that the route via reset passes
-    pub fn new(from: Camera, to: Camera, route: Route, pace: Pace, reset: Camera) -> Flight {
-        let legs = match route {
-            Route::Shortest => vec![Leg::new(from, to)],
-            Route::ViaReset => vec![Leg::new(from, reset), Leg::new(reset, to)],
-        };
-        let length: f64 = legs.iter().map(|leg| leg.length).sum();
+    /// A flight from `from` to `to` at `pace`, by the shortest path: zooming out only as far as the distance needs
+    pub fn new(from: Camera, to: Camera, pace: Pace) -> Flight {
+        let leg = Leg::new(from, to);
         let (speed, shortest, longest) = pace.speed();
-        let duration = Duration::from_secs_f64((length / speed).clamp(shortest, longest));
-        Flight { legs, pace, duration }
+        let duration = Duration::from_secs_f64((leg.length / speed).clamp(shortest, longest));
+        Flight { leg, pace, duration }
     }
 
     /// How long the flight takes
@@ -196,15 +170,7 @@ impl Flight {
 
     /// The camera `elapsed` after the start: the start view at 0, exactly the destination from `duration` on
     pub fn camera_at(&self, elapsed: Duration) -> Camera {
-        let total: f64 = self.legs.iter().map(|leg| leg.length).sum();
-        let mut s = self.pace.ease(elapsed.as_secs_f64() / self.duration.as_secs_f64()) * total;
-        for leg in &self.legs {
-            if s < leg.length {
-                return leg.camera_at(s);
-            }
-            s -= leg.length;
-        }
-        self.legs.last().map_or_else(|| unreachable!("a flight has a leg"), |leg| leg.to)
+        self.leg.camera_at(self.pace.ease(elapsed.as_secs_f64() / self.duration.as_secs_f64()) * self.leg.length)
     }
 
     /// The share of the path (0 to 1) that the camera has covered `elapsed` after the start, as the progress bar shows it
@@ -232,27 +198,21 @@ mod tests {
 
     #[test]
     fn a_flight_starts_at_the_start_and_ends_exactly_at_the_destination() {
-        for route in Route::ALL {
-            for pace in Pace::ALL {
-                for (from, to) in [(RESET, SEAHORSE), (SEAHORSE, DEEP), (DEEP, RESET), (SEAHORSE, SEAHORSE)] {
-                    let flight = Flight::new(from, to, route, pace, RESET);
-                    assert_eq!(flight.camera_at(Duration::ZERO), from, "{route:?} {pace:?}");
-                    assert_eq!(flight.camera_at(flight.duration()), to, "{route:?} {pace:?}");
-                    assert_eq!(flight.camera_at(flight.duration() * 2), to);
-                    assert!(flight.arrived(flight.duration()) && !flight.arrived(flight.duration() / 2));
-                }
+        for pace in Pace::ALL {
+            for (from, to) in [(RESET, SEAHORSE), (SEAHORSE, DEEP), (DEEP, RESET), (SEAHORSE, SEAHORSE)] {
+                let flight = Flight::new(from, to, pace);
+                assert_eq!(flight.camera_at(Duration::ZERO), from, "{pace:?}");
+                assert_eq!(flight.camera_at(flight.duration()), to, "{pace:?}");
+                assert_eq!(flight.camera_at(flight.duration() * 2), to);
+                assert!(flight.arrived(flight.duration()) && !flight.arrived(flight.duration() / 2));
             }
         }
     }
 
     #[test]
-    fn the_route_via_reset_passes_the_reset_view_and_the_shortest_route_does_not_zoom_out_that_far() {
-        let via = Flight::new(SEAHORSE, DEEP, Route::ViaReset, Pace::Normal, RESET);
-        assert_eq!(via.legs[0].camera_at(via.legs[0].length), RESET, "the first leg ends at the reset view");
+    fn a_flight_zooms_out_only_as_far_as_the_distance_needs() {
         let widest = |flight: &Flight| (0..=1000).map(|i| flight.camera_at(flight.duration().mul_f64(f64::from(i) / 1000.0)).scale).fold(0.0, f64::max);
-        assert!(widest(&via) > 0.95 && widest(&via) <= 1.0 + 1e-9, "via reset shows the whole set: {}", widest(&via));
-        let shortest = Flight::new(SEAHORSE, DEEP, Route::Shortest, Pace::Normal, RESET);
-        let widest_shortest = widest(&shortest);
+        let widest_shortest = widest(&Flight::new(SEAHORSE, DEEP, Pace::Normal));
         //About as wide as the distance between the two points, to keep both in view, and far less than the whole set
         let distance = (DEEP.x - SEAHORSE.x).hypot(DEEP.y - SEAHORSE.y);
         assert!(widest_shortest > 0.5 * distance && widest_shortest < 2.0 * distance, "zooms out only as far as the distance needs: {widest_shortest} for {distance}");
@@ -263,7 +223,7 @@ mod tests {
         //Between two frames (1/60 s) the view moves and zooms by a small part of itself, at every depth (at most 35% zoom, for a zoom by 10^12 at the fast pace)
         for (from, to) in [(RESET, DEEP), (DEEP, SEAHORSE)] {
             for pace in Pace::ALL {
-                let flight = Flight::new(from, to, Route::Shortest, pace, RESET);
+                let flight = Flight::new(from, to, pace);
                 let frames = (flight.duration().as_secs_f64() * 60.0).ceil() as u32;
                 for frame in 0..frames {
                     let (a, b) = (flight.camera_at(seconds(f64::from(frame) / 60.0)), flight.camera_at(seconds(f64::from(frame + 1) / 60.0)));
@@ -278,17 +238,17 @@ mod tests {
     #[test]
     fn faster_paces_take_less_time_within_their_limits() {
         for (from, to) in [(RESET, SEAHORSE), (SEAHORSE, DEEP), (RESET, Camera { x: -0.74, y: 0.0, scale: 0.9 })] {
-            let durations: Vec<f64> = [Pace::Fast, Pace::Normal, Pace::Cinematic].map(|pace| Flight::new(from, to, Route::Shortest, pace, RESET).duration().as_secs_f64()).to_vec();
+            let durations: Vec<f64> = [Pace::Fast, Pace::Normal, Pace::Cinematic].map(|pace| Flight::new(from, to, pace).duration().as_secs_f64()).to_vec();
             assert!(durations[0] <= durations[1] && durations[1] <= durations[2], "{durations:?}");
             assert!(durations[0] >= 0.5 && durations[2] <= 12.0, "{durations:?}");
         }
         //Even a zoom by a factor 10^12 is capped
-        assert_eq!(Flight::new(RESET, DEEP, Route::ViaReset, Pace::Cinematic, RESET).duration(), seconds(12.0));
+        assert_eq!(Flight::new(RESET, DEEP, Pace::Cinematic).duration(), seconds(12.0));
     }
 
     #[test]
     fn the_share_of_the_path_goes_from_0_to_1_without_going_back() {
-        let flight = Flight::new(RESET, SEAHORSE, Route::ViaReset, Pace::Cinematic, RESET);
+        let flight = Flight::new(RESET, SEAHORSE, Pace::Cinematic);
         let shares: Vec<f64> = (0..=100).map(|i| flight.share_of_path(flight.duration().mul_f64(f64::from(i) / 100.0))).collect();
         assert_eq!((shares[0], shares[100]), (0.0, 1.0));
         assert!(shares.windows(2).all(|pair| pair[0] <= pair[1]));
@@ -296,7 +256,6 @@ mod tests {
 
     #[test]
     fn the_drop_downs_list_the_defaults_first() {
-        assert_eq!(Route::ALL[0], Route::Shortest);
         assert_eq!(Pace::ALL[0], Pace::Fast);
     }
 }

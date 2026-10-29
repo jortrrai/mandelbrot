@@ -287,16 +287,14 @@ impl MandelbrotApp {
         }
     }
 
-    /// Flies to the point of interest at `index`, by the chosen route at the chosen pace (see `flight`); `fly` moves the view on every frame and arrives with `arrive_at`
+    /// Flies to the point of interest at `index` by the shortest path at the chosen pace (see `flight`); `fly` moves the view on every frame and arrives with `arrive_at`
     pub(super) fn go_to_point_of_interest(&mut self, index: usize) {
         let Some(point) = self.points.get(index).cloned() else { return };
         let center = self.c.center();
         let from = Camera { x: center.x, y: center.y, scale: self.c.get_scale() };
         let to = Camera { x: point.location.real, y: point.location.imaginary, scale: point.location.scale };
-        let reset_plane = ComplexPlane::new(self.p.pixel_plane.width, self.p.pixel_plane.height);
-        let reset = Camera { x: reset_plane.center().x, y: reset_plane.center().y, scale: reset_plane.get_scale() };
-        let flight = Flight::new(from, to, self.route, self.pace, reset);
-        self.log(format!("Flying to {} ({}, {}, {:.1} s)", point.name, self.route.name(), self.pace.name(), flight.duration().as_secs_f64()));
+        let flight = Flight::new(from, to, self.pace);
+        self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| self.flight_limits(to));
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: Instant::now(), point, limits });
         self.frame_ready = true; //The view on the screen is where the flight starts
