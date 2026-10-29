@@ -11,6 +11,11 @@
 //! the position with the same code as its own loop (`MandelbrotSet::position_after_loop`), so the smooth position (two logarithms, which SPIR-V has no f64 version
 //! of) is computed by the CPU exactly as before.
 //!
+//! There is also a fast loop (`gpu_fast.wgsl`) in double-float arithmetic: every number is the sum of two f32, about 48 bits instead of 53, and GPUs run f32 much faster
+//! than f64 (64 times on an RTX 5070 Ti). Measured at 1200 x 800 on an RTX 5070 Ti: Seahorse Valley in 29 ms instead of 88 ms, the shipped places 1.3 to 3.1 times as
+//! fast. It is not bit for bit the CPU's: 0.02% to 1.5% of the pixels of most shipped places get another iteration count, up to 25% in the most chaotic ones (where
+//! f64 with fused multiply-adds already changes 15 to 19%, so f64 cannot pin those pixels down either). The renderer only uses it when asked, see `Render::fast_gpu`.
+//!
 //! `GpuIterator::new` checks a set of points on the GPU against the CPU before it is used, and refuses when anything differs, when there is no suitable GPU,
 //! or when it lacks f64 shaders or SPIR-V passthrough: the renderer then stays on the CPU.
 
@@ -54,7 +59,9 @@ pub(crate) struct Submitted {
 pub struct GpuIterator {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
+    /// The exact loop (`gpu.wgsl`) and the fast double-float loop (`gpu_fast.wgsl`)
+    exact: wgpu::ComputePipeline,
+    fast: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     name: String,
 }
@@ -74,21 +81,24 @@ impl GpuIterator {
             return Err(format!("{name} lacks f64 shaders or SPIR-V passthrough"));
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: needed, required_limits: adapter.limits(), ..Default::default() })).map_err(|err| format!("{name}: {err}"))?;
-        let words = spirv_without_contraction(include_str!("gpu.wgsl"))?;
         let entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None }, count: None };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("mandelbrot"), entries: &[entry(0, true), entry(1, true), entry(2, false), entry(3, false)] });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("mandelbrot"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        //SAFETY: the SPIR-V is naga's validated output of `gpu.wgsl`, with only NoContraction decorations added
-        let shader = unsafe {
-            device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
-                label: Some("mandelbrot"),
-                entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint { name: "main".into(), workgroup_size: (64, 1, 1) }]),
-                spirv: Some(Cow::Owned(words)),
-                ..Default::default()
-            })
+        let pipeline = |source: &str| -> Result<wgpu::ComputePipeline, String> {
+            let words = spirv_without_contraction(source)?;
+            //SAFETY: the SPIR-V is naga's validated output of the shader, with only NoContraction decorations added
+            let shader = unsafe {
+                device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+                    label: Some("mandelbrot"),
+                    entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint { name: "main".into(), workgroup_size: (64, 1, 1) }]),
+                    spirv: Some(Cow::Owned(words)),
+                    ..Default::default()
+                })
+            };
+            Ok(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mandelbrot"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }))
         };
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mandelbrot"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None });
-        let gpu = GpuIterator { device, queue, pipeline, layout, name };
+        let (exact, fast) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?);
+        let gpu = GpuIterator { device, queue, exact, fast, layout, name };
         gpu.self_test()?;
         Ok(gpu)
     }
@@ -98,14 +108,14 @@ impl GpuIterator {
         &self.name
     }
 
-    /// The position of every point, exactly `m.position(point)` (see the module)
+    /// The position of every point: exactly `m.position(point)`, or with `fast` that of the fast loop (see the module)
     ///
     /// # Errors
     /// The GPU failed (for example the device was lost)
-    pub fn positions(&self, m: &MandelbrotSet, points: &[Complex]) -> Result<Vec<f64>, String> {
+    pub fn positions(&self, m: &MandelbrotSet, points: &[Complex], fast: bool) -> Result<Vec<f64>, String> {
         let mut positions = vec![0.0; points.len()];
         for (batch, out) in points.chunks(BATCH).zip(positions.chunks_mut(BATCH)) {
-            let outcomes = self.finish(self.submit(m, batch)?)?;
+            let outcomes = self.finish(self.submit(m, batch, fast)?)?;
             //The positions (two logarithms for every escaped point with smooth coloring) on all render threads
             let chunk = batch.len().div_ceil(super::render_thread_count()).max(1);
             std::thread::scope(|scope| {
@@ -121,8 +131,9 @@ impl GpuIterator {
         Ok(positions)
     }
 
-    /// Starts one dispatch of the shader over `points` (at most `BATCH`) and returns at once: the GPU runs it while the caller prepares the next one, see `finish`
-    pub(crate) fn submit(&self, m: &MandelbrotSet, points: &[Complex]) -> Result<Submitted, String> {
+    /// Starts one dispatch of the exact loop (or with `fast` the fast loop) over `points` (at most `BATCH`) and returns at once: the GPU runs it while the caller
+    /// prepares the next one, see `finish`
+    pub(crate) fn submit(&self, m: &MandelbrotSet, points: &[Complex], fast: bool) -> Result<Submitted, String> {
         debug_assert!(points.len() <= BATCH);
         let count = u32::try_from(points.len()).map_err(|_| String::from("too many points"))?;
         let mut params = Vec::with_capacity(24);
@@ -146,7 +157,7 @@ impl GpuIterator {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(if fast { &self.fast } else { &self.exact });
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(count.div_ceil(64).min(WORKGROUPS), 1, 1);
         }
@@ -163,17 +174,25 @@ impl GpuIterator {
         Ok(bytemuck::cast_slice(&view).to_vec())
     }
 
-    /// Checks the GPU against the CPU on points of a shallow, a medium and a deep view, with smooth and integer coloring and a small orbit radius
+    /// Checks the GPU against the CPU on points of a shallow, a medium and a deep view, with smooth and integer coloring and a small orbit radius; and that the fast
+    /// loop gives the iteration count of the CPU on almost every point of the shallow view (all but 1%: measured 0.02% on a whole view)
     fn self_test(&self) -> Result<(), String> {
-        for (view, max_iterations, orbit_radius, smooth) in self_test_cases() {
+        for (index, (view, max_iterations, orbit_radius, smooth)) in self_test_cases().into_iter().enumerate() {
             let mut plane = ComplexPlane::new(64, 48);
             plane.set_view(&view);
             let mut m = MandelbrotSet::new(max_iterations, orbit_radius);
             m.smooth_coloring = smooth;
             let points: Vec<Complex> = (0..48).flat_map(|y| (0..64).map(move |x| (x, y))).map(|(x, y)| plane.complex_from_pixel_plane(f64::from(x) + 0.37, f64::from(y) + 0.61)).collect();
-            let gpu = self.positions(&m, &points)?;
+            let gpu = self.positions(&m, &points, false)?;
             if let Some((point, (gpu, cpu))) = points.iter().zip(gpu.iter().zip(points.iter().map(|c| m.position(c)))).find(|(_, (gpu, cpu))| gpu.to_bits() != cpu.to_bits()) {
                 return Err(format!("{} differs from the CPU at ({}, {}): {gpu} instead of {cpu}", self.name, point.x, point.y));
+            }
+            if index == 0 {
+                let fast = self.positions(&m, &points, true)?;
+                let differ = points.iter().zip(&fast).filter(|(c, fast)| fast.floor().to_bits() != m.position(c).floor().to_bits()).count();
+                if differ * 100 > points.len() {
+                    return Err(format!("the fast loop of {} gives other iteration counts than the CPU for {differ} of {} points", self.name, points.len()));
+                }
             }
         }
         Ok(())
@@ -226,8 +245,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_floating_point_operation_of_the_shader_gets_no_contraction() {
-        let words = spirv_without_contraction(include_str!("gpu.wgsl")).unwrap();
+    fn every_floating_point_operation_of_the_shaders_gets_no_contraction() {
+        for source in [include_str!("gpu.wgsl"), include_str!("gpu_fast.wgsl")] {
+            no_contraction_everywhere(source);
+        }
+    }
+
+    fn no_contraction_everywhere(source: &str) {
+        let words = spirv_without_contraction(source).unwrap();
         let mut decorated = std::collections::HashSet::new();
         let (mut operations, mut at) = (Vec::new(), 5);
         while at < words.len() {
@@ -258,8 +283,12 @@ mod tests {
         plane.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.000064));
         let m = MandelbrotSet::new(5000, 2.0);
         let points: Vec<Complex> = (0..160).flat_map(|y| (0..240).map(move |x| (x, y))).map(|(x, y)| plane.complex_from_pixel_plane(f64::from(x) + 0.5, f64::from(y) + 0.5)).collect();
-        let positions = gpu.positions(&m, &points).unwrap();
+        let positions = gpu.positions(&m, &points, false).unwrap();
         let differ = points.iter().zip(&positions).filter(|(c, gpu)| gpu.to_bits() != m.position(c).to_bits()).count();
         assert_eq!(differ, 0, "{} of {} positions differ on {}", differ, points.len(), gpu.name());
+        //The fast loop: the iteration counts of almost every point (measured: 1.5% differ at 1200 x 800), the colors of the rest are close
+        let fast = gpu.positions(&m, &points, true).unwrap();
+        let differ = points.iter().zip(&fast).filter(|(c, fast)| fast.floor().to_bits() != m.position(c).floor().to_bits()).count();
+        assert!(differ * 100 < points.len() * 3, "the fast loop changes {differ} of {} iteration counts", points.len());
     }
 }

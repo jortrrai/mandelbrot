@@ -630,6 +630,36 @@ fn a_render_with_the_gpu_is_bit_for_bit_the_render_without_it() {
 }
 
 #[test]
+fn a_render_with_the_fast_gpu_keeps_almost_every_pixel_and_deep_views_exact() {
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let (w, h) = (160, 120);
+    let render = |c: &ComplexPlane, m: &MandelbrotSet, fast: Option<bool>| {
+        let mut last = Vec::new();
+        let render = Render::new(c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(2);
+        let render = match fast { Some(fast) => render.gpu(Some((&gpu, std::time::Duration::ZERO))).fast_gpu(fast).on_the_gpu_only(), None => render };
+        assert!(render.run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()));
+        last
+    };
+    //A boundary view: the fast loop gives almost every pixel its exact color
+    let (c, m) = boundary_plane(w, h);
+    let (exact, fast) = (render(&c, &m, None), render(&c, &m, Some(true)));
+    let differ = exact.iter().zip(&fast).filter(|(a, b)| a != b).count();
+    assert!(differ * 100 < w * h * 2, "{differ} of {} pixels differ", w * h);
+    //Too deep for its precision (`FAST_GPU_STEPS`): the exact loop, bit for bit
+    let mut deep = ComplexPlane::new(w, h);
+    deep.set_view(&crate::complex_plane::View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-11));
+    assert!(deep.precision_steps() < super::progressive::FAST_GPU_STEPS);
+    let m = MandelbrotSet::new(3000, 2.0);
+    assert_eq!(render(&deep, &m, Some(true)), render(&deep, &m, None));
+}
+
+#[test]
 fn an_image_saved_with_the_gpu_has_the_pixels_of_one_saved_without_it() {
     let gpu = match super::gpu::GpuIterator::new() {
         Ok(gpu) => gpu,

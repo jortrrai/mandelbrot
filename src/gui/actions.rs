@@ -72,21 +72,31 @@ impl MandelbrotApp {
     /// Goes back to the view that was shown before this one, if there is one
     pub(super) fn go_back(&mut self) {
         if let Some(plane) = self.history.go_back() {
-            self.show_remembered_view(&plane, "Went back to the previous view");
+            if !self.show_remembered_view(&plane, "Went back to the previous view") {
+                self.history.go_forward(); //Beyond the zoom limit: the history stays where it was
+            }
         }
     }
 
     /// Goes forward again to the view that was left with Back, if there is one
     pub(super) fn go_forward(&mut self) {
         if let Some(plane) = self.history.go_forward() {
-            self.show_remembered_view(&plane, "Went forward to the next view");
+            if !self.show_remembered_view(&plane, "Went forward to the next view") {
+                self.history.go_back();
+            }
         }
     }
 
-    /// Shows a view from the history at the size of the window now: the same center and width on the real axis
-    fn show_remembered_view(&mut self, plane: &ComplexPlane, message: &str) {
-        self.c = plane.resized(self.p.pixel_plane.width, self.p.pixel_plane.height);
+    /// Shows a view from the history at the size of the window now: the same center and width on the real axis. Returns false when the view is beyond the zoom limit
+    /// (see `zoom_refused`): then it is not shown
+    fn show_remembered_view(&mut self, plane: &ComplexPlane, message: &str) -> bool {
+        let resized = plane.resized(self.p.pixel_plane.width, self.p.pixel_plane.height);
+        if self.zoom_refused(&resized) {
+            return false;
+        }
+        self.c = resized;
         self.render(message);
+        true
     }
 
     /// The default size of a saved image, see `Config::image_width`
@@ -99,15 +109,21 @@ impl MandelbrotApp {
         Resolution::new(self.p.pixel_plane.width, self.p.pixel_plane.height)
     }
 
-    /// Goes to the view that was typed in the three "go to view" fields (x, y and scale); a message in the status log if they are not numbers or the scale is not positive
+    /// Goes to the view that was typed in the three "go to view" fields (x, y and scale; an empty scale keeps the current scale); a message in the status log if they
+    /// are not numbers or the scale is not positive
     pub(super) fn go_to_view(&mut self) {
-        let parsed: Vec<Result<f64, _>> = self.view_inputs.iter().map(|text| text.trim().parse::<f64>()).collect();
+        let current_scale = self.c.get_scale().to_string();
+        let parsed: Vec<Result<f64, _>> = self.view_inputs.iter().enumerate().map(|(index, text)| if index == 2 && text.trim().is_empty() { current_scale.as_str() } else { text.trim() }.parse::<f64>()).collect();
         match parsed.as_slice() {
             [Ok(x), Ok(y), Ok(scale)] if *scale > 0.0 => {
-                self.c.set_view(&View::new(*x, *y, *scale));
-                self.render("Moved to the entered view");
+                let mut entered = self.c.clone();
+                entered.set_view(&View::new(*x, *y, *scale));
+                if !self.zoom_refused(&entered) {
+                    self.c = entered;
+                    self.render("Moved to the entered view");
+                }
             }
-            _ => self.log("Could not go to the view: x, y and scale should be numbers, and scale should be positive"),
+            _ => self.log("Could not go to the view: x, y and scale should be numbers (an empty scale keeps the current one), and scale should be positive"),
         }
     }
 

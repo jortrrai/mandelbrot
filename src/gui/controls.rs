@@ -72,8 +72,12 @@ impl MandelbrotApp {
                 zoom_in.clone().on_disabled_hover_text("The limit of 64-bit numbers is reached: deeper views would only show rounding noise. Zoom out, or go to another place.");
             }
             if zoom_in.clicked() {
-                self.c.scale(self.vars.scaling_factor());
-                self.render("Zoomed in");
+                let mut zoomed = self.c.clone();
+                zoomed.scale(self.vars.scaling_factor());
+                if !self.zoom_refused(&zoomed) {
+                    self.c = zoomed;
+                    self.render("Zoomed in");
+                }
             }
             if ui.button("Zoom out").clicked() {
                 self.c.scale(self.vars.inverse_scaling_factor());
@@ -228,6 +232,17 @@ impl MandelbrotApp {
                 if ui.checkbox(&mut self.use_gpu, "Use the GPU").on_hover_text(format!("{} helps with the slow parts of a render. It computes bit for bit the same samples as the CPU (checked when the window opened), so the image is the same.", gpu.name())).changed() {
                     self.log(format!("Turned the GPU {}", if self.use_gpu { "on" } else { "off" }));
                 }
+                let response = ui.add_enabled(self.use_gpu, egui::Checkbox::new(&mut self.fast_gpu, "Fast GPU math"));
+                if response.on_hover_text("On by default. The GPU computes with pairs of 32-bit numbers instead of 64-bit numbers: about three times as fast on slow views, but not bit for bit the CPU's. Most of the image is the same; in chaotic parts of the set some pixels get other colors (as they would with any other rounding). Only used down to a zoom of about 10⁻⁹; saved images are always exact.").changed() {
+                    self.samples = None; //The samples so far were computed the other way: start again
+                    self.render(&format!("Turned fast GPU math {}", if self.fast_gpu { "on" } else { "off" }));
+                }
+                ui.indent("zoom_limit", |ui| {
+                    let response = ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.limit_zoom, "Limit the zoom to fast GPU math")).on_hover_text("Nothing deeper than a scale of about 10⁻⁹ is rendered, where the fast GPU math would switch back to exact math (renders get slower from there): zooming in, Go to view, Back and Forward and flights to deeper places are refused, and anything else (a larger window) zooms out to the limit. Off: as deep as 64-bit numbers allow.");
+                    if response.changed() && self.limit_zoom && self.zoom_refused(&self.c.clone()) {
+                        self.render("Zoomed out to the zoom limit");
+                    }
+                });
             }
             None => {
                 let text = if self.gpu_opening.is_some() { "Opening the GPU..." } else { "No GPU (see the status log)" };

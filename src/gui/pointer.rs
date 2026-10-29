@@ -74,8 +74,12 @@ impl MandelbrotApp {
                 if let Some(position) = ui.input(|input| input.pointer.hover_pos()) {
                     let (x, y) = to_buffer(position);
                     let anchor = self.displayed_plane().complex_from_pixel_plane(f64::from(x), f64::from(y)); //The point under the mouse on the screen
-                    zoom_around(&mut self.c, &anchor, factor);
-                    self.render(if zooming_in { "Zoomed in with the wheel" } else { "Zoomed out with the wheel" });
+                    let mut zoomed = self.c.clone();
+                    zoom_around(&mut zoomed, &anchor, factor);
+                    if !(zooming_in && self.zoom_refused(&zoomed)) {
+                        self.c = zoomed;
+                        self.render(if zooming_in { "Zoomed in with the wheel" } else { "Zoomed out with the wheel" });
+                    }
                 }
             }
         }

@@ -43,6 +43,8 @@ pub struct Render<'a> {
     state: Option<&'a mut SampleState>,
     gpu: Option<(&'a GpuIterator, Duration)>,
     gpu_samples: Option<&'a AtomicUsize>,
+    /// Whether the GPU uses its fast, approximate arithmetic where the view allows it, see `fast_gpu`
+    fast_gpu: bool,
     /// How many CPU threads take rows of a pass (all render threads; none in a test where the GPU computes every sample)
     cpu_threads: usize,
 }
@@ -50,7 +52,7 @@ pub struct Render<'a> {
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(u32, u32) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, state: None, gpu: None, gpu_samples: None, cpu_threads: render_thread_count() }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, state: None, gpu: None, gpu_samples: None, fast_gpu: false, cpu_threads: render_thread_count() }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -129,6 +131,14 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// With `fast`, the GPU uses double-float arithmetic (see `gpu`): about three times as fast, but not bit for bit the CPU's, so a small share of the pixels
+    /// (in chaotic parts of the set) gets other colors. Only on views where its precision is ample (`FAST_GPU_STEPS`); deeper views keep the exact f64 loop.
+    #[must_use]
+    pub const fn fast_gpu(mut self, fast: bool) -> Self {
+        self.fast_gpu = fast;
+        self
+    }
+
     /// Without CPU threads in the passes, so the GPU computes every sample (with `gpu`): to test that whole renders by the GPU are the CPU's, which a share that
     /// depends on the timing of the threads cannot show reliably
     #[cfg(test)]
@@ -152,7 +162,8 @@ impl<'a> Render<'a> {
     /// # Panics
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, state, gpu, gpu_samples, cpu_threads } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, state, gpu, gpu_samples, fast_gpu, cpu_threads } = self;
+        let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS;
         debug_assert!(cpu_threads > 0 || gpu.is_some(), "a render without CPU threads needs the GPU");
         let own_gpu_samples = AtomicUsize::new(0);
         let gpu_samples = gpu_samples.unwrap_or(&own_gpu_samples);
@@ -225,7 +236,7 @@ impl<'a> Render<'a> {
             //For the first pass that time is unknown: then the join delay decides
             let expected = time_per_sample.map(|per_sample| per_sample * u32::try_from(eligible).unwrap_or(u32::MAX));
             let pass_gpu = gpu.filter(|_| cpu_threads == 0 || expected.is_none_or(|expected| expected > GPU_WORTHWHILE))
-                .map(|(gpu, join_after)| (gpu, if expected.is_some() { Duration::ZERO } else { join_after }, gpu_samples));
+                .map(|(gpu, join_after)| (gpu, if expected.is_some() { Duration::ZERO } else { join_after }, gpu_samples, fast_gpu));
             let (pass_started, gpu_before) = (Instant::now(), gpu_samples.load(Ordering::Relaxed));
             let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
             //The time per sample of the CPU threads alone: the samples of the GPU do not count, so a pass that the GPU made short does not keep it out of the next one
@@ -260,7 +271,7 @@ impl<'a> Render<'a> {
 /// If the GPU fails, its rows are computed on the CPU and the GPU is not used for the rest of the pass.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The state of `Render::run` that a pass shares; the CPU threads and the GPU worker share its closures
 fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
-    cancel: &AtomicBool, pixels_done: &AtomicUsize, gpu: Option<(&GpuIterator, Duration, &AtomicUsize)>, cpu_threads: usize) -> usize {
+    cancel: &AtomicBool, pixels_done: &AtomicUsize, gpu: Option<(&GpuIterator, Duration, &AtomicUsize, bool)>, cpu_threads: usize) -> usize {
     let (width, height, origin) = (state.width, state.height, state.origin);
     let started = Instant::now();
     let processed = AtomicUsize::new(0);
@@ -356,7 +367,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                 thread::sleep(Duration::from_micros(50));
             });
         }
-        if let Some((gpu, join_after, gpu_samples)) = gpu.as_ref() {
+        if let Some((gpu, join_after, gpu_samples, fast)) = gpu.as_ref() {
             scope.spawn(|| {
                 //A fast pass is done before the GPU joins: then it costs nothing
                 while started.elapsed() < *join_after {
@@ -392,7 +403,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                         }).collect();
                         let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, sample, origin))).collect();
                         points_per_row = points_per_row.mul_add(0.5, points.len() as f64 / rows_in_batch as f64 * 0.5);
-                        let submitted = (!points.is_empty()).then(|| gpu.submit(m, &points)); //Rows without pixels of this pass need no dispatch
+                        let submitted = (!points.is_empty()).then(|| gpu.submit(m, &points, *fast)); //Rows without pixels of this pass need no dispatch
                         in_flight.push_back((selected, submitted, points.len()));
                     }
                     let Some((selected, submitted, count)) = in_flight.pop_front() else { break };
@@ -440,6 +451,12 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     });
     processed.into_inner()
 }
+
+/// The fast GPU arithmetic (see `Render::fast_gpu`) is only used where neighboring pixels are at least this many steps of a 64-bit number apart.
+///
+/// See `ComplexPlane::precision_steps`. Its numbers have about 48 bits instead of 53, 16 times coarser, so this is the 1024 steps where 64-bit numbers start to
+/// degrade (`PRECISION_WARNING_STEPS`) times 16. That is a scale of about 10⁻⁹ at 1200 pixels wide; deeper views use the exact loop.
+pub const FAST_GPU_STEPS: f64 = 16.0 * crate::complex_plane::PRECISION_WARNING_STEPS;
 
 /// A pass is only given to the GPU when the CPU threads alone would take longer than this for it: starting the GPU worker for a short pass costs more than it saves
 /// (measured with the refilling CPU loop: the default view at 32x adaptive took 60.6 ms with 12 ms here, 56.8 ms with 20 ms, and 56.2 ms without the GPU; 30 ms
