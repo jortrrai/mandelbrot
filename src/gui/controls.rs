@@ -172,6 +172,11 @@ impl MandelbrotApp {
                 ui.add(egui::DragValue::new(percent).range(1..=800).suffix("%")).on_hover_text("The resolution of the frames of a flight, in percent of the pixels across (type a value): below 100 the camera waits for blocks of 100 / percent pixels (33%: 3 x 3), 100 is full resolution, above 100 it waits for supersampling layers ((percent / 100)²: 200% is 4 samples per pixel, up to the quality setting)");
             }
         });
+        ui.horizontal(|ui| {
+            ui.label("Frames ahead:");
+            ui.add(egui::DragValue::new(&mut self.frames_ahead).range(0..=3)).on_hover_text("How many frames of a flight are rendered ahead of the one on the screen, so the CPU and the GPU never wait for the screen (0: one frame at a time, as before). For flights that wait for their frames (all renderings but Best effort)");
+            ui.add_enabled(self.frames_ahead > 0, egui::Checkbox::new(&mut self.even_pacing, "Even pacing")).on_hover_text("On: every frame stays on the screen for the same whole number of refreshes, chosen from how long the frames take, so the motion is even (at 60 Hz: 60, 30, 20 FPS ...). Off: every frame shows at the next refresh after it is ready, the most frames per second, but the motion can be uneven when the frames take about as long as a refresh");
+        });
         ui.add_enabled(self.blur.is_some(), egui::Checkbox::new(&mut self.auto_blur, "Auto blur during flights")).on_hover_text("While a flight moves the view, the image gets a light blur on the GPU, which brings a moving frame closer to the finished image: stronger for coarse frames, lighter for supersampled ones (σ = 0.8 × (100 / resolution in %)^0.6 pixels). The finished image at the place is never blurred.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once

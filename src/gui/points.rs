@@ -422,6 +422,8 @@ impl MandelbrotApp {
     /// With a flight rendering that waits for frames (or immersion), a job renders the frames one after the other (see `flight_job`): the camera only moves on once
     /// the frame of its current view is complete enough, and then by at most `MAX_WAITING_STEP`, so a slow view makes a slow, smooth crawl instead of jumps.
     pub(super) fn fly_at(&mut self, now: Instant) {
+        //A refresh of the screen (this runs once per frame of the window): the frame on it has stayed one more refresh (frames ahead, see `render_job::next_job_message`)
+        self.frame_hold = self.frame_hold.saturating_sub(1);
         let Some(mut flight) = self.flight.take() else { return };
         flight.update_fps(now);
         //A flight that waits for its frames is rendered by its own job, which moves the flight clock on (see `flight_job`); the window arrives when its last frame is there

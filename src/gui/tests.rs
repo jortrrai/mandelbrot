@@ -1621,3 +1621,32 @@ fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visibl
     assert_eq!(visible_part(rect(10.0, 10.0, 90.0, 90.0), rect(0.0, 0.0, 100.0, 100.0), full), Some((rect(10.0, 10.0, 90.0, 90.0), full)));
     assert_eq!(visible_part(rect(200.0, 0.0, 300.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), full), None);
 }
+
+#[test]
+fn even_pacing_keeps_a_steady_number_of_refreshes_and_goes_finer_only_with_time_to_spare() {
+    use super::flight_job::pacing;
+    let (ms, refresh) = (Duration::from_millis, Duration::from_micros(16_667));
+    assert_eq!(pacing(ms(10), refresh, 1), 1, "fits one refresh");
+    assert_eq!(pacing(ms(15), refresh, 1), 2, "15 ms needs 15% to spare: two refreshes");
+    assert_eq!(pacing(ms(40), refresh, 1), 3);
+    //Back to fewer refreshes only with 30% to spare
+    assert_eq!(pacing(ms(13), refresh, 2), 2);
+    assert_eq!(pacing(ms(12), refresh, 2), 1);
+}
+
+#[test]
+fn a_flight_with_frames_ahead_shows_its_frames_in_order_and_arrives() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::FULL_RESOLUTION;
+    (app.frames_ahead, app.even_pacing) = (2, true);
+    app.go_to_point_of_interest(0);
+    let duration = app.flight.as_ref().unwrap().flight.duration();
+    let clocks = fly_until_arrived(&mut app);
+    assert!(clocks.len() >= 3, "frames on the way: {clocks:?}");
+    assert!(clocks.windows(2).all(|pair| pair[1].0 > pair[0].0), "in order: {clocks:?}");
+    assert_eq!(clocks.last().unwrap().0, duration, "the last frame is at the destination");
+    assert!(app.flight_queue.is_empty());
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete);
+    let _ = std::fs::remove_dir_all(folder);
+}
