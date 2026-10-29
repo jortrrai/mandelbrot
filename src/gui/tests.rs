@@ -1590,3 +1590,38 @@ fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visibl
     assert_eq!(visible_part(rect(10.0, 10.0, 90.0, 90.0), rect(0.0, 0.0, 100.0, 100.0), full), Some((rect(10.0, 10.0, 90.0, 90.0), full)));
     assert_eq!(visible_part(rect(200.0, 0.0, 300.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), full), None);
 }
+
+#[test]
+fn a_finished_view_gets_its_neighborhood_which_a_small_move_keeps_and_a_zoom_renders_again() {
+    let ctx = egui::Context::default();
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    let wait_for_neighborhood = |app: &mut MandelbrotApp| {
+        let started = std::time::Instant::now();
+        app.poll_neighborhood(&ctx);
+        while app.neighborhood_job.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(30), "the neighborhood was not rendered");
+            std::thread::sleep(Duration::from_millis(2));
+            app.poll_neighborhood(&ctx);
+        }
+    };
+    wait_for_neighborhood(&mut app);
+    let neighborhood = app.neighborhood.as_ref().expect("rendered once the view was finished");
+    //Three views across and down, around the view, at half its resolution
+    assert!((neighborhood.plane().get_scale() / app.c.get_scale() - 3.0).abs() < 1e-9);
+    assert_eq!(neighborhood.texture_size(), [96, 72]);
+    assert!(super::neighborhood::still_around(neighborhood.around(), &app.c));
+    //A small move keeps it: no new job
+    let mut moved = app.c.clone();
+    rendering::move_complex_plane_by_pixels(&mut moved, 5, 10);
+    assert!(super::neighborhood::still_around(neighborhood.around(), &moved));
+    //A zoom does not; a render stops the job at once
+    let mut zoomed = app.c.clone();
+    zoomed.scale(0.5);
+    assert!(!super::neighborhood::still_around(neighborhood.around(), &zoomed));
+    app.c = zoomed;
+    app.render("Zoomed");
+    assert!(app.neighborhood_job.is_none(), "no neighborhood while a render runs");
+    wait_for_job(&mut app);
+    wait_for_neighborhood(&mut app);
+    assert!(super::neighborhood::still_around(app.neighborhood.as_ref().unwrap().around(), &app.c), "rendered again for the zoomed view");
+}

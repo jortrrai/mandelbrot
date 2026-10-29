@@ -309,6 +309,7 @@ impl MandelbrotApp {
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
     #[allow(clippy::too_many_lines)] // One place that sets up every render: its settings, its state and the thread that runs it
     pub(super) fn start_render_as(&mut self, message: &str, kind: RenderKind) {
+        self.cancel_neighborhood_job();
         self.keep_within_zoom_limit();
         let (moved, during_gesture, all_layers) = (kind.moved(), kind.passing(), kind.all_layers());
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
