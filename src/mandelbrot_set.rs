@@ -1,9 +1,16 @@
 //! The Mandelbrot set: the escape-time iteration of a point.
 //!
-//! A point is iterated alone, or four at a time in lockstep so that the CPU's vector instructions can be used. Points that are certainly inside the set are recognized
-//! early (the main cardioid and the period-two bulb, and orbits that repeat exactly). The smooth (continuous) iteration count that the coloring uses is computed here too.
+//! A point is iterated alone, or four at a time in lockstep so that the CPU's vector instructions can be used. Many points at once (`MandelbrotSet::positions`, which
+//! the renderer uses) go through a refilling loop: a lane whose point has stopped takes the next point at once, so long and short orbits do not wait for each other
+//! (with AVX2 see `avx2`). Every way gives every point the same result, bit for bit. Points that are certainly inside the set are recognized early (the main cardioid
+//! and the period-two bulb, and orbits that repeat exactly). The smooth (continuous) iteration count that the coloring uses is computed here too.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::complex::Complex;
+
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 
 /// The Mandelbrot set as a computation: the maximum iterations and the orbit radius, with the escape-time iteration of a point and the coloring options of the renderer
 #[derive(Clone)]
@@ -36,6 +43,9 @@ struct LaneResult {
 
 /// `iterate_lanes` checks whether every point has stopped after this many steps
 pub(crate) const CHECK_INTERVAL: u32 = 4;
+
+/// The lanes of `MandelbrotSet::positions`: several vectors of 4 that the CPU computes at the same time, so it does not wait for the result of one step before the next
+const STREAM_LANES: usize = 4;
 
 impl MandelbrotSet {
     /// Creates the set with `max_iterations` and `orbit_radius`; smooth coloring is on and there is no palette scale
@@ -334,6 +344,135 @@ impl MandelbrotSet {
         *out = LaneResult { iterations, escaped, escape_x, escape_y };
     }
 
+    /// The position (see `position`) of every point of `points` into `out`, exactly `position_lanes` and `position` give it, but faster: a lane whose point has
+    /// stopped takes the next point at once instead of waiting for the others (the refill). Every lane keeps its own step and cycle detection, so every point gets
+    /// exactly the arithmetic of the lockstep loop, from the same start. With AVX2 see `avx2`; otherwise `positions_generic`.
+    ///
+    /// With `cancel`, it stops soon after `cancel` is set and returns how many points from the start of `points` have their position in `out`; without, all of them.
+    pub fn positions(&self, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+        debug_assert_eq!(points.len(), out.len());
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                //SAFETY: the CPU supports AVX2, which was just detected
+                return unsafe { avx2::positions(self, points, out, cancel) };
+            }
+        }
+        self.positions_generic(points, out, cancel)
+    }
+
+    /// The refilling loop of `positions`. After every block of `CHECK_INTERVAL` steps, a lane is done when its point escaped in the block (`z` at the end of the
+    /// block gives the smooth position, like in the lockstep loop), when its orbit repeats (Brent's cycle detection, with its own counters), or when it has no whole
+    /// block left before `max_iterations`: then the last steps are done by `finish_alone`, exactly like the last, shorter block of the lockstep loop.
+    // Exact comparison of floats is the cycle certificate (an orbit that repeats bit for bit); inline(always) puts the loop into the AVX2 copy
+    #[allow(clippy::float_cmp, clippy::inline_always)]
+    #[inline(always)]
+    fn positions_generic(&self, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+        const IDLE: usize = usize::MAX;
+        let max = self.max_iterations;
+        //A lane at this step or later has no whole block left
+        let last_whole = max - max % CHECK_INTERVAL;
+        let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
+        let (mut cx, mut cy, mut zx, mut zy) = ([0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES]);
+        let (mut saved_x, mut saved_y) = ([0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES]);
+        let (mut iterations, mut active) = ([0_u32; STREAM_LANES], [false; STREAM_LANES]);
+        //The blocks of steps every lane has done
+        let mut blocks = [0_u32; STREAM_LANES];
+        let last_whole_block = last_whole / CHECK_INTERVAL;
+        let mut index = [IDLE; STREAM_LANES];
+        let mut next = 0;
+        //Puts the next point that needs the loop into `lane` (points in the cardioid or the period-2 bulb get their position at once), or makes the lane idle
+        let load = |lane: usize, next: &mut usize, index: &mut [usize; STREAM_LANES], cx: &mut [f64; STREAM_LANES], cy: &mut [f64; STREAM_LANES], out: &mut [f64]| {
+            while *next < points.len() {
+                let (at, c) = (*next, &points[*next]);
+                *next += 1;
+                if last_whole == 0 || self.is_known_interior(c) {
+                    out[at] = self.position(c); //Fewer steps than a block (the lockstep loop is the same as the single one then), or inside the set
+                    continue;
+                }
+                (index[lane], cx[lane], cy[lane]) = (at, c.x, c.y);
+                return true;
+            }
+            (index[lane], cx[lane], cy[lane]) = (IDLE, 0.0, 0.0); //An idle lane iterates 0, which stays 0
+            false
+        };
+        let mut live = 0;
+        for lane in 0..STREAM_LANES {
+            if load(lane, &mut next, &mut index, &mut cx, &mut cy, out) {
+                (zx[lane], zy[lane], saved_x[lane], saved_y[lane], iterations[lane], active[lane], blocks[lane]) = (0.0, 0.0, 0.0, 0.0, 0, true, 0);
+                live += 1;
+            }
+        }
+        while live > 0 {
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+                //Every point before the first one that a lane still has (and before `next`) is done
+                return index.iter().copied().filter(|at| *at != IDLE).min().unwrap_or(next).min(next);
+            }
+            for _ in 0..CHECK_INTERVAL {
+                for lane in 0..STREAM_LANES {
+                    //Same arithmetic as z = z.squared().add(c)
+                    let new_x = zx[lane] * zx[lane] - zy[lane] * zy[lane] + cx[lane];
+                    let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
+                    (zx[lane], zy[lane]) = (new_x, new_y);
+                    let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
+                    active[lane] &= !escaped;
+                    iterations[lane] += u32::from(active[lane]);
+                }
+            }
+            //Which lanes are done: stopped in this block, a repeating orbit, or no whole block left. The others keep their cycle detection like the lockstep loop,
+            //which saves z after 1, 3, 7, 15, ... blocks (the gap doubles): after `blocks` blocks when `blocks + 1` is a power of two
+            let mut any_done = false;
+            let mut repeats = [false; STREAM_LANES];
+            for lane in 0..STREAM_LANES {
+                blocks[lane] += 1;
+                repeats[lane] = active[lane] && zx[lane] == saved_x[lane] && zy[lane] == saved_y[lane];
+                any_done |= index[lane] != IDLE && (!active[lane] || repeats[lane] || blocks[lane] >= last_whole_block);
+                let save = blocks[lane] & (blocks[lane] + 1) == 0;
+                saved_x[lane] = if save { zx[lane] } else { saved_x[lane] };
+                saved_y[lane] = if save { zy[lane] } else { saved_y[lane] };
+            }
+            if !any_done {
+                continue;
+            }
+            for lane in 0..STREAM_LANES {
+                let at = index[lane];
+                if at == IDLE || (active[lane] && !repeats[lane] && blocks[lane] < last_whole_block) {
+                    continue;
+                }
+                let c = Complex::new(cx[lane], cy[lane]);
+                out[at] = if !active[lane] {
+                    self.position_after_loop(iterations[lane], true, (zx[lane], zy[lane]), &c) //Escaped in this block
+                } else if repeats[lane] {
+                    f64::from(max)
+                } else {
+                    self.finish_alone(blocks[lane] * CHECK_INTERVAL, iterations[lane], (zx[lane], zy[lane]), &c)
+                };
+                if load(lane, &mut next, &mut index, &mut cx, &mut cy, out) {
+                    (zx[lane], zy[lane], saved_x[lane], saved_y[lane], iterations[lane], active[lane], blocks[lane]) = (0.0, 0.0, 0.0, 0.0, 0, true, 0);
+                } else {
+                    (zx[lane], zy[lane], active[lane]) = (0.0, 0.0, false);
+                    live -= 1;
+                }
+            }
+        }
+        points.len()
+    }
+
+    /// The position of a point that has not stopped after `steps` steps (`iterations` of them counted, `z` the value after them) and has fewer than a whole block of
+    /// steps left: the last, shorter block of the lockstep loop, for this point alone
+    fn finish_alone(&self, steps: u32, iterations: u32, z: (f64, f64), c: &Complex) -> f64 {
+        let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
+        let ((mut zx, mut zy), mut iterations, mut active) = (z, iterations, true);
+        for _ in steps..self.max_iterations {
+            let new_x = zx * zx - zy * zy + c.x;
+            let new_y = 2.0 * zx * zy + c.y;
+            (zx, zy) = (new_x, new_y);
+            active &= (new_x * new_x + new_y * new_y) <= orbit_radius_squared;
+            iterations += u32::from(active);
+        }
+        self.position_after_loop(iterations, !active, (zx, zy), c)
+    }
+
     /// Returns true only if `c` is certainly inside the main cardioid or the period-two bulb, so `c` never escapes.
     /// Conservative: the boundaries are shrunk by `MARGIN`, so points near them fall back to the escape loop.
     /// Only valid for `orbit_radius >= 2.0`, since orbits of points inside the set stay within radius 2, but may leave a smaller radius.
@@ -497,6 +636,51 @@ mod tests {
         let center = Complex::new(-0.12256116687665362, 0.7448617666197442);
         let points: [Complex; LANES] = std::array::from_fn(|_| Complex::new(center.x, center.y));
         assert_eq!(m.iterate_lanes(&points), [3000; LANES]);
+    }
+
+    /// `positions` (the refilling loop) must give exactly the positions of `position_lanes` (the lockstep loop), bit for bit, for any mix of points, any limit
+    /// (also limits that are not a multiple of the block of steps, and below it), orbit radius, and smooth or integer coloring, and any number of points
+    #[test]
+    fn positions_match_the_lockstep_loop_bit_for_bit() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let views = [(-0.75, 0.0, 1.25), (-0.7498100000000001, -0.0203, 0.00008), (-1.7862712, 0.0000524, 0.00002), (0.9, 0.9, 0.4), (-0.12256116687665362, 0.7448617666197442, 0.02), (-1.3107, 0.0, 0.05)];
+        for max_iterations in [0, 1, 3, 4, 5, 7, 100, 321, 1000, 3001] {
+            for orbit_radius in [2.0, 4.0, 1.0] {
+                for smooth in [true, false] {
+                    let mut m = MandelbrotSet::new(max_iterations, orbit_radius);
+                    m.smooth_coloring = smooth;
+                    for (x, y, half) in views {
+                        let count = rng.gen_range(0..300);
+                        let points: Vec<Complex> = (0..count).map(|_| Complex::new(x + (rng.gen::<f64>() - 0.5) * 2.0 * half, y + (rng.gen::<f64>() - 0.5) * 2.0 * half)).collect();
+                        let expected: Vec<u64> = points.chunks(LANES)
+                            .flat_map(|group| <&[Complex; LANES]>::try_from(group).map_or_else(|_| group.iter().map(|c| m.position(c)).collect(), |group| m.position_lanes(group).to_vec()))
+                            .map(f64::to_bits).collect();
+                        //The AVX2 loop where the CPU has it, and the generic loop
+                        for generic in [false, true] {
+                            let mut out = vec![f64::NAN; points.len()];
+                            let done = if generic { m.positions_generic(&points, &mut out, None) } else { m.positions(&points, &mut out, None) };
+                            assert_eq!(done, points.len());
+                            let differ = out.iter().zip(&expected).position(|(a, b)| a.to_bits() != *b);
+                            assert!(differ.is_none(), "generic = {generic}, max_iterations = {max_iterations}, orbit_radius = {orbit_radius}, smooth = {smooth}, point {:?}: {} instead of {}",
+                                differ.map(|at| (points[at].x, points[at].y)), differ.map_or(0.0, |at| out[at]), differ.map_or(0.0, |at| f64::from_bits(expected[at])));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A cancelled `positions` returns how many points from the start have their position, and those are right
+    #[test]
+    fn cancelled_positions_are_a_complete_prefix() {
+        let m = MandelbrotSet::new(100_000, 2.0);
+        let points: Vec<Complex> = (0..400).map(|i| Complex::new(-0.75 + f64::from(i) * 1e-4, 0.1 + f64::from(i % 7) * 1e-3)).collect();
+        let cancel = AtomicBool::new(true);
+        let mut out = vec![f64::NAN; points.len()];
+        let done = m.positions(&points, &mut out, Some(&cancel));
+        assert!(done < points.len(), "cancelled at once: {done}");
+        assert!(out[..done].iter().zip(&points).all(|(position, c)| position.to_bits() == m.position(c).to_bits()));
     }
 
     fn test_points() -> Vec<Complex> {
