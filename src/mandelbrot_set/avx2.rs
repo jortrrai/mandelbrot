@@ -36,11 +36,11 @@ const LANE_MASKS: [[i64; 4]; 16] = {
     masks
 };
 
-/// `MandelbrotSet::positions` with AVX2, see the module
+/// `MandelbrotSet::positions` with AVX2, see the module; with `wide` the refilling loop steps 3 vectors instead of 2 (see `refill_wide`)
 /// # Safety
-/// The CPU must support AVX2
+/// The CPU must support AVX2, and with `wide` AVX-512F and AVX-512VL
 #[target_feature(enable = "avx2")]
-pub(super) unsafe fn positions(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+pub(super) unsafe fn positions(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>, wide: bool) -> usize {
     let cancelled = || cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed));
     let (groups, _) = points.as_chunks::<LANES>();
     let mut start = 0;
@@ -55,22 +55,44 @@ pub(super) unsafe fn positions(m: &MandelbrotSet, points: &[Complex], out: &mut 
             break;
         }
     }
-    //SAFETY: the caller's CPU supports AVX2
-    start + unsafe { refill(m, &points[start..], &mut out[start..], cancel) }
+    //SAFETY: the caller's CPU supports AVX2, and AVX-512 with `wide`
+    start + unsafe { if wide { refill_wide(m, &points[start..], &mut out[start..], cancel) } else { refill_avx2(m, &points[start..], &mut out[start..], cancel) } }
 }
 
-/// The vectors of four lanes that the refilling loop steps together: independent of each other, so the CPU works on one while it waits for the result of the other
-/// (measured on Seahorse Valley at 1x: 103 ms with one vector, 94 ms with two, 90 ms with three, which needs more than the 16 AVX2 registers)
-const VECTORS: usize = 2;
+/// The most vectors of four lanes that `refill` steps together, see `refill_avx2` and `refill_wide`
+const MAX_VECTORS: usize = 3;
 
-/// The refilling loop over all of `points`; returns how many points from the start have their position, like `MandelbrotSet::positions`
+/// The refilling loop with 2 vectors of four lanes, stepped together: independent of each other, so the CPU works on one while it waits for the result of the
+/// other (measured on Seahorse Valley at 1x: 103 ms with one vector, 94 ms with two; three need more than the 16 AVX2 registers, see `refill_wide`)
 /// # Safety
 /// The CPU must support AVX2
 #[target_feature(enable = "avx2")]
-#[allow(clippy::float_cmp, clippy::too_many_lines, clippy::cast_ptr_alignment)] // The cycle certificate compares floats exactly; one loop with its lane bookkeeping; unaligned loads and stores
-unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+unsafe fn refill_avx2(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+    //SAFETY: the caller's CPU supports AVX2
+    unsafe { refill::<2>(m, points, out, cancel) }
+}
+
+/// The refilling loop with 3 vectors, for a CPU with AVX-512: the same AVX2 instructions, but with its 32 vector registers the third vector fits without spilling
+/// (measured on Seahorse Valley at 1x on a Ryzen 7 7800X3D: 83 ms instead of 92 ms with 2 vectors; 4 vectors took 86 ms). The same positions, bit for bit
+/// # Safety
+/// The CPU must support AVX2, AVX-512F and AVX-512VL
+#[target_feature(enable = "avx2,avx512f,avx512vl")]
+unsafe fn refill_wide(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+    //SAFETY: the caller's CPU supports AVX2 and AVX-512
+    unsafe { refill::<3>(m, points, out, cancel) }
+}
+
+/// The refilling loop over all of `points` with `VECTORS` vectors of four lanes (at most `MAX_VECTORS`); returns how many points from the start have their
+/// position, like `MandelbrotSet::positions`. Always inlined, into `refill_avx2` and `refill_wide`, which compile it with their instructions
+/// # Safety
+/// The CPU must support AVX2
+#[inline(always)]
+#[allow(clippy::float_cmp, clippy::too_many_lines, clippy::cast_ptr_alignment, clippy::inline_always)] // The cycle certificate compares floats exactly; one loop with its lane bookkeeping; unaligned loads and stores; inlined into the copies with their instructions
+unsafe fn refill<const VECTORS: usize>(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
     const IDLE: usize = usize::MAX;
-    const LANES_IN_ALL: usize = 4 * VECTORS;
+    //The lanes of the arrays below that are used (the arrays have room for `MAX_VECTORS` vectors)
+    const LANES_IN_ALL: usize = 4 * MAX_VECTORS;
+    let lanes_used = 4 * VECTORS;
     let max = m.max_iterations;
     let last_whole = max - max % CHECK_INTERVAL;
     if last_whole == 0 {
@@ -103,7 +125,7 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
         None
     };
     let mut lanes_live = 0;
-    for lane in 0..LANES_IN_ALL {
+    for lane in 0..lanes_used {
         if let Some((at, x, y)) = take(&mut next, out) {
             (index[lane], cx[lane], cy[lane], live[lane]) = (at, x, y, -1);
             lanes_live += 1;
