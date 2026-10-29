@@ -383,8 +383,8 @@ fn the_application_lists_the_points_of_interest_of_the_folder_at_startup() {
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     assert_eq!(app.points.len(), 11, "the reset view and the ten former views are found without a list of file names in the code");
-    assert_eq!((app.points[0].name.as_str(), app.points[1].name.as_str(), app.points[10].name.as_str()), ("Reset View", "Frost on the Shoreline", "Sunlit Reef"), "the reset view first, then the former View 1, and View 10 (VIEW_0) last");
-    assert!(app.points.windows(2).all(|pair| pair[0].file_name.to_lowercase() <= pair[1].file_name.to_lowercase()), "listed by file name");
+    assert_eq!((app.points[0].name.as_str(), app.points[1].name.as_str(), app.points[10].name.as_str()), ("Reset View", "Frost on the Shoreline", "Sunlit Reef"), "the reset view first, the deepest place (Sunlit Reef) last");
+    assert!(app.points.windows(2).all(|pair| pair[0].location.scale >= pair[1].location.scale), "listed by zoom, the shallowest first");
     assert!(app.log.iter().any(|message| message.starts_with("Points of interest: 11 loaded from")));
     assert!(!app.restore_appearance);
 }
@@ -1267,7 +1267,7 @@ fn the_current_view_can_be_saved_as_a_point_of_interest() {
     app.save_new_point();
     assert_eq!(app.points.len(), 1);
     assert!(app.new_point.is_some());
-    //With a name: a new file, listed last, at exactly this view
+    //With a name: a new file, listed at its zoom, at exactly this view
     app.new_point = Some((String::from(" My Place "), String::new()));
     app.save_new_point();
     assert!(app.new_point.is_none(), "the form closes");
