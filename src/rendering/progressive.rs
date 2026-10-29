@@ -186,7 +186,12 @@ impl<'a> Render<'a> {
         let state: &mut SampleState = state.unwrap_or_else(|| own_state.insert(SampleState::for_one_render(width, height, region, base, adaptive.is_some())));
         //Where the samples are placed: the view where the samples of the state started, or this view
         let (anchor, origin) = (state.anchor.clone().unwrap_or_else(|| c.clone()), state.origin);
-        let mut colors: Vec<TrueColor> = base.map_or_else(|| vec![TrueColor::new(0, 0, 0); width * height], <[TrueColor]>::to_vec);
+        let mut colors = std::mem::take(&mut state.colors);
+        colors.clear();
+        match base {
+            Some(base) => colors.extend_from_slice(base),
+            None => colors.resize(width * height, TrueColor::new(0, 0, 0)),
+        }
         //How many pixels of the render have each amount of samples, to know how many pixels a pass computes
         let mut pending = [0_usize; 66];
         if empty {
@@ -207,7 +212,10 @@ impl<'a> Render<'a> {
                     pending[0] -= count;
                     pending[1] += count;
                 }
-                None => return false,
+                None => {
+                    state.colors = colors;
+                    return false;
+                }
             }
         }
         let mut mask: Option<Vec<bool>> = None;
@@ -245,6 +253,7 @@ impl<'a> Render<'a> {
                 time_per_sample = Some(pass_started.elapsed() / u32::try_from(on_cpu).unwrap_or(u32::MAX));
             }
             if cancel.load(Ordering::Relaxed) {
+                state.colors = colors;
                 return false;
             }
             pending[index] -= processed;
@@ -255,6 +264,7 @@ impl<'a> Render<'a> {
             }
             on_pass(&colors, sample + 1);
         }
+        state.colors = colors;
         true
     }
 }
@@ -407,6 +417,9 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                         in_flight.push_back((selected, submitted, points.len()));
                     }
                     let Some((selected, submitted, count)) = in_flight.pop_front() else { break };
+                    if cancel.load(Ordering::Relaxed) {
+                        return; //Not waiting for the dispatches on the GPU: their rows keep the samples they had, like a row the CPU stops in
+                    }
                     let outcomes = submitted.map_or_else(|| Ok(Vec::new()), |submitted| submitted.and_then(|submitted| gpu.finish(submitted)));
                     gpu_works = outcomes.is_ok();
                     if gpu_works {
@@ -661,14 +674,16 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
         if remaining <= worthwhile {
             break;
         }
-        fill_blocks(width, block, state, &has_first, &representatives, colors);
+        fill_blocks(width, block, state, &has_first, &representatives, colors, empty == state.counts.len());
         on_pass(colors, 0);
     }
     Some((has_first, precomputed))
 }
 
-/// Gives every pixel without samples (and every pixel the previews computed) the color of the representative of its `block` x `block` block, see `render_previews`
-fn fill_blocks(width: usize, block: usize, state: &SampleState, has_first: &[bool], representatives: &[Option<usize>], colors: &mut [TrueColor]) {
+/// Gives every pixel without samples (and every pixel the previews computed) the color of the representative of its `block` x `block` block, see `render_previews`.
+/// In a render from nothing (`from_nothing`) that is every pixel, so a row is filled block by block without looking at its pixels (measured at 3840 x 2160: 2.4 ms
+/// for a level pixel by pixel)
+fn fill_blocks(width: usize, block: usize, state: &SampleState, has_first: &[bool], representatives: &[Option<usize>], colors: &mut [TrueColor], from_nothing: bool) {
     let across = width.div_ceil(block);
     let rows = Mutex::new(colors.chunks_mut(width).enumerate());
     thread::scope(|scope| {
@@ -677,6 +692,14 @@ fn fill_blocks(width: usize, block: usize, state: &SampleState, has_first: &[boo
                 let next_row = rows.lock().unwrap().next();
                 let Some((y, row)) = next_row else { return };
                 let band = (y / block) * across;
+                if from_nothing {
+                    for (segment, representative) in row.chunks_mut(block).zip(&representatives[band..band + across]) {
+                        if let Some(representative) = representative {
+                            segment.fill(sum_color(state.sums[*representative]));
+                        }
+                    }
+                    continue;
+                }
                 for (x, color) in row.iter_mut().enumerate() {
                     let index = y * width + x;
                     if state.counts[index] == 0 || has_first[index] {
