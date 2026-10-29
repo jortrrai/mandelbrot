@@ -285,7 +285,7 @@ impl MandelbrotApp {
         //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
         let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
         let preview = (!layer_on_screen && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
-        let gpu = self.gpu.clone().filter(|_| self.use_gpu);
+        let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let pixels_done = Arc::new(AtomicUsize::new(0));
@@ -325,7 +325,7 @@ impl MandelbrotApp {
             }
             let mut layer_started = started;
             let mut reported = false;
-            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
+            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).fast_gpu(fast_gpu).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 p.colors.copy_from_slice(colors);
                 reported = true;

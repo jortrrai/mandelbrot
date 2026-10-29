@@ -187,6 +187,8 @@ pub struct MandelbrotApp {
     /// The GPU that helps with rendering once it is opened and checked (see `rendering::gpu`), whether to use it, and where the result of opening it arrives
     gpu: Option<std::sync::Arc<rendering::gpu::GpuIterator>>,
     use_gpu: bool,
+    /// Whether the GPU uses its fast double-float loop (off by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
+    fast_gpu: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
 }
 
@@ -262,6 +264,7 @@ impl MandelbrotApp {
             notices,
             gpu: None,
             use_gpu: true,
+            fast_gpu: false,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
                 let (sender, receiver) = mpsc::channel();

@@ -229,6 +229,11 @@ impl MandelbrotApp {
                 if ui.checkbox(&mut self.use_gpu, "Use the GPU").on_hover_text(format!("{} helps with the slow parts of a render. It computes bit for bit the same samples as the CPU (checked when the window opened), so the image is the same.", gpu.name())).changed() {
                     self.log(format!("Turned the GPU {}", if self.use_gpu { "on" } else { "off" }));
                 }
+                let response = ui.add_enabled(self.use_gpu, egui::Checkbox::new(&mut self.fast_gpu, "Fast GPU math"));
+                if response.on_hover_text("The GPU computes with pairs of 32-bit numbers instead of 64-bit numbers: about three times as fast on slow views, but not bit for bit the CPU's. Most of the image is the same; in chaotic parts of the set some pixels get other colors (as they would with any other rounding). Only used down to a zoom of about 10⁻⁹; saved images are always exact.").changed() {
+                    self.samples = None; //The samples so far were computed the other way: start again
+                    self.render(&format!("Turned fast GPU math {}", if self.fast_gpu { "on" } else { "off" }));
+                }
             }
             None => {
                 let text = if self.gpu_opening.is_some() { "Opening the GPU..." } else { "No GPU (see the status log)" };

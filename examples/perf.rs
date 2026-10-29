@@ -210,11 +210,15 @@ fn main() {
                         }); });
                         out
                     };
-                    let (on_cpu, on_gpu) = (cpu(&points), gpu.positions(&m, &points).expect("the GPU"));
+                    let (on_cpu, on_gpu) = (cpu(&points), gpu.positions(&m, &points, false).expect("the GPU"));
                     let same = on_cpu.iter().zip(&on_gpu).all(|(a, b)| a.to_bits() == b.to_bits());
                     summarize(&format!("{name} ({max_iterations} it), CPU all threads"), time_runs(runs, || { std::hint::black_box(cpu(&points)); }));
-                    summarize(&format!("{name} ({max_iterations} it), GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points).expect("the GPU")); }));
+                    summarize(&format!("{name} ({max_iterations} it), GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points, false).expect("the GPU")); }));
                     println!("{:<44} the same positions bit for bit: {same}", "");
+                    let fast = gpu.positions(&m, &points, true).expect("the GPU");
+                    let differ = on_cpu.iter().zip(&fast).filter(|(a, b)| a.floor().to_bits() != b.floor().to_bits()).count();
+                    summarize(&format!("{name} ({max_iterations} it), fast GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points, true).expect("the GPU")); }));
+                    println!("{:<44} other iteration counts: {:.3}%", "", differ as f64 * 100.0 / points.len() as f64);
                 }
                 //Whole renders: the CPU threads alone, and with the GPU joining the first pass after 3 ms, like the window (`GPU_JOIN_AFTER`)
                 let join = Some((&gpu, Duration::from_millis(3)));
@@ -229,15 +233,19 @@ fn main() {
                     c.set_view(&view);
                     let m = MandelbrotSet::new(max_iterations, 2.0);
                     let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
-                    let render = |gpu: Option<(&rendering::gpu::GpuIterator, Duration)>| {
+                    let render = |gpu: Option<(&rendering::gpu::GpuIterator, Duration)>, fast: bool| {
                         let mut last = Vec::new();
-                        Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).gpu(gpu).run(|colors, _| last = colors.to_vec());
+                        Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).gpu(gpu).fast_gpu(fast).run(|colors, _| last = colors.to_vec());
                         last
                     };
-                    let same = render(None).iter().zip(&render(join)).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue));
-                    summarize(&format!("render {name}, CPU"), time_runs(runs, || { std::hint::black_box(render(None)); }));
-                    summarize(&format!("render {name}, CPU + GPU"), time_runs(runs, || { std::hint::black_box(render(join)); }));
+                    let on_cpu = render(None, false);
+                    let same = on_cpu.iter().zip(&render(join, false)).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue));
+                    summarize(&format!("render {name}, CPU"), time_runs(runs, || { std::hint::black_box(render(None, false)); }));
+                    summarize(&format!("render {name}, CPU + GPU"), time_runs(runs, || { std::hint::black_box(render(join, false)); }));
                     println!("{:<44} the same image: {same}", "");
+                    let differ = on_cpu.iter().zip(&render(join, true)).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+                    summarize(&format!("render {name}, CPU + fast GPU"), time_runs(runs, || { std::hint::black_box(render(join, true)); }));
+                    println!("{:<44} other colors: {:.3}% of the pixels", "", differ as f64 * 100.0 / on_cpu.len() as f64);
                 }
                 //Saving an image of 1920 x 1080 at 4x (the save path, with the GPU from the start of every pass)
                 let mut c = ComplexPlane::new(1920, 1080);
