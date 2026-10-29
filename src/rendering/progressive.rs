@@ -264,7 +264,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     let (width, height, origin) = (state.width, state.height, state.origin);
     let started = Instant::now();
     let processed = AtomicUsize::new(0);
-    let divisor = u32::from(sample) + 1;
+    let divide = divider(u32::from(sample) + 1);
     let skip_first = sample == 0 && !has_first.is_empty();
     //The pixels of row `y` that get this sample
     let select = |y: usize, counts: &[u8]| -> Vec<usize> {
@@ -276,23 +276,21 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     };
     //Adds the samples at `positions` of the pixels `xs` of a row, and updates its running averages and counts: the same for the CPU threads and the GPU
     let apply = |y: usize, row: &mut [[u32; 3]], counts: &mut [u8], first: &mut [TrueColor], second: &mut [TrueColor], color_row: &mut [TrueColor], xs: &[usize], positions: &[f64]| {
+        let xs = &xs[..positions.len()];
         for (x, position) in xs.iter().zip(positions) {
             let color = color_of(*position);
             let sum = &mut row[*x];
-            if sample == 0 {
-                //The first sample replaces the sum, so a state that starts over does not have to clear its sums
+            //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
+            let color = if sample == 0 {
+                //The first sample replaces the sum, so a state that starts over does not have to clear its sums; the average of one sample is the sample
                 *sum = [u32::from(color.red), u32::from(color.green), u32::from(color.blue)];
+                color
             } else {
                 sum[0] += u32::from(color.red);
                 sum[1] += u32::from(color.green);
                 sum[2] += u32::from(color.blue);
-            }
-        }
-        let xs = &xs[..positions.len()];
-        //The running average of all samples so far, computed here on the thread of the row instead of after the pass on a single thread
-        for x in xs {
-            let sum = row[*x];
-            let color = TrueColor::new((sum[0] / divisor) as u8, (sum[1] / divisor) as u8, (sum[2] / divisor) as u8);
+                TrueColor::new(divide(sum[0]) as u8, divide(sum[1]) as u8, divide(sum[2]) as u8)
+            };
             color_row[*x] = color;
             if track {
                 counts[*x] = sample + 1;
@@ -530,13 +528,20 @@ fn rows_or_empty<T>(grid: &mut [T], width: usize, height: usize) -> Vec<&mut [T]
     if grid.is_empty() { (0..height).map(|_| <&mut [T]>::default()).collect() } else { grid.chunks_mut(width).collect() }
 }
 
+/// Division by `divisor` (1 to 65, the samples of a pixel) as a multiplication, exactly `sum / divisor` for every sum of up to 65 colors (at most 255 * 65):
+/// with `m = ceil(2^32 / divisor)`, `(sum * m) >> 32` errs by less than `sum * divisor / 2^32`, far below the gap to the next multiple of `divisor` (tested for every case)
+pub(super) fn divider(divisor: u32) -> impl Fn(u32) -> u32 {
+    let multiplier = (1_u64 << 32).div_ceil(u64::from(divisor));
+    move |sum| ((u64::from(sum) * multiplier) >> 32) as u32
+}
+
 /// The average color of `count` samples whose colors add up to `sum`
 fn average(sum: [u32; 3], count: u8) -> TrueColor {
     let count = u32::from(count);
     TrueColor::new((sum[0] / count) as u8, (sum[1] / count) as u8, (sum[2] / count) as u8)
 }
 
-/// Computes the position (smooth iteration count) of sample `sample` of the pixels `xs` of row `y` and gives each to `sink`: `LANES` pixels at the same time, the remaining pixels one by one.
+/// Computes the position (smooth iteration count) of sample `sample` of the pixels `xs` of row `y` and gives each to `sink`, see `MandelbrotSet::positions`.
 /// A pixel is pixel `(x + origin.0, y + origin.1)` of `anchor`, which places its samples and keys their jitter, see `SampleState`.
 ///
 /// With `cancel`, it stops between groups once `cancel` is set, and returns how many of `xs` (from the start) it gave to `sink`; without, it does all of them.
