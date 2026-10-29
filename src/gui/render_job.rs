@@ -131,6 +131,9 @@ impl MandelbrotApp {
                     let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::FullResolution } else { Readiness::Complete };
                     //(a layer that is held back still counts for the progress bar below)
                     if readiness >= self.required_readiness() {
+                        if let (false, Some(flight)) = (self.frame_accepted, &mut self.flight) {
+                            flight.frames.push(Instant::now()); //A new frame of the flight (not a finer image of the same view), for its frame rate
+                        }
                         self.frame_ready = true;
                         self.frame_accepted = true;
                         self.p.colors = colors;
@@ -164,7 +167,8 @@ impl MandelbrotApp {
                 Ok(JobMessage::Done { c, p, m, message, elapsed, completed, reported }) => {
                     self.job = None;
                     self.limit_pending = false;
-                    self.m = m; //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept
+                    //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
+                    self.m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring, ..m };
                     self.buffer_is_complete = completed && self.settle.is_none(); //A render during a gesture has only the first layer
                     self.layer_shown |= completed;
                     if self.progress.take().is_some() {
