@@ -240,7 +240,9 @@ impl MandelbrotApp {
     ///
     /// Every render continues the samples of the render before it (`SampleState`): the job waits for the state of the job it interrupts, which keeps everything that
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
+    #[allow(clippy::too_many_lines)] // One place that sets up every render: its settings, its state and the thread that runs it
     pub(super) fn start_render_as(&mut self, message: &str, kind: RenderKind) {
+        self.keep_within_zoom_limit();
         let (moved, during_gesture, all_layers) = (kind.moved(), kind.passing(), kind.all_layers());
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
         self.interrupt_progressive_render();

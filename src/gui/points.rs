@@ -352,6 +352,11 @@ impl MandelbrotApp {
         let center = self.c.center();
         let from = Camera { x: center.x, y: center.y, scale: self.c.get_scale() };
         let to = Camera { x: point.location.real, y: point.location.imaginary, scale: point.location.scale };
+        let mut destination = self.c.clone();
+        destination.set_view(&View::new(to.x, to.y, to.scale));
+        if self.zoom_refused(&destination) {
+            return; //Deeper than the zoom limit: no flight
+        }
         let flight = Flight::new(from, to, self.pace);
         self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| self.flight_limits(to));

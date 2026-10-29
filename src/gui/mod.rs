@@ -190,7 +190,7 @@ pub struct MandelbrotApp {
     use_gpu: bool,
     /// Whether the GPU uses its fast double-float loop (on by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
     fast_gpu: bool,
-    /// Whether zooming in stops where the fast GPU math ends (on by default), see `zoom_refused`
+    /// Whether nothing deeper than the fast GPU math is rendered (on by default), see `zoom_refused` and `keep_within_zoom_limit`
     limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
 }
@@ -300,6 +300,18 @@ impl MandelbrotApp {
             self.log(ZOOM_LIMIT_TEXT);
         }
         true
+    }
+
+    /// Keeps the view within the zoom limit (see `zoom_refused`) whatever led past it (a larger window, the limit or the fast GPU math switched on at a deep view):
+    /// zooms out around the center to the limit, with the warning. Every render starts with this, so nothing deeper is ever rendered while the limit is on
+    pub(super) fn keep_within_zoom_limit(&mut self) {
+        for _ in 0..64 {
+            if !self.zoom_refused(&self.c.clone()) {
+                return;
+            }
+            let factor = rendering::FAST_GPU_STEPS / self.c.precision_steps().max(f64::MIN_POSITIVE);
+            self.c.scale(factor.clamp(1.0, 1e6) * 1.001);
+        }
     }
 
     pub(super) fn log(&mut self, message: impl Into<String>) {

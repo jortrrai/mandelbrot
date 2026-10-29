@@ -238,7 +238,10 @@ impl MandelbrotApp {
                     self.render(&format!("Turned fast GPU math {}", if self.fast_gpu { "on" } else { "off" }));
                 }
                 ui.indent("zoom_limit", |ui| {
-                    ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.limit_zoom, "Limit the zoom to fast GPU math")).on_hover_text("Zooming in stops at a scale of about 10⁻⁹, where the fast GPU math switches back to exact math (renders get slower from there). Off: zoom in as far as 64-bit numbers allow.");
+                    let response = ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.limit_zoom, "Limit the zoom to fast GPU math")).on_hover_text("Nothing deeper than a scale of about 10⁻⁹ is rendered, where the fast GPU math would switch back to exact math (renders get slower from there): zooming in, Go to view, Back and Forward and flights to deeper places are refused, and anything else (a larger window) zooms out to the limit. Off: as deep as 64-bit numbers allow.");
+                    if response.changed() && self.limit_zoom && self.zoom_refused(&self.c.clone()) {
+                        self.render("Zoomed out to the zoom limit");
+                    }
                 });
             }
             None => {

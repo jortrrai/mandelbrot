@@ -1416,3 +1416,41 @@ fn a_flight_counts_its_frames_shows_the_frame_rate_and_logs_the_average() {
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn nothing_beyond_the_zoom_limit_is_rendered_whatever_leads_there() {
+    const DEEP_PLACE: &str = r#"{ "format_version": 1, "name": "Deep Place", "location": { "center": { "real": -0.743643887037151, "imaginary": 0.13182590420533 }, "scale": 1e-11, "max_iterations": 500 } }"#;
+    let (mut app, folder) = app_with_points(&[("deep-place.json", DEEP_PLACE)]);
+    let deep = View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-11);
+    //A deep view in the history, from before the limit applied (no GPU yet)
+    app.c.set_view(&deep);
+    app.render("Deep");
+    wait_for_job(&mut app);
+    app.c.set_view(&View::new(-0.75, 0.0, 1.0));
+    app.render("Shallow");
+    wait_for_job(&mut app);
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    app.gpu_opening = Some(receiver); //The limit applies from now on
+    let shallow = format!("{:?}", app.c.get_view());
+    let unchanged = |app: &MandelbrotApp, what: &str| assert_eq!(format!("{:?}", app.c.get_view()), shallow, "{what}: the view stays");
+    let warned = |app: &MandelbrotApp| app.log.iter().rev().take(2).any(|line| line.starts_with("Zoom limit: "));
+
+    app.go_back();
+    unchanged(&app, "Back");
+    assert!(warned(&app) && app.history.can_go_back(), "the history stays where it was");
+    app.view_inputs = [String::from("-0.743643887037151"), String::from("0.13182590420533"), String::from("1e-11")];
+    app.go_to_view();
+    unchanged(&app, "Go to view");
+    app.go_to_point_of_interest(0);
+    assert!(app.flight.is_none(), "no flight to a place beyond the limit");
+    unchanged(&app, "a flight");
+    assert!(!app.is_busy(), "and nothing is rendered");
+
+    //Anything else that leads past the limit zooms out to it before rendering
+    app.c.set_view(&deep);
+    app.render("Somehow deep");
+    assert!(app.c.precision_steps() >= rendering::FAST_GPU_STEPS && app.c.get_scale() > 1e-11, "zoomed out to the limit: scale {}", app.c.get_scale());
+    assert!(app.c.precision_steps() < rendering::FAST_GPU_STEPS * 1.1, "but not further than needed");
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
