@@ -1,6 +1,8 @@
 //! The escape-time iteration on the GPU, bit for bit the same as on the CPU.
 //!
-//! The loop of `MandelbrotSet::position_lanes` runs on the GPU in f64, one point per invocation (`gpu.wgsl`). A GPU driver may fuse a multiplication and an addition
+//! The loop of `MandelbrotSet::position_lanes` runs on the GPU in f64 (`gpu.wgsl`): a fixed number of invocations (`WORKGROUPS`) take points from a counter, and an
+//! invocation whose point is done takes the next one at once, so the invocations of a warp do not wait for its slowest point (measured: Seahorse Valley at
+//! 1200 x 800 on an RTX 5070 Ti in 88 ms instead of 148 ms with one point per invocation; 256 workgroups were the best of 128 to 1024). A GPU driver may fuse a multiplication and an addition
 //! into one fused multiply-add, which rounds differently: in chaotic parts of the set that changes the iteration count of many points (measured on an RTX 5070 Ti:
 //! 0.6% of the pixels of Seahorse Valley, 64% at scale 10⁻¹³). So the shader is compiled to SPIR-V here and every floating-point operation gets the `NoContraction`
 //! decoration, which forbids that; the SPIR-V is passed to the driver as is. Then every operation rounds like the CPU's and the outcome is the same, bit for bit.
@@ -18,8 +20,12 @@ use wgpu::util::DeviceExt;
 
 use crate::{complex::Complex, complex_plane::{ComplexPlane, View}, mandelbrot_set::MandelbrotSet};
 
-/// The most points of one dispatch: short dispatches keep the GPU responsive for the window, and stay far below the limit of 65,535 workgroups of 64
+/// The most points of one dispatch: short dispatches keep the GPU responsive for the window
 pub(crate) const BATCH: usize = 1 << 18;
+
+/// The workgroups of 64 invocations of a dispatch: each invocation takes points until there are none left (see `gpu.wgsl`). Enough to keep the GPU busy, few enough
+/// that an invocation gets several points of a batch to refill with
+const WORKGROUPS: u32 = 256;
 
 /// The outcome of the loop for one point, as the shader writes it
 #[repr(C)]
@@ -70,7 +76,7 @@ impl GpuIterator {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: needed, required_limits: adapter.limits(), ..Default::default() })).map_err(|err| format!("{name}: {err}"))?;
         let words = spirv_without_contraction(include_str!("gpu.wgsl"))?;
         let entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None }, count: None };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("mandelbrot"), entries: &[entry(0, true), entry(1, true), entry(2, false)] });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("mandelbrot"), entries: &[entry(0, true), entry(1, true), entry(2, false), entry(3, false)] });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("mandelbrot"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
         //SAFETY: the SPIR-V is naga's validated output of `gpu.wgsl`, with only NoContraction decorations added
         let shader = unsafe {
@@ -126,7 +132,8 @@ impl GpuIterator {
         }
         let coordinates: Vec<f64> = points.iter().flat_map(|c| [c.x, c.y]).collect();
         let storage = |contents: &[u8]| self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents, usage: wgpu::BufferUsages::STORAGE });
-        let (params, coordinates) = (storage(&params), storage(bytemuck::cast_slice(&coordinates)));
+        //The index of the next point that an invocation takes, see `gpu.wgsl`
+        let (params, coordinates, next_point) = (storage(&params), storage(bytemuck::cast_slice(&coordinates)), storage(&0_u32.to_le_bytes()));
         let size = (points.len() * std::mem::size_of::<Outcome>()) as u64;
         let outcomes = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -134,13 +141,14 @@ impl GpuIterator {
             wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: coordinates.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: outcomes.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: next_point.as_entire_binding() },
         ] });
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+            pass.dispatch_workgroups(count.div_ceil(64).min(WORKGROUPS), 1, 1);
         }
         encoder.copy_buffer_to_buffer(&outcomes, 0, &read, 0, size);
         let index = self.queue.submit([encoder.finish()]);

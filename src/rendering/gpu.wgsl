@@ -1,4 +1,6 @@
-// The escape loop of `MandelbrotSet::iterate_lanes_smooth_generic`, one point per invocation, in f64.
+// The escape loop of `MandelbrotSet::iterate_lanes_smooth_generic` in f64, with refilling invocations: an invocation takes a point from `next_point`, and when that
+// point is done it takes the next one at once, so the invocations of a warp do not wait for the slowest point of the warp (the warp runs as long as any of its
+// invocations has a point). Every invocation keeps the step count and the cycle detection of its own point, so every point gets the arithmetic of the lockstep loop.
 // It is compiled to SPIR-V with NoContraction on every floating-point operation (see `gpu.rs`), so the driver cannot fuse a multiplication and an addition:
 // every operation rounds exactly like the CPU's, and the results are bit for bit the same.
 
@@ -25,6 +27,7 @@ struct Outcome {
 @group(0) @binding(0) var<storage, read> params: Params;
 @group(0) @binding(1) var<storage, read> points: array<Point>;
 @group(0) @binding(2) var<storage, read_write> outcomes: array<Outcome>;
+@group(0) @binding(3) var<storage, read_write> next_point: atomic<u32>;
 
 // `MandelbrotSet::is_known_interior`: the main cardioid and the period-two bulb, with the same margin
 fn known_interior(x: f64, y: f64) -> bool {
@@ -35,32 +38,45 @@ fn known_interior(x: f64, y: f64) -> bool {
     return in_cardioid || in_bulb;
 }
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let index = id.x;
-    if (index >= params.count) {
-        return;
+// The next point that needs the loop (points in the cardioid or the period-two bulb get their outcome at once), or `params.count` when there is none
+fn take_point() -> u32 {
+    loop {
+        let index = atomicAdd(&next_point, 1u);
+        if (index >= params.count) {
+            return params.count;
+        }
+        if (params.check_interior != 0u && known_interior(points[index].x, points[index].y)) {
+            outcomes[index] = Outcome(0.0lf, 0.0lf, params.max_iterations, 0u);
+            continue;
+        }
+        return index;
     }
-    let cx = points[index].x;
-    let cy = points[index].y;
+    return params.count; // Not reached: naga wants a return after the loop
+}
+
+@compute @workgroup_size(64)
+fn main() {
     let max_iterations = params.max_iterations;
-    if (params.check_interior != 0u && known_interior(cx, cy)) {
-        outcomes[index] = Outcome(0.0lf, 0.0lf, max_iterations, 0u);
-        return;
+    var index = take_point();
+    var cx = 0.0lf;
+    var cy = 0.0lf;
+    if (index < params.count) {
+        cx = points[index].x;
+        cy = points[index].y;
     }
     var zx = 0.0lf;
     var zy = 0.0lf;
     var iterations = 0u;
     var running = true;
-    var escaped = false;
-    var escape_x = 0.0lf;
-    var escape_y = 0.0lf;
     var saved_x = 0.0lf;
     var saved_y = 0.0lf;
-    var blocks_since_saved = 0u;
-    var blocks_until_save = 1u;
     var step = 0u;
-    while (step < max_iterations && running) {
+    var blocks = 0u;
+    loop {
+        if (index >= params.count) {
+            break;
+        }
+        // One block of steps, shorter at the end like the last block of the lockstep loop
         let steps = min(4u, max_iterations - step);
         for (var k = 0u; k < steps; k++) {
             // The same arithmetic as z = z.squared().add(c): (zx * zx - zy * zy) + cx and (2 * zx) * zy + cy
@@ -75,27 +91,39 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 iterations += 1u;
             }
         }
-        let block_start = step;
-        let block_end = min(step + 4u, max_iterations);
         step += 4u;
-        // Escaped in this block: keep z at the end of the block for the smooth position
-        if (!running && !escaped && iterations >= block_start && iterations < block_end) {
-            escaped = true;
-            escape_x = zx;
-            escape_y = zy;
-        }
+        blocks += 1u;
+        // Escaped in this block: z at the end of the block gives the smooth position
+        var done = !running;
+        var escaped = !running;
         // Brent's cycle detection once per block: an orbit that is exactly where it was at an earlier block repeats forever, so it never escapes
         if (running && zx == saved_x && zy == saved_y) {
-            running = false;
+            done = true;
             iterations = max_iterations;
         }
-        blocks_since_saved += 1u;
-        if (blocks_since_saved == blocks_until_save) {
+        // The lockstep loop saves z after 1, 3, 7, 15, ... blocks (the gap doubles): after `blocks` blocks when `blocks + 1` is a power of two
+        if ((blocks & (blocks + 1u)) == 0u) {
             saved_x = zx;
             saved_y = zy;
-            blocks_since_saved = 0u;
-            blocks_until_save = select(blocks_until_save * 2u, 4294967295u, blocks_until_save >= 2147483648u);
+        }
+        if (step >= max_iterations) {
+            done = true;
+        }
+        if (done) {
+            outcomes[index] = Outcome(select(0.0lf, zx, escaped), select(0.0lf, zy, escaped), iterations, select(0u, 1u, escaped && iterations < max_iterations));
+            index = take_point();
+            if (index < params.count) {
+                cx = points[index].x;
+                cy = points[index].y;
+            }
+            zx = 0.0lf;
+            zy = 0.0lf;
+            iterations = 0u;
+            running = true;
+            saved_x = 0.0lf;
+            saved_y = 0.0lf;
+            step = 0u;
+            blocks = 0u;
         }
     }
-    outcomes[index] = Outcome(escape_x, escape_y, iterations, select(0u, 1u, escaped && iterations < max_iterations));
 }
