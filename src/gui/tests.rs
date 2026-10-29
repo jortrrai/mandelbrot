@@ -1560,3 +1560,33 @@ fn with_no_flight_going_to_a_place_shows_it_at_once() {
     assert!(app.log.last().unwrap().starts_with("Moved to Test Place"), "{:?}", app.log.last());
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn the_blur_of_a_flight_frame_follows_the_resolution_it_really_has() {
+    use super::blur::blur_sigma;
+    //Full resolution with one sample: σ 0.8 (#118); coarser frames get more, supersampled ones less
+    assert!((blur_sigma(1, 1) - 0.8).abs() < 1e-6);
+    assert!((blur_sigma(4, 0) - 1.84).abs() < 0.01 && (blur_sigma(2, 0) - 1.21).abs() < 0.01);
+    assert!((blur_sigma(1, 4) - 0.53).abs() < 0.01 && (blur_sigma(1, 9) - 0.41).abs() < 0.01);
+    assert_eq!(blur_sigma(1, 0), blur_sigma(1, 1), "a preview of single pixels is a frame of one sample");
+    //Without an OpenGL context (as here) there is no blur, and the image is drawn as it is
+    let app = MandelbrotApp::new(&Config::sized(64, 48, 50, 32));
+    assert!(app.blur.is_none() && app.auto_blur);
+}
+
+#[test]
+fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visible() {
+    use super::blur::visible_part;
+    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1));
+    let full = rect(0.0, 0.0, 1.0, 1.0);
+    //Zoomed in twice around the center of a 100 x 100 area: the middle half of the texture fills the area
+    let (shown, uv) = visible_part(rect(-50.0, -50.0, 150.0, 150.0), rect(0.0, 0.0, 100.0, 100.0), full).unwrap();
+    assert_eq!((shown, uv), (rect(0.0, 0.0, 100.0, 100.0), rect(0.25, 0.25, 0.75, 0.75)));
+    //Moved half out to the left, with the texture coordinates of a coarse preview
+    let (shown, uv) = visible_part(rect(-50.0, 0.0, 50.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), rect(0.1, 0.0, 0.9, 0.8)).unwrap();
+    assert_eq!(shown, rect(0.0, 0.0, 50.0, 100.0));
+    assert!((uv.min.x - 0.5).abs() < 1e-6 && (uv.max.x - 0.9).abs() < 1e-6 && uv.min.y == 0.0 && (uv.max.y - 0.8).abs() < 1e-6);
+    //Inside the area: unchanged; outside: nothing to draw
+    assert_eq!(visible_part(rect(10.0, 10.0, 90.0, 90.0), rect(0.0, 0.0, 100.0, 100.0), full), Some((rect(10.0, 10.0, 90.0, 90.0), full)));
+    assert_eq!(visible_part(rect(200.0, 0.0, 300.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), full), None);
+}

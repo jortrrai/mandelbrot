@@ -79,13 +79,16 @@ const COLOR_CHANNEL_MAPPING: ColorChannelMapping = ColorChannelMapping::RGB;
 pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     banner::print_banner();
 
-    let app = gui::MandelbrotApp::new(config);
+    let mut app = gui::MandelbrotApp::new(config);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Mandelbrot set viewer")
             .with_inner_size([config.window_width as f32 + gui::SIDE_PANEL_WIDTH, (config.window_height as f32).max(gui::MIN_WINDOW_HEIGHT)]),
         ..Default::default()
     };
-    eframe::run_native("Mandelbrot set viewer", options, Box::new(|_creation_context| Ok(Box::new(app))))?;
+    eframe::run_native("Mandelbrot set viewer", options, Box::new(|creation_context| {
+        app.use_gl(creation_context.gl.as_deref());
+        Ok(Box::new(app))
+    }))?;
     Ok(())
 }
