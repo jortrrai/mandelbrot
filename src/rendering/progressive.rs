@@ -186,6 +186,8 @@ impl<'a> Render<'a> {
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
         let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, cpu_threads, keep_samples } = self;
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
+        //(The samples remember whether the fast math was asked for, see `SampleKey`)
+        let fast_key = fast_gpu && gpu.is_some();
         let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS && width <= MAX_PIXEL && height <= MAX_PIXEL;
         debug_assert!(cpu_threads > 0 || gpu.is_some(), "a render without CPU threads needs the GPU");
         let own_gpu_samples = AtomicUsize::new(0);
@@ -212,7 +214,7 @@ impl<'a> Render<'a> {
         let track = state.is_some();
         //How many pixels kept their samples; without them, the colors so far are the base and every pixel of the render is still empty
         //Whether every pixel is still empty: a new state, or one that started over
-        let prepared = state.as_mut().map_or(Prepared::Empty, |state| state.prepare(c, width, height, SampleKey::new(m, coloring_function)));
+        let prepared = state.as_mut().map_or(Prepared::Empty, |state| state.prepare(c, width, height, SampleKey::new(m, coloring_function, fast_key)));
         if let Some(state) = state.as_mut().filter(|state| state.recolor_pending) {
             //Only the palette or the coloring changed: the first samples are recolored from their positions, and the image of one sample is there at once
             state.recolor(&color_of);

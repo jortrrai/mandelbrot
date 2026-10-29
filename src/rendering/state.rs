@@ -22,12 +22,14 @@ pub(super) struct SampleKey {
     /// The color cycle: divide, offset, stretched (as bits, so the key compares exactly)
     palette: (u64, u64, bool),
     coloring_function: usize,
+    /// Whether the GPU may use its fast math (`Render::fast_gpu` with a GPU): its samples are not the exact ones, so a render with the other setting starts over
+    fast_gpu: bool,
 }
 
 impl SampleKey {
     /// Whether samples of `self` and of `other` are at the same positions (only their colors can differ)
     fn same_positions(&self, other: &SampleKey) -> bool {
-        (self.max_iterations, self.orbit_radius, self.smooth_coloring) == (other.max_iterations, other.orbit_radius, other.smooth_coloring)
+        (self.max_iterations, self.orbit_radius, self.smooth_coloring, self.fast_gpu) == (other.max_iterations, other.orbit_radius, other.smooth_coloring, other.fast_gpu)
     }
 }
 
@@ -45,9 +47,9 @@ pub(super) enum Prepared {
 impl SampleKey {
     /// The key of samples of `m` colored by `coloring_function`. Adaptive supersampling and the amount of samples are not part of it: they decide how many samples
     /// a pixel gets, not what a sample is
-    pub(super) fn new(m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor) -> SampleKey {
+    pub(super) fn new(m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor, fast_gpu: bool) -> SampleKey {
         //Two pointers to the same function can differ (then the state is just not reused); two different functions never share an address
-        SampleKey { max_iterations: m.max_iterations, orbit_radius: m.orbit_radius.to_bits(), palette: (m.palette.divide.to_bits(), m.palette.offset.to_bits(), m.palette.stretch), smooth_coloring: m.smooth_coloring, coloring_function: coloring_function as usize }
+        SampleKey { max_iterations: m.max_iterations, orbit_radius: m.orbit_radius.to_bits(), palette: (m.palette.divide.to_bits(), m.palette.offset.to_bits(), m.palette.stretch), smooth_coloring: m.smooth_coloring, coloring_function: coloring_function as usize, fast_gpu }
     }
 }
 
@@ -111,8 +113,8 @@ impl SampleState {
 
     /// Makes the state fit a render of `plane` (`width` x `height` pixels) of `m` colored by `coloring_function`, like `Render::resume` does when it starts,
     /// and returns how many pixels kept samples. A render that resumes the state afterwards finds it prepared.
-    pub fn prepare_for(&mut self, plane: &ComplexPlane, width: usize, height: usize, m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor) -> usize {
-        if self.prepare(plane, width, height, SampleKey::new(m, coloring_function)) == Prepared::Empty { 0 } else { self.counts.iter().filter(|count| **count > 0).count() }
+    pub fn prepare_for(&mut self, plane: &ComplexPlane, width: usize, height: usize, m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor, fast_gpu: bool) -> usize {
+        if self.prepare(plane, width, height, SampleKey::new(m, coloring_function, fast_gpu)) == Prepared::Empty { 0 } else { self.counts.iter().filter(|count| **count > 0).count() }
     }
 
     /// The shift that turns this state into the state of a render of `plane` with `key`, if that render keeps samples of it

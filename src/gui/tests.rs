@@ -1598,8 +1598,7 @@ fn another_color_cycle_keeps_the_limit_and_shows_the_recolored_image_at_once() {
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     assert!(app.auto_iterations);
-    app.fast_gpu = false; //Compared with the CPU bit for bit below
-    app.samples = None; //(Samples of the fast GPU math are continued otherwise: the setting is not part of their key)
+    app.fast_gpu = false; //Compared with the CPU bit for bit below: the samples of the fast math are not continued (see `SampleKey`)
     app.render("Exact");
     wait_for_job(&mut app);
     let limit = app.m.max_iterations;

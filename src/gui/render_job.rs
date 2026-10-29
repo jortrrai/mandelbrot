@@ -387,7 +387,7 @@ impl MandelbrotApp {
                     }
                 }
             }
-            let kept = samples.prepare_for(&c, width, height, &m, coloring_function);
+            let kept = samples.prepare_for(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some());
             let whole = kept == 0;
             if kept > 0 {
                 message = format!("{message} (continued the samples of {kept} pixels)");
