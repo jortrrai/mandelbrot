@@ -1590,3 +1590,23 @@ fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visibl
     assert_eq!(visible_part(rect(10.0, 10.0, 90.0, 90.0), rect(0.0, 0.0, 100.0, 100.0), full), Some((rect(10.0, 10.0, 90.0, 90.0), full)));
     assert_eq!(visible_part(rect(200.0, 0.0, 300.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), full), None);
 }
+
+#[test]
+fn a_spiral_flight_arrives_and_a_place_without_a_spiral_center_takes_the_shortest_route() {
+    const FROST: &str = r#"{ "format_version": 1, "name": "Frost", "location": { "center": { "real": -0.6604166666666667, "imaginary": 0.4437500000000001 }, "scale": 0.1, "max_iterations": 300 } }"#;
+    let (mut app, folder) = app_with_points(&[("01-frost.json", FROST), ("02-test-place.json", HSV_BGR_PLACE)]);
+    app.route = super::flight::Route::Spiral;
+    let frost = app.points.iter().position(|point| point.name == "Frost").unwrap();
+    app.go_to_point_of_interest(frost);
+    assert!(app.log.iter().any(|line| line.contains("spiral route")), "{:?}", app.log);
+    let _ = fly_until_arrived(&mut app);
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.1).abs() < 1e-15, "arrived");
+    //The test place is in Seahorse Valley: no spiral center turns calmly there
+    let test_place = app.points.iter().position(|point| point.name == "Test Place").unwrap();
+    app.go_to_point_of_interest(test_place);
+    assert!(app.log.iter().any(|line| line.starts_with("No spiral to Test Place")), "{:?}", app.log);
+    app.cancel_flight();
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}

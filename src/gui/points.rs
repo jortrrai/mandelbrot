@@ -362,8 +362,12 @@ impl MandelbrotApp {
             self.arrive_at(&point);
             return;
         }
-        let flight = Flight::new(from, to, self.pace);
-        self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
+        let (flight, as_asked) = Flight::with_route(from, to, self.pace, self.route);
+        if !as_asked {
+            self.log(format!("No spiral to {}: no spiral center of the set near it, or the start is too far from it; flying the shortest route", point.name));
+        }
+        let route = if as_asked { self.route.name() } else { super::flight::Route::Shortest.name() };
+        self.log(format!("Flying to {} ({}, {} route, {:.1} s)", point.name, self.pace.name(), route.to_lowercase(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| self.flight_limits(to));
         let now = Instant::now();
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now });
