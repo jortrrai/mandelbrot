@@ -147,8 +147,6 @@ pub struct MandelbrotApp {
     flight: Option<points::PointFlight>,
     /// How complete the frames of a flight have to be (low res by default), see `flight::FlightRendering`
     flight_rendering: flight::FlightRendering,
-    /// Whether the frames of a flight use smooth coloring (off by default); off, they color by the iteration count, which is faster. The arrival is always smooth
-    smooth_flights: bool,
     /// Immersion: the screen never shows black where nothing is rendered yet; the view only moves once the new view has at least a complete low-resolution frame
     immersion: bool,
     /// Whether the render of the current view has shown a frame that is complete enough (see `required_readiness`), and whether it has shown any frame
@@ -246,7 +244,6 @@ impl MandelbrotApp {
             pace: flight::Pace::Fast,
             flight: None,
             flight_rendering: flight::FlightRendering::LowRes,
-            smooth_flights: false,
             immersion: false,
             frame_ready: false,
             frame_accepted: false,
