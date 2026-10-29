@@ -298,7 +298,7 @@ impl MandelbrotApp {
                     if ui.selectable_label(index == self.coloring_index, name).clicked() && index != self.coloring_index {
                         self.coloring_index = index;
                         self.coloring_function = function;
-                        self.render(&format!("Set the coloring to {name}"));
+                        self.render_moved(&format!("Set the coloring to {name}")); //Only the colors change: the first samples are recolored at once (see `SampleState::recolor`)
                     }
                 }
             });
@@ -319,7 +319,7 @@ impl MandelbrotApp {
             .on_hover_text("On: the palette spans the iteration counts once, from 0 to the limit, without repeating (the colors change with the limit). Off: the palette repeats every 500 steps, see Iteration divide.");
         if self.m.palette != before {
             self.m.palette.offset = self.m.palette.offset.rem_euclid(PALETTE_LENGTH);
-            self.render(&format!("Set the colors to {}", super::points::palette_description(self.m.palette)));
+            self.render_moved(&format!("Set the colors to {}", super::points::palette_description(self.m.palette))); //Recolored at once, see `SampleState::recolor`
         }
         if ui.checkbox(&mut self.m.smooth_coloring, "Smooth colors").on_hover_text("Colors flow smoothly from one iteration count to the next (the fractional iteration count). Off: every pixel gets the color of its whole iteration count, which shows bands of color and saves two logarithms per pixel outside the set. Saved images use this setting too.").changed() {
             self.render(&format!("Turned smooth colors {}", if self.m.smooth_coloring { "on" } else { "off" }));

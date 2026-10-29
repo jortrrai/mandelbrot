@@ -740,3 +740,31 @@ fn the_divider_divides_exactly() {
         }
     }
 }
+
+#[test]
+fn another_palette_recolors_the_first_samples_at_once_and_ends_in_the_image_of_a_new_render() {
+    use crate::mandelbrot_set::ColorCycle;
+    let (w, h) = (61, 37);
+    let (c, mut m) = boundary_plane(w, h);
+    m.palette = ColorCycle::CYCLE;
+    let render = |state: &mut SampleState, m: &MandelbrotSet, samples: u8, adaptive: Option<AdaptiveSampling>| {
+        let mut reports = Vec::new();
+        assert!(Render::new(&c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).resume(state)
+            .run(|colors, pass| reports.push((pass, colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()))));
+        reports
+    };
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        let mut state = SampleState::new();
+        let _ = render(&mut state, &m, 4, adaptive);
+        let mut recolored = m.clone();
+        recolored.palette = ColorCycle { divide: 3.5, offset: 77.0, stretch: false };
+        let reports = render(&mut state, &recolored, 4, adaptive);
+        let fresh = render(&mut SampleState::new(), &recolored, 4, adaptive);
+        assert_eq!(reports[0], fresh[0], "the first layer is there at once, recolored exactly (adaptive {adaptive:?})");
+        assert_eq!(reports.last(), fresh.last(), "and the finished image is the image of a new render (adaptive {adaptive:?})");
+        //Another limit changes the positions: no recolor, the render starts over (the same image as a new render, which the first assertion of a recolor would also give)
+        let mut deeper = recolored.clone();
+        deeper.max_iterations += 100;
+        assert_eq!(render(&mut state, &deeper, 2, adaptive).last(), render(&mut SampleState::new(), &deeper, 2, adaptive).last());
+    }
+}

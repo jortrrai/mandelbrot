@@ -1591,3 +1591,26 @@ fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visibl
     assert_eq!(visible_part(rect(10.0, 10.0, 90.0, 90.0), rect(0.0, 0.0, 100.0, 100.0), full), Some((rect(10.0, 10.0, 90.0, 90.0), full)));
     assert_eq!(visible_part(rect(200.0, 0.0, 300.0, 100.0), rect(0.0, 0.0, 100.0, 100.0), full), None);
 }
+
+#[test]
+fn another_color_cycle_keeps_the_limit_and_shows_the_recolored_image_at_once() {
+    let config = Config::sized(64, 48, 50, 8);
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    assert!(app.auto_iterations);
+    app.fast_gpu = false; //Compared with the CPU bit for bit below
+    app.samples = None; //(Samples of the fast GPU math are continued otherwise: the setting is not part of their key)
+    app.render("Exact");
+    wait_for_job(&mut app);
+    let limit = app.m.max_iterations;
+    app.m.palette = ColorCycle { divide: 2.0, offset: 50.0, stretch: false };
+    app.render_moved("Set the colors");
+    assert_eq!(app.m.max_iterations, limit, "the limit is kept: the samples are only recolored");
+    wait_for_job(&mut app);
+    //The image is the image of a new render of these colors
+    let (width, height) = (app.p.pixel_plane.width, app.p.pixel_plane.height);
+    let mut fresh = Vec::new();
+    rendering::Render::new(&app.c, &app.m, width, height, app.coloring_function).supersampling(app.supersampling_amount).adaptive(app.adaptive_supersampling.then(rendering::AdaptiveSampling::default)).run(|colors, _| fresh = colors.to_vec());
+    let differ = app.p.colors.iter().zip(&fresh).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+    assert_eq!(differ, 0, "of {} pixels; log {:?}", fresh.len(), &app.log[app.log.len().saturating_sub(3)..]);
+}
