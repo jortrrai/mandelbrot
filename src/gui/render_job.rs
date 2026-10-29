@@ -17,11 +17,11 @@ use super::{MandelbrotApp, Readiness};
 
 
 /// A preview of a new view is only shown if the first layer is expected to take longer than this, about a frame: a faster first layer is shown directly, see `Render::preview`
-const PREVIEW_WORTHWHILE: Duration = Duration::from_millis(16);
+pub(super) const PREVIEW_WORTHWHILE: Duration = Duration::from_millis(16);
 
 /// The GPU joins the first pass of a render once it has run for this long (measured: 3 ms takes 3 ms off a deep 1x render and leaves the 6 ms default view as it
 /// is; 0 ms slows that view down), so passes that are fast on the CPU alone never wait for it. Later passes that are known to be slow get it at once, see `Render::gpu`
-const GPU_JOIN_AFTER: Duration = Duration::from_millis(3);
+pub(super) const GPU_JOIN_AFTER: Duration = Duration::from_millis(3);
 
 /// The full-quality render after a drag or a wheel zoom starts when the gesture stops, or when it has not changed the view for this long (a mouse button held still)
 const GESTURE_PAUSE: Duration = Duration::from_millis(150);
@@ -103,6 +103,9 @@ pub(super) enum JobMessage {
     Pass { colors: Vec<TrueColor>, plane: ComplexPlane, pass: u8, total: u8, layer_time: Duration, whole: bool },
     /// The iteration limit that auto iterations chose for the render, sent as soon as it is known, before the first layer is rendered
     Limit { max_iterations: u32, palette_scale: u32 },
+    /// A frame of a flight (see `flight_job`) is complete enough: the flight clock at the frame, its view, its iteration limit and palette, and which preview of
+    /// the render it is (the `Pass` that follows carries its colors)
+    FlightFrame { elapsed: Duration, plane: ComplexPlane, max_iterations: u32, palette_scale: Option<u32>, preview: usize },
     /// The job has finished (or was cancelled), this is its final result; `reported` is whether it showed anything of `c` (otherwise `p` still shows the previous view)
     Done { c: ComplexPlane, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool, reported: bool },
 }
@@ -128,6 +131,8 @@ pub(super) struct Progress {
     pub(super) pass: u8,
     pub(super) total: u8,
     pub(super) cancel: Arc<AtomicBool>,
+    /// For a job that renders several frames (a flight, see `flight_job`): stops the job, where `cancel` only stops its frame
+    pub(super) stop: Option<Arc<AtomicBool>>,
 }
 
 impl MandelbrotApp {
@@ -135,7 +140,10 @@ impl MandelbrotApp {
     /// The image of the last completed layer stays on screen until the next render shows its first layer.
     pub(super) fn interrupt_progressive_render(&mut self) {
         if let Some(progress) = self.progress.take() {
-            progress.cancel.store(true, Ordering::Relaxed);
+            if let Some(stop) = &progress.stop {
+                stop.store(true, Ordering::SeqCst);
+            }
+            progress.cancel.store(true, Ordering::SeqCst);
             self.job = None;
         }
     }
@@ -168,7 +176,7 @@ impl MandelbrotApp {
                     let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::Layers(pass) } else { Readiness::Blocks(level) };
                     //(a layer that is held back still counts for the progress bar below)
                     if readiness >= self.required_readiness() {
-                        if let (false, Some(flight)) = (self.frame_accepted, &mut self.flight) {
+                        if let (false, false, Some(flight)) = (self.flight_job, self.frame_accepted, &mut self.flight) {
                             flight.frames.push(Instant::now()); //A new frame of the flight (not a finer image of the same view), for its frame rate
                         }
                         self.frame_ready = true;
@@ -202,8 +210,18 @@ impl MandelbrotApp {
                     self.m.palette_scale = Some(palette_scale);
                     self.limit_pending = false;
                 }
+                Ok(JobMessage::FlightFrame { elapsed, plane, max_iterations, palette_scale, preview }) => {
+                    if let Some(flight) = &mut self.flight {
+                        flight.elapsed = elapsed;
+                        flight.frames.push(Instant::now()); //A frame of the flight, for its frame rate
+                    }
+                    self.c = plane; //The camera is where the frame is
+                    (self.m.max_iterations, self.m.palette_scale) = (max_iterations, palette_scale);
+                    self.previews_received = preview; //So the pass that follows is known as that preview (or layer)
+                }
                 Ok(JobMessage::Done { c, m, message, elapsed, completed, reported }) => {
                     self.job = None;
+                    self.flight_job = false;
                     self.limit_pending = false;
                     //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
                     self.m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring, ..m };
@@ -225,7 +243,7 @@ impl MandelbrotApp {
                         self.c = c; //During a flight the camera moves on while a render runs (best effort), so it is not set back to the view of the render
                     }
                     self.texture_outdated = true;
-                    if !self.gesture_active {
+                    if !self.gesture_active && !message.is_empty() {
                         let description = self.view_description();
                         self.log(format!("{message} in {:.2} s: {description}", elapsed.as_secs_f64()));
                     }
@@ -400,7 +418,8 @@ impl MandelbrotApp {
         let now = Instant::now();
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
         self.job = Some(receiver);
-        self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel });
+        self.flight_job = false;
+        self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });
         if !self.gesture_active {
             self.log("Rendering...");
         }

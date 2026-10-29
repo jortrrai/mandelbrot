@@ -15,8 +15,8 @@ use crate::thumbnails::{self, ThumbnailRequest};
 use super::flight::{Camera, Flight, Pace};
 use super::{MandelbrotApp, Readiness, COLORING_FUNCTIONS};
 
-/// The most a flight that waits for its frames moves on after a frame, in flight time: two frames at 60 Hz
-const MAX_WAITING_STEP: Duration = Duration::from_millis(33);
+/// The most a flight that waits for its frames moves on after a frame, in flight time: two frames at 60 Hz (see `flight_job`)
+pub(super) const MAX_WAITING_STEP: Duration = Duration::from_millis(33);
 
 /// A flight to a point of interest that is under way: the path, how far along it the flight is, and the point to apply on arrival
 pub(super) struct PointFlight {
@@ -410,6 +410,7 @@ impl MandelbrotApp {
 
     /// Moves the view along the flight to a point of interest, if one is under way, and asks for the next frame
     pub(super) fn fly(&mut self, ctx: &egui::Context) {
+        self.frame_interval = Duration::from_secs_f32(ctx.input(|input| input.predicted_dt).clamp(1.0 / 500.0, 0.1));
         self.fly_at(Instant::now());
         if self.flight.is_some() {
             ctx.request_repaint();
@@ -418,21 +419,27 @@ impl MandelbrotApp {
 
     /// The frame of the flight at `now`: a render of the view on the way (with the steady limit of a gesture, towards the full quality until the next frame interrupts it), or the point itself on arrival
     ///
-    /// With a flight rendering that waits for frames (or immersion), the camera only moves on once the frame of its current view is complete enough, and then by at
-    /// most `MAX_WAITING_STEP`: the flight clock stands still while it waits, so a slow view makes a slow, smooth crawl instead of jumps.
+    /// With a flight rendering that waits for frames (or immersion), a job renders the frames one after the other (see `flight_job`): the camera only moves on once
+    /// the frame of its current view is complete enough, and then by at most `MAX_WAITING_STEP`, so a slow view makes a slow, smooth crawl instead of jumps.
     pub(super) fn fly_at(&mut self, now: Instant) {
         let Some(mut flight) = self.flight.take() else { return };
         flight.update_fps(now);
-        let since_last_frame = now.saturating_duration_since(flight.last_frame);
-        flight.last_frame = now;
-        if self.flight_readiness() == Readiness::Any {
-            flight.elapsed += since_last_frame;
-        } else if self.frame_ready {
-            flight.elapsed += since_last_frame.min(MAX_WAITING_STEP);
-        } else {
-            self.flight = Some(flight); //Waits for the frame
+        //A flight that waits for its frames is rendered by its own job, which moves the flight clock on (see `flight_job`); the window arrives when its last frame is there
+        if self.flight_readiness() != Readiness::Any {
+            if flight.flight.arrived(flight.elapsed) {
+                self.log(format!("The flight to {}: {}", flight.point.name, flight.summary(now)));
+                self.arrive_at(&flight.point);
+                return;
+            }
+            let running = self.flight_job && self.is_busy();
+            self.flight = Some(flight);
+            if !running {
+                self.start_flight_job(self.frame_interval);
+            }
             return;
         }
+        flight.elapsed += now.saturating_duration_since(flight.last_frame);
+        flight.last_frame = now;
         let elapsed = flight.elapsed;
         if flight.flight.arrived(elapsed) {
             self.log(format!("The flight to {}: {}", flight.point.name, flight.summary(now)));
@@ -452,13 +459,11 @@ impl MandelbrotApp {
         }
         //Best effort: a frame whose render has not shown anything yet is not interrupted, or on an expensive view almost no render would ever be shown. The camera
         //moves on anyway (the image on the screen follows it, see `transform`), and the next render starts at the latest camera as soon as this one has shown a frame.
-        let best_effort = self.flight_readiness() == Readiness::Any;
-        if best_effort && self.is_busy() && !self.frame_accepted {
+        if self.is_busy() && !self.frame_accepted {
             self.flight = Some(flight);
             return;
         }
         //Every frame renders towards the full quality: the next frame interrupts it when the camera moves on, so a frame gets as many layers as the time allows
-        //(super sampled waits for all of them before the camera moves, see `fly_at`)
         self.start_render_as(&format!("Flying to {}", flight.point.name), super::render_job::RenderKind::FlightFrame);
         self.flight = Some(flight);
     }
