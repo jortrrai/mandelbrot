@@ -703,6 +703,32 @@ fn an_image_saved_with_the_gpu_has_the_pixels_of_one_saved_without_it() {
     assert_eq!(with.pixels, without.pixels);
 }
 
+#[test]
+fn a_render_of_only_colors_is_the_first_layer_and_leaves_the_samples_of_its_state_alone() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let colors_only = |state: Option<&mut SampleState>, gpu: Option<&super::gpu::GpuIterator>| {
+        let mut reports = Vec::new();
+        let render = Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).colors_only();
+        let render = match gpu { Some(gpu) => render.gpu(Some((gpu, std::time::Duration::ZERO))).on_the_gpu_only(), None => render };
+        let render = match state { Some(state) => render.resume(state), None => render };
+        assert!(render.run(|colors, pass| reports.push((pass, colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()))));
+        reports
+    };
+    let (first_layer, _) = resumed(&mut SampleState::new(), &c, &m, 1, None, None, None);
+    assert_eq!(colors_only(None, None), [(1, first_layer.clone())], "one pass: the first layer, whatever the supersampling");
+    //A state with 3 samples of every pixel keeps them, and a render that resumes it has nothing left to do
+    let mut state = SampleState::new();
+    let (three, _) = resumed(&mut state, &c, &m, 3, None, None, None);
+    assert_eq!(colors_only(Some(&mut state), None), [(1, first_layer.clone())]);
+    assert!((0..h).all(|y| (0..w).all(|x| state.samples(x, y) == 3)), "the samples are the state's");
+    assert_eq!(resumed(&mut state, &c, &m, 3, None, None, None).0, three);
+    //By the GPU (the exact loop): the same colors
+    if let Ok(gpu) = super::gpu::GpuIterator::new() {
+        assert_eq!(colors_only(None, Some(&gpu)), [(1, first_layer)]);
+    }
+}
+
 /// The division of the running average by a multiplication is exactly the integer division for every sum of up to 65 samples
 #[test]
 fn the_divider_divides_exactly() {
