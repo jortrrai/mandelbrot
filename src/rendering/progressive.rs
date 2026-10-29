@@ -40,6 +40,8 @@ pub struct Render<'a> {
     cancel: Option<&'a AtomicBool>,
     pixels_done: Option<&'a AtomicUsize>,
     preview: Option<Duration>,
+    /// The block sizes of the previews, coarsest first, see `preview_blocks`
+    preview_blocks: &'a [usize],
     state: Option<&'a mut SampleState>,
     gpu: Option<(&'a GpuIterator, Duration)>,
     gpu_samples: Option<&'a AtomicUsize>,
@@ -52,7 +54,7 @@ pub struct Render<'a> {
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(u32, u32) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, state: None, gpu: None, gpu_samples: None, fast_gpu: false, cpu_threads: render_thread_count() }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, cpu_threads: render_thread_count() }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -103,6 +105,13 @@ impl<'a> Render<'a> {
     #[must_use]
     pub fn preview(mut self, worthwhile: Option<Duration>) -> Self {
         self.preview = worthwhile;
+        self
+    }
+
+    /// Other block sizes for the previews than `PREVIEW_BLOCKS`, coarsest first (each at least 2): for example only the size that a flight waits for
+    #[must_use]
+    pub const fn preview_blocks(mut self, blocks: &'a [usize]) -> Self {
+        self.preview_blocks = blocks;
         self
     }
 
@@ -162,7 +171,7 @@ impl<'a> Render<'a> {
     /// # Panics
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, state, gpu, gpu_samples, fast_gpu, cpu_threads } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, cpu_threads } = self;
         let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS;
         debug_assert!(cpu_threads > 0 || gpu.is_some(), "a render without CPU threads needs the GPU");
         let own_gpu_samples = AtomicUsize::new(0);
@@ -206,7 +215,7 @@ impl<'a> Render<'a> {
         //The pixels whose first sample the previews computed, empty without previews
         let mut has_first: Vec<bool> = Vec::new();
         if let Some(worthwhile) = preview.filter(|_| pending[0] > 0) {
-            match render_previews(&anchor, m, origin, worthwhile, cancel, &color_of, state, pending[0], &mut colors, &mut on_pass) {
+            match render_previews(&anchor, m, origin, worthwhile, preview_blocks, cancel, &color_of, state, pending[0], &mut colors, &mut on_pass) {
                 Some((flags, count)) => {
                     has_first = flags;
                     pending[0] -= count;
@@ -597,7 +606,7 @@ fn positions(anchor: &ComplexPlane, m: &MandelbrotSet, y: usize, xs: &[usize], s
 /// a level (filled into `colors`) when the rest of the first layer (`empty` pixels without samples at the start) is expected to take longer than `worthwhile`.
 /// Returns which pixels got their first sample and how many, or `None` if cancelled.
 #[allow(clippy::too_many_arguments)] // The state of `Render::run` that the previews share
-fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), worthwhile: Duration, cancel: &AtomicBool, color_of: &(impl Fn(f64) -> TrueColor + Sync),
+fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), worthwhile: Duration, blocks: &[usize], cancel: &AtomicBool, color_of: &(impl Fn(f64) -> TrueColor + Sync),
     state: &mut SampleState, empty: usize, colors: &mut [TrueColor], on_pass: &mut impl FnMut(&[TrueColor], u8)) -> Option<(Vec<bool>, usize)> {
     let width = state.width;
     let mut has_first = vec![false; state.counts.len()];
@@ -606,7 +615,7 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
     //The time the threads spent computing samples, without starting threads and waiting: on a fast view those would dominate the estimate
     let busy_nanos = AtomicU64::new(0);
     let height = state.height;
-    for block in PREVIEW_BLOCKS {
+    for &block in blocks {
         let count = AtomicUsize::new(0);
         //Every block has a representative: the pixel whose first sample it shows. That is its top-left pixel (always, in a render from nothing), unless that pixel
         //has samples from before (it was kept by a move): then a pixel of the block that a coarser level computed, or else its first pixel without samples. So a block

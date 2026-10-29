@@ -160,11 +160,12 @@ impl MandelbrotApp {
             match receiver.try_recv() {
                 Ok(JobMessage::Pass { colors, plane, pass, total, layer_time, whole }) => {
                     //A preview of the whole view is uploaded small and scaled up smoothly; a preview of a strip sits next to sharp pixels, so it stays sharp
-                    let preview_block = if pass == 0 && whole { rendering::PREVIEW_BLOCKS.get(self.previews_received).copied().unwrap_or(1) } else { 1 };
+                    let level = self.preview_levels.get(self.previews_received).copied().unwrap_or(1);
+                    let preview_block = if pass == 0 && whole { level } else { 1 };
                     self.previews_received += usize::from(pass == 0);
                     //A frame that is not complete enough is not shown: the screen keeps the last one that was (immersion, flight rendering)
                     //Every preview is complete: a block with pixels without samples always shows one of their samples, also in the strip a move exposed (see `Render::preview`)
-                    let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::FullResolution } else { Readiness::Complete };
+                    let readiness = if pass > 0 && pass >= total { Readiness::SuperSampled } else if pass > 0 { Readiness::Layers(pass) } else { Readiness::Blocks(level) };
                     //(a layer that is held back still counts for the progress bar below)
                     if readiness >= self.required_readiness() {
                         if let (false, Some(flight)) = (self.frame_accepted, &mut self.flight) {
@@ -273,9 +274,14 @@ impl MandelbrotApp {
         self.start_render_as(message, if self.gesture_active { RenderKind::GestureFrame { moved } } else { RenderKind::Settled { moved } });
     }
 
-    /// Whether the screen shows the previews of a render of `kind`: not for a flight frame that waits for a full layer (it never shows less), so it skips them
-    pub(super) fn shows_previews(&self, kind: RenderKind) -> bool {
-        !(kind == RenderKind::FlightFrame && self.flight_readiness() >= Readiness::FullResolution)
+    /// The block sizes of the previews of a render of `kind`, coarsest first: for a flight frame only those the screen would show (none when it waits for full layers,
+    /// only the size it waits for when it waits for blocks of a size), else `rendering::PREVIEW_BLOCKS`
+    pub(super) fn preview_levels(&self, kind: RenderKind) -> Vec<usize> {
+        match (kind, self.flight_readiness()) {
+            (RenderKind::FlightFrame, Readiness::Blocks(block)) if block != usize::MAX => vec![block.max(2)],
+            (RenderKind::FlightFrame, readiness) if readiness >= Readiness::FULL_RESOLUTION => Vec::new(),
+            _ => rendering::PREVIEW_BLOCKS.to_vec(),
+        }
     }
 
     /// Starts a render like `start_render`, of the `kind` that says what it is for (see `RenderKind`).
@@ -304,6 +310,8 @@ impl MandelbrotApp {
         let layer_on_screen = self.layer_shown && rendering::pixel_shift(&self.shown_plane, &self.c) == Some((0, 0));
         self.layer_shown = false;
         self.previews_received = 0;
+        let levels = self.preview_levels(kind);
+        self.preview_levels.clone_from(&levels);
         let (sender, receiver) = mpsc::channel();
         let spare_colors = self.spare_colors.clone();
         //The job only needs the view: the window keeps the image (every frame it shows arrives as a `Pass`), so a big image is not copied for every render
@@ -332,7 +340,7 @@ impl MandelbrotApp {
         let pixels_total = width * height;
         //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
         let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
-        let preview = (!layer_on_screen && self.shows_previews(kind) && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
+        let preview = (!layer_on_screen && !levels.is_empty() && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
         let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
@@ -373,7 +381,7 @@ impl MandelbrotApp {
             }
             let mut layer_started = started;
             let mut reported = false;
-            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).fast_gpu(fast_gpu).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
+            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).fast_gpu(fast_gpu).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 reported = true;
                 if pass == 0 {

@@ -58,23 +58,30 @@ pub enum FlightRendering {
     BestEffort,
     /// The camera waits for a complete low-resolution frame (a preview of the whole view, or a full layer)
     LowRes,
-    /// The camera waits for a full-resolution frame (the first layer): sharp all the way, slow where the view is expensive
-    MaxQuality,
+    /// The camera waits for a frame of this resolution, in percent of the view's pixels across: below 100 a preview of blocks of `100 / percent` pixels (25: blocks of
+    /// 4 x 4), 100 a full layer (Max quality), above 100 `(percent / 100)²` supersampling layers (200: 4 samples per pixel)
+    Resolution(u16),
     /// Every frame is rendered with all its supersampling layers, and the camera waits until the last one is done: the finished image of every view on the way, the slowest
     SuperSampled,
 }
 
 impl FlightRendering {
-    /// Every mode, in the order of the drop-down
-    pub const ALL: [FlightRendering; 4] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::MaxQuality, FlightRendering::SuperSampled];
+    /// A full layer of every view on the way: sharp all the way, slow where the view is expensive
+    pub const MAX_QUALITY: FlightRendering = FlightRendering::Resolution(100);
+
+    /// The modes of the drop-down; any other resolution can be typed in
+    pub const ALL: [FlightRendering; 6] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::Resolution(25), FlightRendering::Resolution(50), FlightRendering::MAX_QUALITY, FlightRendering::SuperSampled];
 
     /// The name in the drop-down
-    pub const fn name(self) -> &'static str {
+    pub fn name(self) -> String {
         match self {
-            FlightRendering::BestEffort => "Best effort",
-            FlightRendering::LowRes => "Low res",
-            FlightRendering::MaxQuality => "Max quality",
-            FlightRendering::SuperSampled => "Super sampled",
+            FlightRendering::BestEffort => String::from("Best effort"),
+            FlightRendering::LowRes => String::from("Low res"),
+            FlightRendering::Resolution(25) => String::from("Quarter resolution"),
+            FlightRendering::Resolution(50) => String::from("Half resolution"),
+            FlightRendering::Resolution(100) => String::from("Max quality"),
+            FlightRendering::Resolution(percent) => format!("{percent}% resolution"),
+            FlightRendering::SuperSampled => String::from("Super sampled"),
         }
     }
 }

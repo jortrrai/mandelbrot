@@ -1115,7 +1115,7 @@ fn a_frame_is_only_shown_when_it_is_complete_enough() {
     assert_eq!(show(&mut app, 0, true, 3), (true, true), "and so is a preview of the whole view");
     //A flight in max quality waits for a full-resolution frame
     app.immersion = false;
-    app.flight_rendering = super::flight::FlightRendering::MaxQuality;
+    app.flight_rendering = super::flight::FlightRendering::MAX_QUALITY;
     app.go_to_point_of_interest(0);
     assert_eq!(show(&mut app, 0, true, 4), (false, false));
     assert_eq!(show(&mut app, 1, true, 5), (true, true));
@@ -1140,7 +1140,7 @@ fn a_frame_is_only_shown_when_it_is_complete_enough() {
 #[test]
 fn a_flight_that_waits_for_its_frames_stands_still_until_the_frame_is_there() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
-    app.flight_rendering = super::flight::FlightRendering::MaxQuality;
+    app.flight_rendering = super::flight::FlightRendering::MAX_QUALITY;
     app.go_to_point_of_interest(0);
     let start = app.flight.as_ref().unwrap().last_frame;
     //The first frame: the view on the screen is complete, so the camera moves by a frame and renders the new view
@@ -1390,18 +1390,43 @@ fn the_zoom_stops_where_the_fast_gpu_math_ends_with_a_warning_in_the_log() {
 }
 
 #[test]
-fn a_flight_frame_that_waits_for_a_full_layer_skips_the_previews_it_would_never_show() {
+fn a_flight_frame_computes_only_the_previews_its_flight_rendering_shows() {
     use super::flight::FlightRendering;
     use super::render_job::RenderKind;
     let mut app = manual_app(&Config::sized(64, 48, 50, 1));
-    for (mode, previews) in [(FlightRendering::BestEffort, true), (FlightRendering::LowRes, true), (FlightRendering::MaxQuality, false), (FlightRendering::SuperSampled, false)] {
+    let all = rendering::PREVIEW_BLOCKS.to_vec();
+    for (mode, levels) in [(FlightRendering::BestEffort, all.clone()), (FlightRendering::LowRes, all.clone()), (FlightRendering::Resolution(25), vec![4]), (FlightRendering::Resolution(33), vec![3]),
+        (FlightRendering::Resolution(50), vec![2]), (FlightRendering::Resolution(10), vec![10]), (FlightRendering::MAX_QUALITY, vec![]), (FlightRendering::Resolution(200), vec![]), (FlightRendering::SuperSampled, vec![])] {
         app.flight_rendering = mode;
-        assert_eq!(app.shows_previews(RenderKind::FlightFrame), previews, "{mode:?}");
-        assert!(app.shows_previews(RenderKind::Settled { moved: false }) && app.shows_previews(RenderKind::GestureFrame { moved: true }), "other renders keep them");
+        assert_eq!(app.preview_levels(RenderKind::FlightFrame), levels, "{mode:?}");
+        assert_eq!(app.preview_levels(RenderKind::Settled { moved: false }), all, "other renders keep every preview level");
+        assert_eq!(app.preview_levels(RenderKind::GestureFrame { moved: true }), all);
     }
     app.flight_rendering = FlightRendering::BestEffort;
     app.immersion = true;
-    assert!(app.shows_previews(RenderKind::FlightFrame), "immersion shows complete previews");
+    assert_eq!(app.preview_levels(RenderKind::FlightFrame), all, "immersion shows complete previews");
+}
+
+#[test]
+fn the_flight_resolution_decides_what_a_frame_waits_for() {
+    use super::flight::FlightRendering;
+    let of = |rendering| {
+        let mut app = manual_app(&Config::sized(64, 48, 50, 1));
+        app.flight_rendering = rendering;
+        app.flight_readiness()
+    };
+    assert_eq!(of(FlightRendering::Resolution(25)), Readiness::Blocks(4), "quarter resolution: blocks of 4 x 4");
+    assert_eq!(of(FlightRendering::Resolution(50)), Readiness::Blocks(2));
+    assert_eq!(of(FlightRendering::Resolution(33)), Readiness::Blocks(3));
+    assert_eq!(of(FlightRendering::Resolution(80)), Readiness::FULL_RESOLUTION, "close to 100%: a full layer");
+    assert_eq!(of(FlightRendering::MAX_QUALITY), Readiness::Layers(1));
+    assert_eq!(of(FlightRendering::Resolution(200)), Readiness::Layers(4), "200%: 4 samples per pixel");
+    assert_eq!(of(FlightRendering::Resolution(800)), Readiness::Layers(64), "at most every layer");
+    //From the least to the most complete
+    let order = [Readiness::Any, Readiness::COMPLETE, Readiness::Blocks(8), Readiness::Blocks(4), Readiness::Blocks(2), Readiness::Layers(1), Readiness::Layers(4), Readiness::SuperSampled];
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+    assert_eq!(FlightRendering::Resolution(25).name(), "Quarter resolution");
+    assert_eq!(FlightRendering::Resolution(37).name(), "37% resolution");
 }
 
 #[test]
