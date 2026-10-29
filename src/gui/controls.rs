@@ -161,11 +161,11 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
         });
-        ui.checkbox(&mut self.smooth_flights, "Smooth colors during flights").on_hover_text("Off: the frames on the way color by whole iteration counts, which shows bands of color but skips the smooth color of every pixel (up to a third of the time of a shallow frame). The place itself is always rendered with smooth colors.");
+        ui.checkbox(&mut self.smooth_flights, "Smooth colors during flights").on_hover_text("Off by default: the frames on the way color by whole iteration counts, which shows bands of color but skips the smooth color of every pixel (up to a third of the time of a shallow frame). The place itself is always rendered with smooth colors.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
             let share = flight.flight.share_of_path(flight.elapsed) as f32;
-            let text = format!("To {}: {:.0}% of the way", flight.point.name, share * 100.0);
+            let text = format!("To {}: {:.0}% of the way, {} FPS", flight.point.name, share * 100.0, flight.fps(std::time::Instant::now()));
             ui.horizontal(|ui| {
                 if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
                     self.cancel_flight();
