@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS};
-use super::video::{VideoFormat, FRAME_RATES, SPEEDS};
+use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
+use super::video::{Playback, VideoQuality, FRAMES_AT_ONCE, FRAME_RATES, SPEEDS};
 use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
 use crate::auto_iterations::AutoPreset;
@@ -44,10 +44,13 @@ pub(super) struct Settings {
     pace: Option<String>,
     route: Option<String>,
     constant_speed: Option<f64>,
+    flight_speed: Option<u16>,
+    dive_zoom: Option<f64>,
     flight_rendering: Option<String>,
     flight_resolution: Option<u16>,
     immersion: Option<bool>,
     auto_blur: Option<bool>,
+    cycle_rate: Option<f64>,
     frames_ahead: Option<usize>,
     blend_frames: Option<bool>,
     f32_frames: Option<bool>,
@@ -60,8 +63,11 @@ pub(super) struct Settings {
     stretch_palette: Option<bool>,
     video_fps: Option<u32>,
     video_speed: Option<u16>,
-    video_format: Option<String>,
+    video_quality: Option<String>,
+    video_playback: Option<String>,
     video_pngs: Option<bool>,
+    video_blend: Option<bool>,
+    video_frames_at_once: Option<usize>,
 }
 
 /// The auto iterations presets, to find one by its name
@@ -128,10 +134,13 @@ impl MandelbrotApp {
             pace: Some(self.pace.name().to_string()),
             route: Some(self.route.name().to_string()),
             constant_speed: Some(self.constant_speed),
+            flight_speed: Some(self.flight_speed),
+            dive_zoom: Some(self.dive_zoom),
             flight_rendering: Some(rendering.to_string()),
             flight_resolution: percent,
             immersion: Some(self.immersion),
             auto_blur: Some(self.auto_blur),
+            cycle_rate: Some(self.cycle_rate),
             frames_ahead: Some(self.frames_ahead),
             blend_frames: Some(self.blend_frames),
             f32_frames: Some(self.f32_frames),
@@ -144,12 +153,16 @@ impl MandelbrotApp {
             stretch_palette: Some(self.m.palette.stretch),
             video_fps: Some(self.video_fps),
             video_speed: Some(self.video_speed),
-            video_format: Some(self.video_format.name().to_string()),
+            video_quality: Some(self.video_quality.name().to_string()),
+            video_playback: Some(self.video_playback.name().to_string()),
             video_pngs: Some(self.video_pngs),
+            video_blend: Some(self.video_blend),
+            video_frames_at_once: Some(self.video_frames_at_once),
         }
     }
 
     /// Applies the settings that `settings` has (the others stay as they are)
+    #[allow(clippy::too_many_lines)] // One check per setting
     pub(super) fn apply_settings(&mut self, settings: &Settings) {
         let set = |value: Option<bool>, target: &mut bool| {
             if let Some(value) = value {
@@ -209,11 +222,20 @@ impl MandelbrotApp {
         if let Some(speed) = settings.constant_speed.filter(|speed| CONSTANT_SPEEDS.contains(speed)) {
             self.constant_speed = speed;
         }
+        if let Some(speed) = settings.flight_speed.filter(|speed| FLIGHT_SPEEDS.contains(speed)) {
+            self.flight_speed = speed;
+        }
+        if let Some(zoom) = settings.dive_zoom.filter(|zoom| DIVE_ZOOMS.contains(zoom)) {
+            self.dive_zoom = zoom;
+        }
         if let Some(rendering) = settings.flight_rendering.as_deref().and_then(|key| rendering_of(key, settings.flight_resolution)) {
             self.flight_rendering = rendering;
         }
         set(settings.immersion, &mut self.immersion);
         set(settings.auto_blur, &mut self.auto_blur);
+        if let Some(rate) = settings.cycle_rate.filter(|rate| super::cycle::CYCLE_RATES.contains(rate)) {
+            self.cycle_rate = rate;
+        }
         if let Some(ahead) = settings.frames_ahead.filter(|ahead| *ahead <= 3) {
             self.frames_ahead = ahead;
         }
@@ -239,10 +261,17 @@ impl MandelbrotApp {
         if let Some(speed) = settings.video_speed.filter(|speed| SPEEDS.contains(speed)) {
             self.video_speed = speed;
         }
-        if let Some(format) = settings.video_format.as_deref().and_then(|name| VideoFormat::ALL.into_iter().find(|format| format.name() == name)) {
-            self.video_format = format;
+        if let Some(quality) = settings.video_quality.as_deref().and_then(|name| VideoQuality::ALL.into_iter().find(|quality| quality.name() == name)) {
+            self.video_quality = quality;
+        }
+        if let Some(playback) = settings.video_playback.as_deref().and_then(|name| Playback::ALL.into_iter().find(|playback| playback.name() == name)) {
+            self.video_playback = playback;
+        }
+        if let Some(at_once) = settings.video_frames_at_once.filter(|at_once| FRAMES_AT_ONCE.contains(at_once)) {
+            self.video_frames_at_once = at_once;
         }
         set(settings.video_pngs, &mut self.video_pngs);
+        set(settings.video_blend, &mut self.video_blend);
     }
 
     /// Keeps the settings in the file `path` from now on: the settings as they are now are the defaults (for Reset settings), and those of the file are applied.

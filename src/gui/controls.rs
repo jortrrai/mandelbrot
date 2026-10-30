@@ -4,7 +4,7 @@
 use super::blur::Quality;
 use eframe::egui::{self};
 
-use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS};
+use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
 use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
@@ -96,13 +96,20 @@ impl MandelbrotApp {
                     }
                 }
             }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest: Fast, Normal and Cinematic start and end softly; Constant keeps one speed all the way, set by the slider; using any control or the mouse stops a flight");
+            if !matches!(self.pace, Pace::Constant | Pace::NoFlight) {
+                ui.add(egui::Slider::new(&mut self.flight_speed, FLIGHT_SPEEDS).logarithmic(true).suffix("%")).on_hover_text("The speed of the pace, in percent (10% to 400%): slower or faster, with the same soft start and arrival; it takes effect at once, also during a flight");
+            }
             if self.pace == Pace::Constant {
-                ui.add(egui::Slider::new(&mut self.constant_speed, CONSTANT_SPEEDS).logarithmic(true).max_decimals(2).suffix(" ×2/s")).on_hover_text("The speed of the constant pace, in doublings of the zoom per second (the pan moves as many views): the same speed from the start to the place");
+                ui.add(egui::Slider::new(&mut self.constant_speed, CONSTANT_SPEEDS).logarithmic(true).max_decimals(2).suffix(" ×2/s")).on_hover_text("The speed of the constant pace, in doublings of the zoom per second (the pan moves as many views): the same speed from the start to the place; it takes effect at once, also during a flight");
             }
             egui::ComboBox::from_id_salt("flight_route").selected_text(self.route.name()).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.route, Route::Shortest, Route::Shortest.name()).on_hover_text("Zooms out to travel, only as far as the distance needs, and in again: the shortest way for the eye");
                 ui.selectable_value(&mut self.route, Route::Straight, Route::Straight.name()).on_hover_text("A straight line: the zoom changes steadily from one view to the other, never zooming out on the way. Between two far-apart places at a deep zoom the picture rushes by");
+                ui.selectable_value(&mut self.route, Route::Dive, Route::Dive.name()).on_hover_text("Starts right above the place at the zoom next to it (×1 at first), wherever the view was, and falls straight down into it, zooming only, without moving sideways (also for videos)");
             }).response.on_hover_text("The route of a flight");
+            if self.route == Route::Dive {
+                ui.add(egui::DragValue::new(&mut self.dive_zoom).range(DIVE_ZOOMS).speed(0.05).max_decimals(2).prefix("from ×")).on_hover_text("The zoom the dive starts at (type a value; ×1 is the reset view, ×1000 a thousand times as deep): the flight starts right above the place at this zoom");
+            }
             egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
                 for mode in FlightRendering::ALL {
                     ui.selectable_value(&mut self.flight_rendering, mode, mode.entry()).on_hover_text(match mode {
@@ -385,6 +392,13 @@ impl MandelbrotApp {
                 ui.add(egui::Slider::new(&mut self.m.palette.offset, 0.0..=PALETTE_LENGTH - 1.0).step_by(1.0).max_decimals(0))
                     .on_hover_text("Where the palette starts, in steps (0 to 499 of 500): shifts every color along the palette; the colors change at once while you drag");
             });
+            ui.horizontal(|ui| {
+                if ui.button(if self.color_cycling { "Stop cycling" } else { "Cycle the colors" }).on_hover_text("Moves the offset on by itself, so the colors flow through the set while the view stays where it is; the image shows one sample per pixel (blurred with Auto blur) until the cycling stops").clicked() {
+                    self.toggle_color_cycle();
+                }
+                ui.add(egui::DragValue::new(&mut self.cycle_rate).range(super::cycle::CYCLE_RATES).speed(0.5).max_decimals(1).suffix(" steps/s"))
+                    .on_hover_text("How fast the colors cycle, in steps of the palette per second (type a value; negative: backwards; 500 steps are the whole palette)");
+            });
         });
         ui.checkbox(&mut self.m.palette.stretch, "Stretch the palette over the limit")
             .on_hover_text("On: the palette spans the iteration counts once, from 0 to the limit, without repeating (the colors change with the limit). Off: the palette repeats every 500 steps, see Iteration divide.");
@@ -398,11 +412,11 @@ impl MandelbrotApp {
         //One drop-down per channel of the screen: the channel of the coloring it shows, so every combination can be made
         let mut chosen = None;
         ui.horizontal(|ui| {
-            ui.label("Color channels:").on_hover_text("Which channel of the coloring every channel of the screen shows: red, green and blue as they are (R ← Red, G ← Green, B ← Blue), swapped, or the same channel twice");
+            ui.label("Color channels:").on_hover_text("Which channel of the coloring every channel of the screen shows: red, green and blue as they are (R: Red, G: Green, B: Blue), swapped, or the same channel twice");
             let current = format!("{:?}", self.p.color_channel_mapping);
             for (index, (screen, letter)) in [("R", 'R'), ("G", 'G'), ("B", 'B')].into_iter().enumerate() {
                 let source = current.chars().nth(index).unwrap_or(letter);
-                ui.label(format!("{screen} ←"));
+                ui.label(format!("{screen}:")); //(egui's font has no arrows)
                 egui::ComboBox::from_id_salt(("channel", index)).width(60.0).selected_text(channel_name(source)).show_ui(ui, |ui| {
                     for option in ['R', 'G', 'B'] {
                         if ui.selectable_label(option == source, channel_name(option)).clicked() && option != source {

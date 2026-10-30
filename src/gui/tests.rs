@@ -1215,7 +1215,7 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_a_flight_and_reaches_the_l
     wait_for_job(&mut app);
     let start_limit = app.m.max_iterations;
     app.go_to_point_of_interest(0);
-    app.flight.as_mut().unwrap().limits.as_mut().unwrap().wait_for_destination();
+    app.flight.as_ref().unwrap().limits.as_ref().unwrap().lock().unwrap().wait_for_destination();
     //What auto iterations chooses at the destination (the render on arrival runs exactly this)
     let location = &app.points[0].location;
     let mut destination = ComplexPlane::new(64, 48);
@@ -1668,9 +1668,10 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     let defaults = app.settings();
     (app.pace, app.fast_gpu, app.supersampling_amount, app.m.smooth_coloring) = (super::flight::Pace::Cinematic, false, 16, false);
     app.flight_rendering = super::flight::FlightRendering::Resolution(37);
-    (app.route, app.constant_speed) = (super::flight::Route::Straight, 7.5);
+    (app.route, app.constant_speed, app.dive_zoom) = (super::flight::Route::Straight, 7.5, 250.0);
     (app.frames_ahead, app.blend_frames, app.f32_frames, app.quality_blur, app.neighborhood_margin) = (1, true, false, true, 250);
-    (app.video_fps, app.video_speed, app.video_format, app.video_pngs) = (144, 10, super::video::VideoFormat::Lossless, false);
+    (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs, app.video_frames_at_once) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::Phones, true, 3);
+    app.video_blend = true;
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     let now = std::time::Instant::now();
     app.keep_settings(now);
@@ -1682,9 +1683,10 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert!(next.use_settings_file(Some(path.clone())));
     assert_eq!((next.pace, next.fast_gpu, next.supersampling_amount, next.m.smooth_coloring, next.flight_rendering),
         (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
-    assert_eq!((next.route, next.constant_speed), (super::flight::Route::Straight, 7.5));
+    assert_eq!((next.route, next.constant_speed, next.dive_zoom), (super::flight::Route::Straight, 7.5, 250.0));
     assert_eq!((next.frames_ahead, next.blend_frames, next.f32_frames, next.quality_blur, next.neighborhood_margin), (1, true, false, true, 250));
-    assert_eq!((next.video_fps, next.video_speed, next.video_format, next.video_pngs), (144, 10, super::video::VideoFormat::Lossless, false));
+    assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs, next.video_frames_at_once), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::Phones, true, 3));
+    assert!(next.video_blend);
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
@@ -1759,7 +1761,7 @@ fn a_video_of_the_last_flight_has_a_frame_for_every_step_of_its_frame_rate() {
     app.video_folder = folder.join("saved");
     app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
     (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
-    app.pace = super::flight::Pace::Fast;
+    (app.pace, app.video_pngs, app.video_frames_at_once) = (super::flight::Pace::Fast, true, 3); //(Three frames at once: still every frame, in order)
     app.go_to_point_of_interest(0);
     app.skip_flight();
     let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
@@ -1919,8 +1921,8 @@ fn the_color_channels_have_a_drop_down_per_screen_channel_that_shows_its_source(
         _ => None,
     }).collect();
     output.drop_without_applying_deltas();
-    let at = texts.iter().position(|text| text == "R ←").expect("the drop-down of the red channel");
-    assert_eq!(texts[at..at + 6], ["R ←", "Blue", "G ←", "Green", "B ←", "Green"], "{:?}", &texts[at..]);
+    let at = texts.iter().position(|text| text == "R:").expect("the drop-down of the red channel");
+    assert_eq!(texts[at..at + 6], ["R:", "Blue", "G:", "Green", "B:", "Green"], "{:?}", &texts[at..]);
 }
 #[test]
 fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_file() {
@@ -1928,7 +1930,7 @@ fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_fi
     app.video_folder = folder.join("saved");
     app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
     (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
-    (app.video_speed, app.video_format, app.video_pngs) = (50, super::video::VideoFormat::Lossless, false);
+    (app.video_speed, app.video_quality, app.video_pngs) = (50, super::video::VideoQuality::Lossless, false);
     app.pace = super::flight::Pace::Fast;
     app.go_to_point_of_interest(0);
     app.skip_flight();
@@ -1952,4 +1954,142 @@ fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_fi
     }
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() {
+    let ctx = egui::Context::default();
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 1.0, offset: 0.0, stretch: false };
+    app.render("Colors");
+    wait_for_job(&mut app);
+    let log_length = app.log.len();
+    (app.cycle_rate, app.color_cycling) = (100.0, false);
+    app.toggle_color_cycle();
+    let started = std::time::Instant::now();
+    let mut steps = 0;
+    while started.elapsed() < Duration::from_millis(300) {
+        let offset = app.m.palette.offset;
+        app.cycle_colors(&ctx, std::time::Instant::now());
+        steps += usize::from((app.m.palette.offset - offset).abs() > 1e-9);
+        app.poll_job();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let offset = app.m.palette.offset;
+    assert!(steps >= 5, "the colors moved in steps: {steps}");
+    assert!((offset - 100.0 * started.elapsed().as_secs_f64()).abs() < 10.0, "about 100 steps per second: {offset} after {:?}", started.elapsed());
+    app.toggle_color_cycle();
+    wait_for_job(&mut app);
+    assert_eq!(app.m.palette.offset, offset, "stopping keeps the colors it reached");
+    assert!(app.buffer_is_complete, "and renders the view to its full quality");
+    assert!(app.log.len() <= log_length + 3, "the steps do not fill the log: {:?}", &app.log[log_length..]);
+}
+
+#[test]
+fn flight_settings_take_effect_during_a_flight_and_a_new_speed_keeps_the_camera_where_it_is() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    (app.flight_rendering, app.pace) = (super::flight::FlightRendering::FULL_RESOLUTION, super::flight::Pace::Cinematic);
+    app.go_to_point_of_interest(0);
+    app.fly_at(std::time::Instant::now());
+    let started = std::time::Instant::now();
+    while app.flight.as_ref().is_some_and(|flight| flight.elapsed.is_zero()) {
+        assert!(started.elapsed() < Duration::from_secs(30), "no frame");
+        app.poll_job();
+        app.fly_at(std::time::Instant::now());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    //Blend frames on: the job starts again with it
+    assert_eq!(app.flight_job_options, Some(app.flight_job_options()));
+    app.blend_frames = true;
+    app.fly_at(std::time::Instant::now());
+    assert_eq!(app.flight_job_options, Some(app.flight_job_options()), "restarted with the new setting");
+    //Twice as fast: half the time, at the same share of it
+    let flight = app.flight.as_ref().unwrap();
+    let (share, duration) = (flight.elapsed.as_secs_f64() / flight.flight.duration().as_secs_f64(), flight.flight.duration());
+    app.flight_speed = 200;
+    app.fly_at(std::time::Instant::now());
+    let flight = app.flight.as_ref().unwrap();
+    assert!((flight.flight.duration().as_secs_f64() * 2.0 - duration.as_secs_f64()).abs() < 1e-6, "half the time");
+    assert!((flight.elapsed.as_secs_f64() / flight.flight.duration().as_secs_f64() - share).abs() < 1e-6, "the same share of it");
+    let _ = fly_until_arrived(&mut app);
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn with_auto_blur_the_place_stays_blurred_until_its_render_is_finished() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    (app.auto_blur, app.pace) = (true, super::flight::Pace::Fast);
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    assert!(app.landing_blur, "blurred after the arrival");
+    wait_for_job(&mut app);
+    assert!(!app.landing_blur, "sharp once the render of the place is finished");
+    //Without Auto blur there is no blur at the landing either
+    app.auto_blur = false;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    assert!(!app.landing_blur);
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+#[ignore = "timing, run by hand"]
+fn video_render_time_with_frames_at_once() {
+    for at_once in [1, 2, 3] {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        if app.gpu.is_none() {
+            app.gpu = rendering::gpu::GpuIterator::new().ok().map(std::sync::Arc::new);
+        }
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (1920, 1080, 4, 30);
+        (app.pace, app.video_frames_at_once, app.use_gpu) = (super::flight::Pace::Fast, at_once, true);
+        app.go_to_point_of_interest(0);
+        app.skip_flight();
+        wait_for_job(&mut app);
+        let started = std::time::Instant::now();
+        app.start_video();
+        let ctx = egui::Context::default();
+        while app.video_job.is_some() {
+            app.poll_video(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        println!("{at_once} at once: {:.2} s, {}", started.elapsed().as_secs_f64(), app.log.last().unwrap());
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+#[test]
+fn a_blended_video_has_every_frame_and_blends_the_frames_after_the_first() {
+    let render = |blend: bool| {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
+        (app.pace, app.video_pngs, app.video_blend, app.video_frames_at_once) = (super::flight::Pace::Fast, true, blend, 3);
+        app.go_to_point_of_interest(0);
+        app.skip_flight();
+        app.start_video();
+        let ctx = egui::Context::default();
+        let started = std::time::Instant::now();
+        while app.video_job.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(60), "the video did not finish");
+            app.poll_video(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        wait_for_job(&mut app);
+        let written = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).find(|entry| entry.path().is_dir()).unwrap().path();
+        let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&written).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+        frames.sort();
+        let bytes: Vec<Vec<u8>> = frames.iter().map(|frame| std::fs::read(frame).unwrap()).collect();
+        let _ = std::fs::remove_dir_all(folder);
+        bytes
+    };
+    let (plain, blended) = (render(false), render(true));
+    assert_eq!(plain.len(), blended.len(), "every frame");
+    assert_eq!(plain[0], blended[0], "the first frame has nothing to blend with");
+    assert!(plain.iter().zip(&blended).skip(1).any(|(a, b)| a != b), "the frames after it are blended");
 }
