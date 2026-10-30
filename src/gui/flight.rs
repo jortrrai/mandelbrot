@@ -4,6 +4,7 @@
 //! so the picture moves at the same apparent speed at every zoom, and the length `S` of the path measures how much the view changes. A flight always takes this shortest
 //! path. Its duration follows from the length at the speed of its pace, and the pace eases the start and the end.
 
+use super::spiral::SpiralPath;
 use std::time::Duration;
 
 use crate::complex_plane::View;
@@ -165,10 +166,41 @@ impl Leg {
     }
 }
 
+/// The route of a flight: the way the camera takes, see `Flight::with_route`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The shortest path: zooming out only as far as the distance needs (van Wijk and Nuij)
+    Shortest,
+    /// Spiraling into the place the way the set spirals there, see `spiral`
+    Spiral,
+}
+
+impl Route {
+    /// Every route, in the order of the drop-down (the default first)
+    pub const ALL: [Route; 2] = [Route::Shortest, Route::Spiral];
+
+    /// The name in the drop-down
+    pub const fn name(self) -> &'static str {
+        match self {
+            Route::Shortest => "Shortest",
+            Route::Spiral => "Spiral",
+        }
+    }
+}
+
+/// The path of a flight
+#[derive(Clone, Debug)]
+enum Path {
+    Shortest(Leg),
+    Spiral(SpiralPath),
+}
+
 /// A flight from one view to another, see the module
 #[derive(Clone, Debug)]
 pub struct Flight {
-    leg: Leg,
+    path: Path,
+    /// The length of the shortest path, which sets the duration (the spiral takes as long, so the paces mean the same)
+    length: f64,
     pace: Pace,
     duration: Duration,
 }
@@ -179,7 +211,20 @@ impl Flight {
         let leg = Leg::new(from, to);
         let (speed, shortest, longest) = pace.speed();
         let duration = Duration::from_secs_f64((leg.length / speed).clamp(shortest, longest));
-        Flight { leg, pace, duration }
+        Flight { length: leg.length, path: Path::Shortest(leg), pace, duration }
+    }
+
+    /// A flight by `route`; with `Route::Spiral` also whether the spiral was possible (without a spiral center near the destination, or with a start too far from
+    /// it, the flight takes the shortest path)
+    pub fn with_route(from: Camera, to: Camera, pace: Pace, route: Route) -> (Flight, bool) {
+        let mut flight = Flight::new(from, to, pace);
+        if route == Route::Spiral {
+            match SpiralPath::new(from, to) {
+                Some(spiral) => flight.path = Path::Spiral(spiral),
+                None => return (flight, false),
+            }
+        }
+        (flight, true)
     }
 
     /// How long the flight takes
@@ -189,7 +234,11 @@ impl Flight {
 
     /// The camera `elapsed` after the start: the start view at 0, exactly the destination from `duration` on
     pub fn camera_at(&self, elapsed: Duration) -> Camera {
-        self.leg.camera_at(self.pace.ease(elapsed.as_secs_f64() / self.duration.as_secs_f64()) * self.leg.length)
+        let share = self.pace.ease(elapsed.as_secs_f64() / self.duration.as_secs_f64());
+        match &self.path {
+            Path::Shortest(leg) => leg.camera_at(share * self.length),
+            Path::Spiral(spiral) => spiral.camera_at(share),
+        }
     }
 
     /// The share of the path (0 to 1) that the camera has covered `elapsed` after the start, as the progress bar shows it

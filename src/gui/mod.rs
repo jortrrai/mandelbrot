@@ -23,6 +23,7 @@ mod pointer;
 mod points;
 mod render_job;
 mod save_size;
+mod spiral;
 mod status;
 mod transform;
 #[cfg(test)]
@@ -150,6 +151,8 @@ pub struct MandelbrotApp {
     new_point: Option<(String, String)>,
     /// How fast a flight to a point of interest goes (fast by default), and the flight that is under way, see `flight`
     pace: flight::Pace,
+    /// The route of flights, see `flight::Route`
+    route: flight::Route,
     flight: Option<points::PointFlight>,
     /// Whether the running job renders the frames of the flight (see `flight_job`), and the time between two frames of the screen, which the job keeps to
     flight_job: bool,
@@ -268,6 +271,7 @@ impl MandelbrotApp {
             show_points: false,
             new_point: None,
             pace: flight::Pace::Fast,
+            route: flight::Route::Shortest,
             flight: None,
             flight_job: false,
             frame_interval: Duration::from_secs_f64(1.0 / 60.0),

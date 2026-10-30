@@ -4,7 +4,7 @@
 use super::blur::Quality;
 use eframe::egui::{self};
 
-use super::flight::{FlightRendering, Pace};
+use super::flight::{FlightRendering, Pace, Route};
 use crate::mandelbrot_set::{MIN_DIVIDE, PALETTE_LENGTH};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
@@ -155,6 +155,11 @@ impl MandelbrotApp {
                     }
                 }
             }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest, by the shortest path (zooming out only as far as the distance needs); using any control or the mouse stops a flight");
+            egui::ComboBox::from_id_salt("flight_route").selected_text(self.route.name()).show_ui(ui, |ui| {
+                for route in Route::ALL {
+                    ui.selectable_value(&mut self.route, route, route.name());
+                }
+            }).response.on_hover_text("Shortest: the shortest path, zooming out only as far as the distance needs. Spiral: the camera spirals into the place the way the set spirals there (around the nearest spiral center of the set, a Misiurewicz point); where there is none near, the shortest path");
             egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
                 for mode in FlightRendering::ALL {
                     ui.selectable_value(&mut self.flight_rendering, mode, mode.entry()).on_hover_text(match mode {
