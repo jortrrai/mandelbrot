@@ -48,7 +48,7 @@ impl MandelbrotApp {
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
         let pixels = u32::try_from(width * height).unwrap_or(u32::MAX);
         let mut first_layer_per_pixel = self.first_layer_per_pixel;
-        let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
+        let (gpu, fast_gpu, f32_frames) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu, self.f32_frames);
         //`cancel` stops the frame that is rendered (the job sets it when the frame is complete enough), `stop` the whole job (the window sets it, then `cancel`)
         let (cancel, stop) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let (thread_cancel, thread_stop) = (Arc::clone(&cancel), Arc::clone(&stop));
@@ -75,7 +75,7 @@ impl MandelbrotApp {
                 let preview = (!levels.is_empty() && first_layer_per_pixel.is_none_or(|per_pixel| per_pixel * pixels > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
                 let (mut previews, mut shown, mut layer_started) = (0, false, Instant::now());
                 let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels)
-                    .gpu(gpu.as_deref().map(|gpu| (gpu, join_after))).fast_gpu(fast_gpu).cancel_with(&thread_cancel);
+                    .gpu(gpu.as_deref().map(|gpu| (gpu, join_after))).fast_gpu(fast_gpu).f32_gpu(f32_frames && !path.arrived(elapsed)).cancel_with(&thread_cancel);
                 let last = path.arrived(elapsed);
                 let render = if required == Readiness::FULL_RESOLUTION && !last { render.colors_only() } else { render };
                 render.run(|colors, pass| {

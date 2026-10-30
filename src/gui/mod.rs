@@ -235,6 +235,8 @@ pub struct MandelbrotApp {
     use_gpu: bool,
     /// Whether the GPU uses its fast double-float loop (on by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
     fast_gpu: bool,
+    /// Whether frames that move (flights, drags) at shallow zoom use the GPU's plain f32 loop (off by default), see `Render::f32_gpu`
+    f32_frames: bool,
     /// Whether nothing deeper than the fast GPU math is rendered (on by default: deeper views are left to the CPU and are slow), see `zoom_refused` and `keep_within_zoom_limit`
     limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
@@ -337,6 +339,7 @@ impl MandelbrotApp {
             gpu: None,
             use_gpu: true,
             fast_gpu: true,
+            f32_frames: false,
             limit_zoom: true,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU

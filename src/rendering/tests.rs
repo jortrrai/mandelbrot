@@ -768,3 +768,27 @@ fn another_palette_recolors_the_first_samples_at_once_and_ends_in_the_image_of_a
         assert_eq!(render(&mut state, &deeper, 2, adaptive).last(), render(&mut SampleState::new(), &deeper, 2, adaptive).last());
     }
 }
+
+#[test]
+fn the_f32_loop_keeps_most_pixels_of_a_shallow_view_and_is_not_used_deeper() {
+    let Ok(gpu) = super::gpu::GpuIterator::new() else { return };
+    let (w, h) = (480, 320);
+    let render = |view: &crate::complex_plane::View, max: u32, single: bool| {
+        let mut c = ComplexPlane::new(w, h);
+        c.set_view(view);
+        let m = MandelbrotSet::new(max, 2.0);
+        let mut last = Vec::new();
+        assert!(Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).gpu(Some((&gpu, std::time::Duration::ZERO))).fast_gpu(true).f32_gpu(single).on_the_gpu_only()
+            .run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()));
+        last
+    };
+    for (name, view, max) in [("the whole set", crate::complex_plane::View::new(-0.75, 0.0, 1.0), 500), ("Frost", crate::complex_plane::View::new(-0.6604166666666667, 0.4437500000000001, 0.1), 1000)] {
+        let (double, single) = (render(&view, max, false), render(&view, max, true));
+        let differ = double.iter().zip(&single).filter(|(a, b)| a != b).count();
+        println!("{name}: {:.2}% of the pixels differ from the double-float loop", differ as f64 * 100.0 / (w * h) as f64);
+        assert!(differ * 10 < w * h, "{name}: {differ} of {} pixels", w * h);
+    }
+    //Too deep for f32 (Seahorse at 6.4e-5): the double-float loop, the same pixels
+    let seahorse = crate::complex_plane::View::new(-0.7498100000000001, -0.020300000000000054, 0.000064);
+    assert_eq!(render(&seahorse, 2000, true), render(&seahorse, 2000, false));
+}
