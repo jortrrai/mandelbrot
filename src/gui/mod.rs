@@ -27,6 +27,7 @@ mod save_size;
 mod settings;
 pub use settings::settings_path;
 mod status;
+mod temporal;
 mod transform;
 mod video;
 #[cfg(test)]
@@ -214,6 +215,8 @@ pub struct MandelbrotApp {
     frames_queued: Arc<std::sync::atomic::AtomicUsize>,
     /// Whether the frame on the screen still stays there for this refresh (1) before the next frame of the queue may show (0)
     frame_hold: u32,
+    /// Whether the full-resolution frames of a flight are blended over time (off by default), see `temporal`
+    blend_frames: bool,
     /// The samples per pixel of the frame on the screen (0 for a preview), for the strength of the blur
     shown_samples: u8,
     /// The size of the Auto frame on the screen when it is below full resolution (its colors are the rows of that smaller image, see `SparePool::packed`), and of the
@@ -351,6 +354,7 @@ impl MandelbrotApp {
             flight_queue: std::collections::VecDeque::new(),
             frames_queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             frame_hold: 0,
+            blend_frames: false,
             shown_samples: 0,
             shown_scaled: None,
             frame_scaled: None,

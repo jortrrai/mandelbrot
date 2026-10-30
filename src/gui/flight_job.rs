@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use super::points::MAX_WAITING_STEP;
 use super::render_job::{JobMessage, Progress, RenderKind, GPU_JOIN_AFTER, PREVIEW_WORTHWHILE};
 use super::flight::{auto_scale, FlightRendering};
-use super::{MandelbrotApp, Readiness};
+use super::{temporal, MandelbrotApp, Readiness};
 use crate::complex_plane::ComplexPlane;
 use crate::rendering::{self, Render};
 
@@ -59,7 +59,7 @@ impl MandelbrotApp {
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
         let pixels = u32::try_from(width * height).unwrap_or(u32::MAX);
         let mut first_layer_per_pixel = self.first_layer_per_pixel;
-        let (gpu, fast_gpu, f32_frames) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu, self.f32_frames);
+        let (gpu, fast_gpu, f32_frames, blend_frames) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu, self.f32_frames, self.blend_frames);
         //`cancel` stops the frame that is rendered (the job sets it when the frame is complete enough), `stop` the whole job (the window sets it, then `cancel`)
         let (cancel, stop) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let (thread_cancel, thread_stop) = (Arc::clone(&cancel), Arc::clone(&stop));
@@ -76,6 +76,8 @@ impl MandelbrotApp {
             let mut frame_started = Instant::now();
             //The join delay of the GPU for the next frame: none once a frame has taken longer than a few delays
             let mut join_after = GPU_JOIN_AFTER;
+            //With Blend frames: the image of the frames so far, and the sample (jitter) the next frame takes, see `temporal`
+            let (mut history, mut next_sample) = (None, 0_u8);
             while !thread_stop.load(Ordering::SeqCst) {
                 thread_cancel.store(false, Ordering::SeqCst);
                 if thread_stop.load(Ordering::SeqCst) {
@@ -98,6 +100,7 @@ impl MandelbrotApp {
                     let mut small_plane = ComplexPlane::new(small.0, small.1);
                     small_plane.set_view(&plane.get_view());
                     let mut shown = false;
+                    history = None; //(A blend continues only from full-resolution frames, see `temporal`)
                     Render::new(&small_plane, &m, small.0, small.1, coloring_function).gpu(gpu.as_deref().map(|gpu| (gpu, join_after))).fast_gpu(fast_gpu).f32_gpu(f32_frames).cancel_with(&thread_cancel)
                         .colors_only().run(|colors, pass| {
                             if pass == 0 || shown {
@@ -118,7 +121,13 @@ impl MandelbrotApp {
                 let (mut previews, mut shown, mut layer_started) = (0, false, Instant::now());
                 let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels)
                     .gpu(gpu.as_deref().map(|gpu| (gpu, join_after))).fast_gpu(fast_gpu).f32_gpu(f32_frames && !last).cancel_with(&thread_cancel);
-                let render = if required == Readiness::FULL_RESOLUTION && !last { render.colors_only() } else { render };
+                let blending = blend_frames && required == Readiness::FULL_RESOLUTION && !last;
+                let render = match (required == Readiness::FULL_RESOLUTION && !last, blending) {
+                    (true, true) => render.colors_only_of_sample(next_sample),
+                    (true, false) => render.colors_only(),
+                    (false, _) => render,
+                };
+                next_sample = next_sample.wrapping_add(1) % 64;
                 render.run(|colors, pass| {
                         if pass == 1 {
                             first_layer_per_pixel = Some(layer_started.elapsed() / pixels.max(1));
@@ -132,7 +141,14 @@ impl MandelbrotApp {
                         shown = true;
                         let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette: m.palette, preview: previews, levels: levels.clone(), scaled: None });
                         queued.fetch_add(1, Ordering::SeqCst);
-                        let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: plane.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
+                        let colors = if blending {
+                            let mut shown = spare_colors.copy(&[]);
+                            temporal::blend(&mut history, &plane, colors, width, height, &mut shown);
+                            shown
+                        } else {
+                            spare_colors.copy(colors)
+                        };
+                        let _ = sender.send(JobMessage::Pass { colors, plane: plane.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
                         thread_cancel.store(true, Ordering::SeqCst); //Complete enough: on to the next frame
                     });
                 if last || !next_frame(shown, &mut scale, auto, &mut join_after, &mut elapsed, &mut frame_started, &clock) {

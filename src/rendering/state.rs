@@ -115,6 +115,7 @@ impl SampleState {
 
     /// Makes the state fit a render of `plane` (`width` x `height` pixels) of `m` colored by `coloring_function`, like `Render::resume` does when it starts,
     /// and returns how many pixels kept samples. A render that resumes the state afterwards finds it prepared.
+    #[allow(clippy::too_many_arguments)] // The view, the size and everything the key of the samples needs
     pub fn prepare_for(&mut self, plane: &ComplexPlane, width: usize, height: usize, m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor, fast_gpu: bool, single: bool) -> usize {
         if self.prepare(plane, width, height, SampleKey::new(m, coloring_function, fast_gpu, single)) == Prepared::Empty { 0 } else { self.counts.iter().filter(|count| **count > 0).count() }
     }
