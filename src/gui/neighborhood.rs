@@ -1,5 +1,6 @@
-//! The neighborhood of the view (issue #144): once the view is finished and nothing else runs, the area around it is rendered too, up to one view to every side
-//! (3 x 3 views), at half the resolution of the view, so it costs about 2.25 views of pixels. The window draws it behind the image: a drag, a pan or a zoom out then
+//! The neighborhood of the view (issue #144): once the view is finished and nothing else runs, the area around it is rendered too, by default one view to every
+//! side (3 x 3 views; *Neighborhood size* sets the share of a view to every side), at half the resolution of the view, so by default it costs about 2.25 views of
+//! pixels. A large neighborhood is rendered at a lower resolution, so its texture stays within `MAX_SIDE` pixels. The window draws it behind the image: a drag, a pan or a zoom out then
 //! shows the neighborhood at once where the old image does not reach, instead of black, until the render of the new view fills it in.
 //!
 //! It is only drawn while it has the colors of the view (the same limit, palette, coloring and channels), and it is rendered again when the view has moved
@@ -17,11 +18,19 @@ use crate::complex_plane::{ComplexPlane, View};
 use crate::mandelbrot_set::MandelbrotSet;
 use crate::rendering::Render;
 
-/// How many views the neighborhood is across and down (the view in the middle and one to every side)
-const VIEWS_ACROSS: f64 = 3.0;
+/// The neighborhood has this many pixels for every pixel of the view it covers (half the resolution)
+const RESOLUTION: f64 = 0.5;
 
-/// The neighborhood has this many pixels across for every pixel of the view (half the resolution: 3 views of half the pixels)
-const PIXELS_PER_VIEW_PIXEL: f64 = 1.5;
+/// The longest side of the neighborhood in pixels: a larger neighborhood gets a lower resolution, so it fits a texture of the GPU and the memory
+pub(super) const MAX_SIDE: usize = 8192;
+
+/// The size of the neighborhood at first: one view to every side, in percent of the view
+pub(super) const DEFAULT_MARGIN: u16 = 100;
+
+/// How many views the neighborhood is across and down: the view in the middle and `margin` percent of a view to every side
+fn views_across(margin: u16) -> f64 {
+    1.0 + 2.0 * f64::from(margin) / 100.0
+}
 
 /// What the colors of a neighborhood depend on: it is only drawn under an image with the same
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +62,8 @@ pub(super) struct Neighborhood {
     around: ComplexPlane,
     texture: TextureHandle,
     key: NeighborhoodKey,
+    /// Its size, in percent of a view to every side
+    margin: u16,
 }
 
 /// The job that renders a neighborhood: its cancel flag, and the receiver of its plane and colors (with their size) when it is done
@@ -61,6 +72,7 @@ pub(super) struct NeighborhoodJob {
     result: Receiver<(ComplexPlane, Vec<TrueColor>, usize, usize)>,
     around: ComplexPlane,
     key: NeighborhoodKey,
+    margin: u16,
 }
 
 #[cfg(test)]
@@ -93,14 +105,14 @@ impl MandelbrotApp {
             let job = self.neighborhood_job.take().expect("the job sent its result");
             let image = ColorImage::from_rgb([width, height], &colors_to_rgb_bytes(&colors, job.key.mapping));
             let texture = ctx.load_texture("neighborhood", image, TextureOptions::LINEAR);
-            self.neighborhood = Some(Neighborhood { plane, around: job.around, texture, key: job.key });
+            self.neighborhood = Some(Neighborhood { plane, around: job.around, texture, key: job.key, margin: job.margin });
         }
         let idle = self.render_neighborhood && !self.is_busy() && self.flight.is_none() && !self.gesture_active && self.settle.is_none() && self.buffer_is_complete;
         if !idle || self.neighborhood_job.is_some() {
             return;
         }
         let key = NeighborhoodKey::new(&self.m, self.coloring_function, self.p.color_channel_mapping);
-        if self.neighborhood.as_ref().is_some_and(|neighborhood| neighborhood.key == key && still_around(&neighborhood.around, &self.c)) {
+        if self.neighborhood.as_ref().is_some_and(|neighborhood| neighborhood.key == key && neighborhood.margin == self.neighborhood_margin && still_around(&neighborhood.around, &self.c, neighborhood.margin)) {
             return;
         }
         self.start_neighborhood_job(key);
@@ -108,11 +120,11 @@ impl MandelbrotApp {
     }
 
     fn start_neighborhood_job(&mut self, key: NeighborhoodKey) {
-        let (view_width, view_height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
-        let (width, height) = (((view_width as f64) * PIXELS_PER_VIEW_PIXEL).round() as usize, ((view_height as f64) * PIXELS_PER_VIEW_PIXEL).round() as usize);
+        let margin = self.neighborhood_margin;
+        let (width, height) = neighborhood_size(self.p.pixel_plane.width, self.p.pixel_plane.height, margin);
         let center = self.c.center();
-        let mut plane = ComplexPlane::new(width.max(1), height.max(1));
-        plane.set_view(&View::new(center.x, center.y, self.c.get_scale() * VIEWS_ACROSS));
+        let mut plane = ComplexPlane::new(width, height);
+        plane.set_view(&View::new(center.x, center.y, self.c.get_scale() * views_across(margin)));
         let (m, coloring_function) = (self.m.clone(), self.coloring_function);
         let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -126,7 +138,7 @@ impl MandelbrotApp {
                 let _ = sender.send((plane, colors, width, height));
             }
         });
-        self.neighborhood_job = Some(NeighborhoodJob { cancel, result, around: self.c.clone(), key });
+        self.neighborhood_job = Some(NeighborhoodJob { cancel, result, around: self.c.clone(), key, margin });
     }
 
     /// Draws the neighborhood behind the image in `rect`, at its place in the view on the screen, when it has the colors of the image
@@ -139,10 +151,18 @@ impl MandelbrotApp {
     }
 }
 
-/// Whether the neighborhood made for the view `around` still serves the view `view`: the same zoom, and the middle of the view within the middle view of the
-/// neighborhood, so it reaches at least half a view past every side
-pub(super) fn still_around(around: &ComplexPlane, view: &ComplexPlane) -> bool {
+/// Whether the neighborhood of `margin` percent made for the view `around` still serves the view `view`: the same zoom, and the view moved by at most half the
+/// margin, so the neighborhood still reaches at least half its margin past every side (half a view by default)
+pub(super) fn still_around(around: &ComplexPlane, view: &ComplexPlane, margin: u16) -> bool {
     let same_zoom = (around.get_scale() / view.get_scale() - 1.0).abs() < 1e-9;
-    let (a, b) = (around.center(), view.center());
-    same_zoom && (a.x - b.x).abs() <= around.length_x / 2.0 && (a.y - b.y).abs() <= around.length_y / 2.0
+    let ((a, b), share) = ((around.center(), view.center()), f64::from(margin) / 200.0);
+    same_zoom && (a.x - b.x).abs() <= around.length_x * share && (a.y - b.y).abs() <= around.length_y * share
+}
+
+/// The pixels of the neighborhood of `margin` percent of a `width` x `height` view: half the resolution of the view, lower where that would be more than
+/// `MAX_SIDE` pixels on a side
+pub(super) fn neighborhood_size(width: usize, height: usize, margin: u16) -> (usize, usize) {
+    let across = views_across(margin) * RESOLUTION;
+    let factor = across.min(MAX_SIDE as f64 / width.max(height).max(1) as f64);
+    (((width as f64 * factor).round() as usize).max(1), ((height as f64 * factor).round() as usize).max(1))
 }

@@ -168,6 +168,8 @@ pub struct MandelbrotApp {
     neighborhood: Option<neighborhood::Neighborhood>,
     neighborhood_job: Option<neighborhood::NeighborhoodJob>,
     render_neighborhood: bool,
+    /// The size of the neighborhood, in percent of a view to every side, see `neighborhood`
+    neighborhood_margin: u16,
     /// The blur of the image during flights (`None` without a suitable OpenGL context, as in tests), see `blur`
     blur: Option<std::sync::Arc<blur::Blur>>,
     /// Whether the image is blurred while a flight moves the view, see `blur`
@@ -276,6 +278,7 @@ impl MandelbrotApp {
             neighborhood: None,
             neighborhood_job: None,
             render_neighborhood: true,
+            neighborhood_margin: neighborhood::DEFAULT_MARGIN,
             blur: None,
             auto_blur: true,
             shown_samples: 0,

@@ -1609,19 +1609,40 @@ fn a_finished_view_gets_its_neighborhood_which_a_small_move_keeps_and_a_zoom_ren
     //Three views across and down, around the view, at half its resolution
     assert!((neighborhood.plane().get_scale() / app.c.get_scale() - 3.0).abs() < 1e-9);
     assert_eq!(neighborhood.texture_size(), [96, 72]);
-    assert!(super::neighborhood::still_around(neighborhood.around(), &app.c));
+    assert!(super::neighborhood::still_around(neighborhood.around(), &app.c, 100));
     //A small move keeps it: no new job
     let mut moved = app.c.clone();
     rendering::move_complex_plane_by_pixels(&mut moved, 5, 10);
-    assert!(super::neighborhood::still_around(neighborhood.around(), &moved));
+    assert!(super::neighborhood::still_around(neighborhood.around(), &moved, 100));
     //A zoom does not; a render stops the job at once
     let mut zoomed = app.c.clone();
     zoomed.scale(0.5);
-    assert!(!super::neighborhood::still_around(neighborhood.around(), &zoomed));
+    assert!(!super::neighborhood::still_around(neighborhood.around(), &zoomed, 100));
     app.c = zoomed;
     app.render("Zoomed");
     assert!(app.neighborhood_job.is_none(), "no neighborhood while a render runs");
     wait_for_job(&mut app);
     wait_for_neighborhood(&mut app);
-    assert!(super::neighborhood::still_around(app.neighborhood.as_ref().unwrap().around(), &app.c), "rendered again for the zoomed view");
+    assert!(super::neighborhood::still_around(app.neighborhood.as_ref().unwrap().around(), &app.c, 100), "rendered again for the zoomed view");
+    //A larger size: rendered again, 2.5 views to every side (6 views across) at half the resolution
+    app.neighborhood_margin = 250;
+    wait_for_neighborhood(&mut app);
+    let neighborhood = app.neighborhood.as_ref().unwrap();
+    assert!((neighborhood.plane().get_scale() / app.c.get_scale() - 6.0).abs() < 1e-9);
+    assert_eq!(neighborhood.texture_size(), [192, 144]);
+}
+
+#[test]
+fn a_large_neighborhood_keeps_its_texture_within_the_largest_side_and_a_small_one_is_kept_for_a_shorter_move() {
+    use super::neighborhood::{neighborhood_size, still_around, MAX_SIDE};
+    assert_eq!(neighborhood_size(3840, 2160, 100), (5760, 3240), "4K: three views of half the pixels");
+    let (width, height) = neighborhood_size(3840, 2160, 1000);
+    assert_eq!(width, MAX_SIDE, "21 views across would be 40320 pixels");
+    assert!((width as f64 / height as f64 - 3840.0 / 2160.0).abs() < 0.01);
+    //A margin of 20%: a move of 15% of the view is too far (half the margin is 10%)
+    let mut view = ComplexPlane::new(100, 100);
+    view.set_view(&crate::complex_plane::View::new(-0.75, 0.0, 1.0));
+    let mut moved = view.clone();
+    rendering::move_complex_plane_by_pixels(&mut moved, 15, 0);
+    assert!(still_around(&view, &moved, 100) && !still_around(&view, &moved, 20));
 }
