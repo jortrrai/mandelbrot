@@ -143,6 +143,7 @@ impl MandelbrotApp {
         }
         ui.checkbox(&mut self.show_points, "Show points of interest").on_hover_text("Marks the saved points of interest on the view where they are, with their names");
         ui.checkbox(&mut self.restore_appearance, "Restore the saved appearance (coloring, color channels)").on_hover_text("Off: going to a place keeps your current appearance. The supersampling is never part of a place.");
+        self.benchmark_ui(ui);
         ui.horizontal(|ui| {
             ui.label("Flight:");
             egui::ComboBox::from_id_salt("flight_pace").selected_text(self.pace.name()).show_ui(ui, |ui| {
