@@ -97,8 +97,9 @@ impl FromStr for ColorChannelMapping {
     }
 }
 
-/// A 24-bit color: 8 bits for each of the red, green and blue channels
-#[derive(Clone, Copy)]
+/// A 24-bit color: 8 bits for each of the red, green and blue channels (3 bytes in that order, so colors can be read as bytes, see `bytemuck`)
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct TrueColor {
     /// The red channel, 0 to 255
     pub red: u8,
