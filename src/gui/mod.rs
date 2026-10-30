@@ -169,6 +169,10 @@ pub struct MandelbrotApp {
     auto_blur: bool,
     /// The samples per pixel of the frame on the screen (0 for a preview), for the strength of the blur
     shown_samples: u8,
+    /// The size of the Auto frame on the screen when it is below full resolution (its colors are the rows of that smaller image, see `SparePool::packed`), and of the
+    /// next frame of the flight job, known from its `FlightFrame`
+    shown_scaled: Option<(usize, usize)>,
+    frame_scaled: Option<(usize, usize)>,
     /// The part of the texture that covers the image: all of it, except for a coarse preview, see `coarse_texture`
     texture_uv: egui::Rect,
     /// The block size of the preview that the colors of `p` show, 1 for a full layer: a coarse preview is uploaded small and scaled up smoothly
@@ -271,6 +275,8 @@ impl MandelbrotApp {
             blur: None,
             auto_blur: true,
             shown_samples: 0,
+            shown_scaled: None,
+            frame_scaled: None,
             texture_uv: FULL_TEXTURE,
             preview_block: 1,
             preview_levels: Vec::new(),
@@ -366,7 +372,11 @@ impl MandelbrotApp {
             return;
         }
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
-        let (image, uv, options) = if self.preview_block > 1 {
+        let (image, uv, options) = if let Some((columns, rows)) = self.shown_scaled {
+            //A scaled Auto frame: the smaller image, scaled up smoothly over the whole view (the centers of its pixels are where the view puts them)
+            let small: Vec<TrueColor> = self.p.colors.chunks(width).take(rows).flat_map(|line| &line[..columns]).copied().collect();
+            (ColorImage::from_rgb([columns, rows], &colors_to_rgb_bytes(&small, self.p.color_channel_mapping)), FULL_TEXTURE, TextureOptions::LINEAR)
+        } else if self.preview_block > 1 {
             let (image, uv) = coarse_texture(&self.p.colors, self.p.color_channel_mapping, width, height, self.preview_block);
             (image, uv, TextureOptions::LINEAR)
         } else {
@@ -394,7 +404,7 @@ impl MandelbrotApp {
         let target = transform::rect_of(self.drawn_fraction(), rect);
         match self.blur.as_ref().filter(|_| self.auto_blur && self.flight.is_some()) {
             Some(blur) => {
-                let sigma = blur::blur_sigma(self.preview_block, self.shown_samples);
+                let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
                     ui.painter_at(rect).add(callback);
                 }

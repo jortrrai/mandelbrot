@@ -68,20 +68,34 @@ pub enum FlightRendering {
     Resolution(u16),
     /// Every frame is rendered with all its supersampling layers, and the camera waits until the last one is done: the finished image of every view on the way, the slowest
     SuperSampled,
-    /// The camera waits for a frame of the resolution that keeps this many frames per second: the flight job chooses it frame by frame from how long the frames take
-    /// (see `auto_block`), from full resolution down to blocks of `AUTO_COARSEST` pixels; never supersampled
+    /// The camera waits for a frame of the resolution that keeps this many frames per second: the flight job chooses its scale frame by frame from how long the
+    /// frames take (see `auto_scale`), from full resolution down to `AUTO_COARSEST` of the pixels across, and the window scales it up smoothly; never supersampled
     Auto(u16),
 }
 
-/// The coarsest frames of `FlightRendering::Auto`: blocks of 8 x 8 pixels (12.5%)
-pub const AUTO_COARSEST: usize = 8;
+/// The coarsest frames of `FlightRendering::Auto`: an eighth of the pixels across (12.5%)
+pub const AUTO_COARSEST: f64 = 0.125;
 
-/// The block size of the next frame of `FlightRendering::Auto` (1: full resolution): the finest whose expected time, `full` (the time of a full-resolution frame,
-/// estimated from the frames so far) divided by its pixels, fits the time of a frame at the target rate (`target`). A finer block than the `current` one must fit with
-/// 15% to spare, so a view whose time is right at a boundary does not switch back and forth every frame.
-pub fn auto_block(full: Duration, target: Duration, current: usize) -> usize {
-    let fits = |block: usize, spare: f64| full.as_secs_f64() / (block * block) as f64 <= target.as_secs_f64() * spare;
-    (1..=AUTO_COARSEST).find(|block| fits(*block, if *block < current { 0.85 } else { 1.0 })).unwrap_or(AUTO_COARSEST)
+/// The share of the frame time that the frames of `FlightRendering::Auto` aim for, so the frames whose time varies still keep the frame rate
+const AUTO_AIM: f64 = 0.9;
+
+/// The scale (the share of the pixels across, `AUTO_COARSEST` to 1) of the next frame of `FlightRendering::Auto`, from the scale of the last frame and the time it
+/// `took`, for a frame time of `target`.
+///
+/// It steers by the measured time instead of predicting it: the time of a frame grows with its pixels (the square of the scale), but part of it is the same at
+/// every scale (the frame's way to the window, the latency of the GPU), so a prediction from the pixels alone chooses too coarse a frame. Every frame moves the
+/// scale half of the way, in proportion, to the one that would fit (at most 15% finer or 20% coarser), until the frames take between 90% and 100% of the aim:
+/// a steady view then keeps its scale, in whole percents, instead of changing it every frame.
+pub fn auto_scale(scale: f64, took: Duration, target: Duration) -> f64 {
+    let (aim, took) = (target.as_secs_f64() * AUTO_AIM, took.as_secs_f64().max(1e-6));
+    if (0.9 * aim..=aim).contains(&took) {
+        return scale;
+    }
+    let step = (aim / took).sqrt().sqrt().clamp(0.8, 1.15);
+    let next = ((scale * step) * 100.0).round() / 100.0;
+    //(At least a percent, so a small step is not rounded away)
+    let next = if took > aim { next.min(scale - 0.01) } else { next.max(scale + 0.01) };
+    next.clamp(AUTO_COARSEST, 1.0)
 }
 
 impl FlightRendering {

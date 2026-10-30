@@ -16,7 +16,11 @@ const MAX_RADIUS: i32 = 6;
 /// The blur of a frame that shows previews of `block` x `block` pixels (1: full resolution) with `samples` samples per pixel: σ = 0.8 × (100 / p)^0.6 pixels, where
 /// p is the resolution in percent that the frame really has (100 / block, or 100 × √samples). Measured in #118: within about 3% of the best σ at every scale.
 pub(super) fn blur_sigma(block: usize, samples: u8) -> f32 {
-    let percent = if block > 1 { 100.0 / block as f32 } else { 100.0 * f32::from(samples.max(1)).sqrt() };
+    blur_sigma_of_percent(if block > 1 { 100.0 / block as f32 } else { 100.0 * f32::from(samples.max(1)).sqrt() })
+}
+
+/// The blur of a frame that really has `percent` of the resolution, see `blur_sigma`
+pub(super) fn blur_sigma_of_percent(percent: f32) -> f32 {
     0.8 * (100.0 / percent).powf(0.6)
 }
 

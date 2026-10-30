@@ -1576,18 +1576,35 @@ fn the_blur_of_a_flight_frame_follows_the_resolution_it_really_has() {
 }
 
 #[test]
-fn auto_chooses_the_finest_resolution_that_keeps_the_frame_rate_and_does_not_flicker() {
-    use super::flight::{auto_block, AUTO_COARSEST};
-    let ms = Duration::from_millis;
-    let target = ms(16); //60 FPS (16.7 ms)
-    assert_eq!(auto_block(ms(10), target, 2), 1, "a fast view gets full resolution");
-    assert_eq!(auto_block(ms(40), target, 1), 2, "40 ms at full resolution: blocks of 2 take 10 ms");
-    assert_eq!(auto_block(ms(100), target, 1), 3);
-    assert_eq!(auto_block(ms(10_000), target, 1), AUTO_COARSEST, "never coarser than blocks of 8");
-    //At the boundary a finer block needs 15% to spare: 15 ms at full resolution fits 16 ms, but not from blocks of 2
-    assert_eq!(auto_block(ms(15), target, 1), 1);
-    assert_eq!(auto_block(ms(15), target, 2), 2);
-    assert_eq!(auto_block(ms(13), target, 2), 1);
+fn auto_steers_to_the_finest_scale_that_keeps_the_frame_rate_and_holds_it_when_it_fits() {
+    use super::flight::{auto_scale, AUTO_COARSEST};
+    let ms = |ms: f64| Duration::from_secs_f64(ms / 1000.0);
+    let target = ms(1000.0 / 60.0); //60 FPS: the frames aim for 90% of 16.7 ms, 15 ms
+    //A frame that takes a fixed 4 ms plus 16 ms at full resolution (20 ms, 50 FPS): the scale settles where it fits, not at the coarse scale that the pixels
+    //alone predict (blocks of 2 or 3)
+    let took = |scale: f64| ms(4.0 + 16.0 * scale * scale);
+    let mut scale = 0.7;
+    for _ in 0..40 {
+        scale = auto_scale(scale, took(scale), target);
+    }
+    let fits = took(scale).as_secs_f64() * 1000.0;
+    assert!((0.77..=0.83).contains(&scale) && (13.5..=15.0).contains(&fits), "settled at {scale} ({fits:.1} ms)");
+    //Steady once it fits: the same scale every frame
+    assert_eq!(auto_scale(scale, took(scale), target), scale);
+    //Fast views go to full resolution, slow ones down to the coarsest scale and no further
+    let mut scale = 0.5;
+    for _ in 0..20 {
+        scale = auto_scale(scale, ms(5.0), target);
+    }
+    assert_eq!(scale, 1.0);
+    for _ in 0..40 {
+        scale = auto_scale(scale, ms(1000.0), target);
+    }
+    assert_eq!(scale, AUTO_COARSEST);
+    //At most 20% coarser or 15% finer in one frame, and at least a percent
+    assert_eq!(auto_scale(1.0, ms(1000.0), target), 0.8);
+    assert_eq!(auto_scale(0.5, ms(1.0), target), 0.57);
+    assert_eq!(auto_scale(0.5, ms(15.5), target), 0.49);
 }
 
 #[test]
@@ -1598,8 +1615,20 @@ fn an_auto_flight_shows_frames_of_the_chosen_resolution_and_arrives() {
     app.go_to_point_of_interest(0);
     app.fly_at(std::time::Instant::now());
     assert!(app.flight_job, "the flight job renders the frames");
+    //The first frame is scaled (70% of the pixels across), and is drawn from the smaller image
+    let (started, ctx, width, height) = (std::time::Instant::now(), egui::Context::default(), app.p.pixel_plane.width, app.p.pixel_plane.height);
+    while app.shown_scaled.is_none() && app.flight.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no scaled frame");
+        app.poll_job();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (columns, rows) = app.shown_scaled.expect("a scaled frame");
+    assert_eq!((columns, rows), ((width as f64 * 0.7).round() as usize, (height as f64 * 0.7).round() as usize));
+    app.update_texture(&ctx);
+    assert_eq!(app.texture.as_ref().unwrap().size(), [columns, rows]);
     let clocks = fly_until_arrived(&mut app);
-    assert!(clocks.len() >= 3, "frames on the way: {clocks:?}");
+    assert!(clocks.len() >= 2, "frames on the way: {clocks:?}");
+    assert_eq!(app.shown_scaled, None, "the frame at the place is not scaled");
     wait_for_job(&mut app);
     assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete, "the place itself, fully rendered");
     let _ = std::fs::remove_dir_all(folder);

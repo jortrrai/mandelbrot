@@ -176,7 +176,7 @@ impl MandelbrotApp {
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
             let share = flight.flight.share_of_path(flight.elapsed) as f32;
-            let resolution = if matches!(self.flight_rendering, FlightRendering::Auto(_)) { format!(", {:.0}% resolution", 100.0 / self.preview_block as f64) } else { String::new() };
+            let resolution = if matches!(self.flight_rendering, FlightRendering::Auto(_)) { format!(", {:.0}% resolution", self.shown_scaled.map_or(100.0 / self.preview_block as f64, |(columns, _)| 100.0 * columns as f64 / self.p.pixel_plane.width as f64)) } else { String::new() };
             let text = format!("To {}: {:.0}% of the way, {} FPS{resolution}", flight.point.name, share * 100.0, flight.fps_shown);
             ui.horizontal(|ui| {
                 if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
