@@ -105,6 +105,7 @@ impl MandelbrotApp {
             egui::ComboBox::from_id_salt("flight_route").selected_text(self.route.name()).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.route, Route::Shortest, Route::Shortest.name()).on_hover_text("Zooms out to travel, only as far as the distance needs, and in again: the shortest way for the eye");
                 ui.selectable_value(&mut self.route, Route::Straight, Route::Straight.name()).on_hover_text("A straight line: the zoom changes steadily from one view to the other, never zooming out on the way. Between two far-apart places at a deep zoom the picture rushes by");
+                ui.selectable_value(&mut self.route, Route::Dive, Route::Dive.name()).on_hover_text("Starts right above the place at zoom 1, wherever the view was, and falls straight down into it, zooming only, without moving sideways (also for videos)");
             }).response.on_hover_text("The route of a flight");
             egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
                 for mode in FlightRendering::ALL {

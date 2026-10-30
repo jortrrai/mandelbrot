@@ -43,17 +43,23 @@ pub enum Route {
     /// A straight line: the center moves straight to the destination while the scale changes steadily from one view to the other, never zooming out on the way.
     /// The center moves at one speed on the screen, so it travels most where the view is widest; far apart at a deep zoom, the picture rushes by
     Straight,
+    /// A dive: the flight starts right above the place at zoom 1 (wherever the view was) and falls straight down into it, zooming only, without moving sideways
+    Dive,
 }
+
+/// The scale a dive starts at: zoom 1, the reset view's
+pub const DIVE_SCALE: f64 = 1.0;
 
 impl Route {
     /// Every route, in the order of the drop-down (the default first)
-    pub const ALL: [Route; 2] = [Route::Shortest, Route::Straight];
+    pub const ALL: [Route; 3] = [Route::Shortest, Route::Straight, Route::Dive];
 
     /// The name in the drop-down
     pub const fn name(self) -> &'static str {
         match self {
             Route::Shortest => "Shortest",
             Route::Straight => "Straight",
+            Route::Dive => "Dive",
         }
     }
 }
@@ -276,6 +282,7 @@ impl Flight {
         let leg = match route {
             Route::Shortest => Leg::new(from, to),
             Route::Straight => Leg::straight(from, to),
+            Route::Dive => Leg::straight(Camera { x: to.x, y: to.y, scale: DIVE_SCALE }, to),
         };
         let duration = Flight::duration_of(&leg, pace, constant, factor);
         Flight { leg, pace, duration, timing: (constant, factor) }
@@ -439,5 +446,17 @@ mod tests {
         assert_eq!(half.timing(), (CONSTANT_SPEED, 0.5));
         let (a, b) = (normal.camera_at(normal.duration().mul_f64(0.4)), half.camera_at(half.duration().mul_f64(0.4)));
         assert!((a.scale / b.scale - 1.0).abs() < 1e-9 && (a.x - b.x).abs() < 1e-12, "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn a_dive_starts_above_the_place_at_zoom_1_and_only_zooms() {
+        for from in [RESET, SEAHORSE, DEEP] {
+            let flight = Flight::with(from, SEAHORSE, Pace::Constant, Route::Dive, 3.0, 1.0);
+            let cameras: Vec<Camera> = (0..=100).map(|i| flight.camera_at(flight.duration().mul_f64(f64::from(i) / 100.0))).collect();
+            assert_eq!(cameras[0], Camera { x: SEAHORSE.x, y: SEAHORSE.y, scale: DIVE_SCALE }, "wherever the view was");
+            assert_eq!(cameras[100], SEAHORSE);
+            assert!(cameras.iter().all(|camera| (camera.x, camera.y) == (SEAHORSE.x, SEAHORSE.y)), "straight down, never sideways");
+            assert!(cameras.windows(2).all(|pair| pair[1].scale < pair[0].scale), "zooming in all the way");
+        }
     }
 }
