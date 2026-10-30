@@ -1215,7 +1215,7 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_a_flight_and_reaches_the_l
     wait_for_job(&mut app);
     let start_limit = app.m.max_iterations;
     app.go_to_point_of_interest(0);
-    app.flight.as_mut().unwrap().limits.as_mut().unwrap().wait_for_destination();
+    app.flight.as_ref().unwrap().limits.as_ref().unwrap().lock().unwrap().wait_for_destination();
     //What auto iterations chooses at the destination (the render on arrival runs exactly this)
     let location = &app.points[0].location;
     let mut destination = ComplexPlane::new(64, 48);
@@ -1981,4 +1981,54 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
     assert_eq!(app.m.palette.offset, offset, "stopping keeps the colors it reached");
     assert!(app.buffer_is_complete, "and renders the view to its full quality");
     assert!(app.log.len() <= log_length + 3, "the steps do not fill the log: {:?}", &app.log[log_length..]);
+}
+
+#[test]
+fn flight_settings_take_effect_during_a_flight_and_a_new_speed_keeps_the_camera_where_it_is() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    (app.flight_rendering, app.pace) = (super::flight::FlightRendering::FULL_RESOLUTION, super::flight::Pace::Cinematic);
+    app.go_to_point_of_interest(0);
+    app.fly_at(std::time::Instant::now());
+    let started = std::time::Instant::now();
+    while app.flight.as_ref().is_some_and(|flight| flight.elapsed.is_zero()) {
+        assert!(started.elapsed() < Duration::from_secs(30), "no frame");
+        app.poll_job();
+        app.fly_at(std::time::Instant::now());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    //Blend frames on: the job starts again with it
+    assert_eq!(app.flight_job_options, Some(app.flight_job_options()));
+    app.blend_frames = true;
+    app.fly_at(std::time::Instant::now());
+    assert_eq!(app.flight_job_options, Some(app.flight_job_options()), "restarted with the new setting");
+    //Twice as fast: half the time, at the same share of it
+    let flight = app.flight.as_ref().unwrap();
+    let (share, duration) = (flight.elapsed.as_secs_f64() / flight.flight.duration().as_secs_f64(), flight.flight.duration());
+    app.flight_speed = 200;
+    app.fly_at(std::time::Instant::now());
+    let flight = app.flight.as_ref().unwrap();
+    assert!((flight.flight.duration().as_secs_f64() * 2.0 - duration.as_secs_f64()).abs() < 1e-6, "half the time");
+    assert!((flight.elapsed.as_secs_f64() / flight.flight.duration().as_secs_f64() - share).abs() < 1e-6, "the same share of it");
+    let _ = fly_until_arrived(&mut app);
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn with_auto_blur_the_place_stays_blurred_until_its_render_is_finished() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    (app.auto_blur, app.pace) = (true, super::flight::Pace::Fast);
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    assert!(app.landing_blur, "blurred after the arrival");
+    wait_for_job(&mut app);
+    assert!(!app.landing_blur, "sharp once the render of the place is finished");
+    //Without Auto blur there is no blur at the landing either
+    app.auto_blur = false;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    assert!(!app.landing_blur);
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
 }

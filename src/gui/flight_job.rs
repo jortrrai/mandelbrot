@@ -25,13 +25,29 @@ use super::{temporal, MandelbrotApp, Readiness};
 use crate::complex_plane::ComplexPlane;
 use crate::rendering::{self, Render};
 
+/// The settings of a flight job that it reads when it starts: the rendering of its frames, blending them, the f32 loop and the frames ahead. A change of one of
+/// them during a flight restarts the job from where the flight is (see `points::fly_at`), so it takes effect at once
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FlightJobOptions {
+    rendering: super::flight::FlightRendering,
+    blend_frames: bool,
+    f32_frames: bool,
+    frames_ahead: usize,
+}
+
 impl MandelbrotApp {
+    /// The settings a flight job started now would read, see `FlightJobOptions`
+    pub(super) const fn flight_job_options(&self) -> FlightJobOptions {
+        FlightJobOptions { rendering: self.flight_rendering, blend_frames: self.blend_frames, f32_frames: self.f32_frames, frames_ahead: self.frames_ahead }
+    }
+
     /// Starts the job that renders the frames of the flight under way, from where its clock is, see the module. Its frames arrive as `JobMessage::FlightFrame`
     /// followed by the `Pass` of the frame; it stops when it has rendered the frame at the destination (the window then arrives, see `points::fly_at`)
     #[allow(clippy::too_many_lines)] // The settings of the job and its loop over the frames, which share their state
     pub(super) fn start_flight_job(&mut self, frame_interval: Duration) {
+        self.flight_job_options = Some(self.flight_job_options());
         let Some(flight) = &mut self.flight else { return };
-        let (path, mut elapsed, mut limits, palettes) = (flight.flight.clone(), flight.elapsed, flight.limits.take(), flight.palettes);
+        let (path, mut elapsed, limits, palettes) = (flight.flight.clone(), flight.elapsed, flight.limits.clone(), flight.palettes);
         self.cancel_thumbnail_job();
         self.cancel_neighborhood_job();
         self.interrupt_progressive_render();
@@ -87,7 +103,7 @@ impl MandelbrotApp {
                 if let Some(settings) = &auto_settings {
                     //The limit of the zoom of this frame (see `points::FlightLimits`)
                     let scale = plane.get_scale();
-                    m.max_iterations = limits.as_mut().map_or_else(|| settings.initial_limit(scale), |limits| limits.limit_at(scale, settings));
+                    m.max_iterations = limits.as_ref().map_or_else(|| settings.initial_limit(scale), |limits| limits.lock().unwrap().limit_at(scale, settings));
                 }
                 //The color cycle of this frame, on the way from the start to the place's (see `points::PointFlight::palettes`)
                 m.palette = palettes.0.blend(palettes.1, path.share_of_path(elapsed));

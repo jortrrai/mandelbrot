@@ -276,6 +276,7 @@ impl MandelbrotApp {
                     self.frame_scaled = scaled;
                 }
                 Ok(JobMessage::Done { c, m, message, elapsed, completed, reported }) => {
+                    self.landing_blur = false; //The render of the place is finished: sharp
                     self.job = None;
                     self.flight_job = false;
                     self.limit_pending = false;
@@ -364,6 +365,7 @@ impl MandelbrotApp {
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
     #[allow(clippy::too_many_lines)] // One place that sets up every render: its settings, its state and the thread that runs it
     pub(super) fn start_render_as(&mut self, message: &str, kind: RenderKind) {
+        self.landing_blur = false; //(The render at a place a flight arrived at sets it again, see `points::arrive_at`)
         self.cancel_neighborhood_job();
         self.keep_within_zoom_limit();
         let (moved, during_gesture, all_layers) = (kind.moved(), kind.passing(), kind.all_layers());

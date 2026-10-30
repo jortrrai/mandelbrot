@@ -27,7 +27,7 @@ pub(super) struct PointFlight {
     pub(super) last_frame: Instant,
     pub(super) point: PointOfInterest,
     /// With auto iterations: the limits of the frames on the way
-    pub(super) limits: Option<FlightLimits>,
+    pub(super) limits: Option<std::sync::Arc<std::sync::Mutex<FlightLimits>>>,
     /// When the flight started, and when each of its frames was shown (the first image of a view on the way that is complete enough for the flight rendering), for the frame rate, see `fps`
     pub(super) started: Instant,
     pub(super) frames: Vec<Instant>,
@@ -378,14 +378,14 @@ impl MandelbrotApp {
             self.arrive_at(&point);
             return;
         }
-        let flight = Flight::with(from, to, self.pace, self.route, self.constant_speed);
+        let flight = Flight::with(from, to, self.pace, self.route, self.constant_speed, self.speed_factor());
         let route = if self.route == Route::Shortest { String::new() } else { format!(", {} route", self.route.name().to_lowercase()) };
         self.log(format!("Flying to {} ({}{route}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
-        let limits = self.auto_iterations.then(|| self.flight_limits(to));
+        let limits = self.auto_iterations.then(|| std::sync::Arc::new(std::sync::Mutex::new(self.flight_limits(to)))); //(Shared with the flight job, which a change of a setting restarts)
         let now = Instant::now();
         let destination_palette = point.appearance.as_ref().filter(|_| self.restore_appearance).map_or(self.m.palette, |appearance| appearance.palette_over(self.m.palette));
         let palettes = (self.m.palette, destination_palette);
-        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
@@ -446,6 +446,13 @@ impl MandelbrotApp {
         self.frame_hold = self.frame_hold.saturating_sub(1);
         let Some(mut flight) = self.flight.take() else { return };
         flight.update_fps(now);
+        //The speed controls take effect at once: the flight is timed again, at the same share of its time, so the camera does not jump
+        let changed = flight.flight.timing() != (self.constant_speed, self.speed_factor());
+        if changed {
+            let retimed = flight.flight.retimed(self.constant_speed, self.speed_factor());
+            flight.elapsed = retimed.duration().mul_f64((flight.elapsed.as_secs_f64() / flight.flight.duration().as_secs_f64().max(1e-9)).min(1.0));
+            flight.flight = retimed;
+        }
         //A flight that waits for its frames is rendered by its own job, which moves the flight clock on (see `flight_job`); the window arrives when its last frame is there
         if self.flight_readiness() != Readiness::Any {
             if flight.flight.arrived(flight.elapsed) {
@@ -454,8 +461,10 @@ impl MandelbrotApp {
                 return;
             }
             let running = self.flight_job && self.is_busy();
+            //A job of other settings (the speed, the rendering, blending, f32, frames ahead) starts again from where the flight is
+            let outdated = changed || self.flight_job_options != Some(self.flight_job_options());
             self.flight = Some(flight);
-            if !running {
+            if !running || outdated {
                 self.start_flight_job(self.frame_interval);
             }
             return;
@@ -472,8 +481,8 @@ impl MandelbrotApp {
         if self.auto_iterations {
             //Auto iterations follow the zoom all the way: the limit of this frame (see `FlightLimits`)
             let scale = self.c.get_scale();
-            let limit = match &mut flight.limits {
-                Some(limits) => limits.limit_at(scale, &self.auto_settings),
+            let limit = match &flight.limits {
+                Some(limits) => limits.lock().unwrap().limit_at(scale, &self.auto_settings),
                 None => self.auto_settings.initial_limit(scale),
             };
             self.m.max_iterations = limit;
@@ -520,6 +529,7 @@ impl MandelbrotApp {
         }
         let message = if restored.is_empty() { format!("Moved to {}", point.name) } else { format!("Moved to {} and restored its appearance{restored}", point.name) };
         self.render(&message);
+        self.landing_blur = self.auto_blur; //(After the render starts, which ends the blur of anything before)
     }
 }
 
