@@ -32,7 +32,7 @@ fn main_render() {
 fn main() {
     let report = points_of_interest::load_folder(&points_of_interest::find_folder());
     let height = thumbnails::thumbnail_height(1200, 800);
-    let requests: Vec<(String, ThumbnailRequest)> = report.points.iter().map(|p| (p.name.clone(), ThumbnailRequest { location: p.location.clone(), coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, width: thumbnails::THUMBNAIL_WIDTH, height })).collect();
+    let requests: Vec<(String, ThumbnailRequest)> = report.points.iter().map(|p| (p.name.clone(), ThumbnailRequest { location: p.location.clone(), coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, palette: mandelbrot::mandelbrot_set::ColorCycle::CYCLE, width: thumbnails::THUMBNAIL_WIDTH, height })).collect();
     println!("{} places, thumbnails {}x{height}, {} samples per pixel, {} render threads\n", requests.len(), thumbnails::THUMBNAIL_WIDTH, thumbnails::THUMBNAIL_SAMPLES, rendering::render_thread_count());
     let mut total = 0.0;
     for (name, request) in &requests {

@@ -31,7 +31,7 @@ impl MandelbrotApp {
     #[allow(clippy::too_many_lines)] // The settings of the job and its loop over the frames, which share their state
     pub(super) fn start_flight_job(&mut self, frame_interval: Duration) {
         let Some(flight) = &mut self.flight else { return };
-        let (path, mut elapsed, mut limits) = (flight.flight.clone(), flight.elapsed, flight.limits.take());
+        let (path, mut elapsed, mut limits, palettes) = (flight.flight.clone(), flight.elapsed, flight.limits.take(), flight.palettes);
         self.cancel_thumbnail_job();
         self.cancel_neighborhood_job();
         self.interrupt_progressive_render();
@@ -53,7 +53,7 @@ impl MandelbrotApp {
         let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
         let mut m = self.m.clone();
         if !self.auto_iterations {
-            (m.max_iterations, m.palette_scale) = (self.max_iterations_input, None);
+            m.max_iterations = self.max_iterations_input;
         }
         let (supersampling_amount, coloring_function) = (self.supersampling_amount, self.coloring_function);
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
@@ -83,12 +83,12 @@ impl MandelbrotApp {
                 }
                 plane.set_view(&path.camera_at(elapsed).view());
                 if let Some(settings) = &auto_settings {
-                    //The limit of the zoom of this frame (see `points::FlightLimits`), and the palette of its zoom, which is what auto iterations uses
+                    //The limit of the zoom of this frame (see `points::FlightLimits`)
                     let scale = plane.get_scale();
-                    let palette = settings.initial_limit(scale);
-                    m.max_iterations = limits.as_mut().map_or(palette, |limits| limits.limit_at(scale, settings));
-                    m.palette_scale = Some(palette);
+                    m.max_iterations = limits.as_mut().map_or_else(|| settings.initial_limit(scale), |limits| limits.limit_at(scale, settings));
                 }
+                //The color cycle of this frame, on the way from the start to the place's (see `points::PointFlight::palettes`)
+                m.palette = palettes.0.blend(palettes.1, path.share_of_path(elapsed));
                 let last = path.arrived(elapsed);
                 if auto.is_some() {
                     (required, levels) = (Readiness::FULL_RESOLUTION, Vec::new());
@@ -104,7 +104,7 @@ impl MandelbrotApp {
                                 return;
                             }
                             shown = true;
-                            let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette_scale: m.palette_scale, preview: 0, levels: Vec::new(), scaled: Some(small) });
+                            let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette: m.palette, preview: 0, levels: Vec::new(), scaled: Some(small) });
                             queued.fetch_add(1, Ordering::SeqCst);
                             let _ = sender.send(JobMessage::Pass { colors: spare_colors.packed(colors, small, width * height, width), plane: plane.clone(), pass: 1, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
                             thread_cancel.store(true, Ordering::SeqCst);
@@ -130,7 +130,7 @@ impl MandelbrotApp {
                             return;
                         }
                         shown = true;
-                        let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette_scale: m.palette_scale, preview: previews, levels: levels.clone(), scaled: None });
+                        let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette: m.palette, preview: previews, levels: levels.clone(), scaled: None });
                         queued.fetch_add(1, Ordering::SeqCst);
                         let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: plane.clone(), pass, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
                         thread_cancel.store(true, Ordering::SeqCst); //Complete enough: on to the next frame

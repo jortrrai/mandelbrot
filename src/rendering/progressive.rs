@@ -7,7 +7,7 @@ use super::jitter::sample_jitter;
 use super::region::ExposedRegion;
 use super::render_thread_count;
 use super::gpu::{packed_pixel, FastOutcome, GpuIterator, Outcome, BATCH, MAX_PIXEL};
-use super::state::{SampleKey, SampleState, FOREIGN};
+use super::state::{Prepared, SampleKey, SampleState, FOREIGN};
 use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, mandelbrot_set::MandelbrotSet};
 
 /// The largest `max_iterations` for which `Render::run` precomputes the color of every iteration count
@@ -33,7 +33,7 @@ pub struct Render<'a> {
     set: &'a MandelbrotSet,
     width: usize,
     height: usize,
-    coloring_function: fn(u32, u32) -> TrueColor,
+    coloring_function: fn(f64, f64) -> TrueColor,
     supersampling_amount: u8,
     adaptive: Option<AdaptiveSampling>,
     exposed: Option<(&'a ExposedRegion, &'a [TrueColor])>,
@@ -56,7 +56,7 @@ pub struct Render<'a> {
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
-    pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(u32, u32) -> TrueColor) -> Self {
+    pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(f64, f64) -> TrueColor) -> Self {
         Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true }
     }
 
@@ -192,9 +192,12 @@ impl<'a> Render<'a> {
     ///
     /// # Panics
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
+    #[allow(clippy::too_many_lines)] // The setup of a render (its state, previews, recolor) and its loop over the layers
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
         let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples } = self;
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
+        //(The samples remember whether the fast math was asked for, see `SampleKey`)
+        let fast_key = fast_gpu && gpu.is_some();
         //(The samples remember whether the f32 loop was asked for, see `SampleKey`)
         let f32_key = f32_gpu && fast_gpu && gpu.is_some();
         let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS && width <= MAX_PIXEL && height <= MAX_PIXEL;
@@ -224,7 +227,12 @@ impl<'a> Render<'a> {
         let track = state.is_some();
         //How many pixels kept their samples; without them, the colors so far are the base and every pixel of the render is still empty
         //Whether every pixel is still empty: a new state, or one that started over
-        let empty = state.as_mut().is_none_or(|state| state.prepare(c, width, height, SampleKey::new(m, coloring_function, f32_key)));
+        let prepared = state.as_mut().map_or(Prepared::Empty, |state| state.prepare(c, width, height, SampleKey::new(m, coloring_function, fast_key, f32_key)));
+        if let Some(state) = state.as_mut().filter(|state| state.recolor_pending) {
+            //Only the palette or the coloring changed: the first samples are recolored from their positions, and the image of one sample is there at once
+            state.recolor(&color_of);
+        }
+        let empty = prepared == Prepared::Empty;
         let mut own_state = None;
         let state: &mut SampleState = state.unwrap_or_else(|| own_state.insert(SampleState::for_one_render(width, height, region, base, adaptive.is_some())));
         //Where the samples are placed: the view where the samples of the state started, or this view
@@ -363,7 +371,13 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
         })
     };
     //Adds the samples at `positions` of the pixels `xs` of a row, and updates its running averages and counts: the same for the CPU threads and the GPU
-    let apply = |y: usize, row: &mut [[u32; 3]], counts: &mut [u8], first: &mut [TrueColor], second: &mut [TrueColor], color_row: &mut [TrueColor], xs: &[usize], positions: &[f64]| {
+    let apply = |y: usize, row: &mut [[u32; 3]], counts: &mut [u8], first: &mut [TrueColor], second: &mut [TrueColor], first_positions: &mut [f64], color_row: &mut [TrueColor], xs: &[usize], positions: &[f64]| {
+        //The position of a first sample, to recolor it later (see `SampleState::recolor`)
+        if sample == 0 && !first_positions.is_empty() {
+            for (x, position) in xs.iter().zip(positions) {
+                first_positions[*x] = *position;
+            }
+        }
         let xs = &xs[..positions.len()];
         //A render without samples (`Render::colors_only`): only the colors
         let keep = !row.is_empty();
@@ -413,21 +427,22 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     };
     //The colors of the first two samples are only kept when they are needed (adaptive supersampling, a kept state); otherwise every row gets an empty slice
     let (first_rows, second_rows) = (rows_or_empty(&mut state.first, width, height), rows_or_empty(&mut state.second, width, height));
+    let position_rows = rows_or_empty(&mut state.positions, width, height);
     //(A state without samples, see `Render::colors_only`, gives empty rows of sums and counts too)
     let (sum_rows, count_rows) = (rows_or_empty(&mut state.sums, width, height), rows_or_empty(&mut state.counts, width, height));
-    let rows = Mutex::new(sum_rows.into_iter().zip(count_rows).zip(first_rows).zip(second_rows).zip(colors.chunks_mut(width)).enumerate());
+    let rows = Mutex::new(sum_rows.into_iter().zip(count_rows).zip(first_rows).zip(second_rows).zip(position_rows).zip(colors.chunks_mut(width)).enumerate());
     //The rows that the GPU computed, with their pixels and the outcomes of the batch from where they start (or `None` if the GPU failed: then the CPU computes them).
     //The CPU threads turn the outcomes into positions and apply them, so the GPU worker only feeds the GPU and never competes with them for the cores.
     let gpu_done: Mutex<Vec<GpuRow>> = Mutex::new(Vec::new());
     //The rows that the GPU worker took from `rows` and has not put into `gpu_done` yet: the CPU threads wait for those before they stop
     let gpu_pending = AtomicUsize::new(0);
-    let finish_gpu_row = |(y, ((((row, counts), first), second), color_row)): PassRow, xs: Cow<[usize]>, outcomes: Option<(Arc<GpuOutcomes>, usize)>| {
+    let finish_gpu_row = |(y, (((((row, counts), first), second), first_positions), color_row)): PassRow, xs: Cow<[usize]>, outcomes: Option<(Arc<GpuOutcomes>, usize)>| {
         let positions = match outcomes.as_ref().map(|(all, offset)| (&**all, *offset)) {
             Some((GpuOutcomes::Exact(all), offset)) => xs.iter().zip(&all[offset..]).map(|(x, outcome)| outcome.position(m, &sample_point(c, *x, y, sample, origin))).collect(),
             Some((GpuOutcomes::Fast(all), offset)) => all[offset..offset + xs.len()].iter().map(|outcome| outcome.position(m)).collect(),
             None => on_cpu(y, &xs),
         };
-        apply(y, row, counts, first, second, color_row, &xs, &positions);
+        apply(y, row, counts, first, second, first_positions, color_row, &xs, &positions);
     };
     thread::scope(|scope| {
         for _ in 0..cpu_threads {
@@ -441,13 +456,13 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                     continue;
                 }
                 let next_row = rows.lock().unwrap().next();
-                if let Some((y, ((((row, counts), first), second), color_row))) = next_row {
+                if let Some((y, (((((row, counts), first), second), first_positions), color_row))) = next_row {
                     let xs = select(y, counts);
                     if xs.is_empty() && !skip_first {
                         continue; //Nothing to sample or to color in this row (a preview level, an adaptive pass)
                     }
                     let positions = on_cpu(y, &xs);
-                    apply(y, row, counts, first, second, color_row, &xs, &positions);
+                    apply(y, row, counts, first, second, first_positions, color_row, &xs, &positions);
                     continue;
                 }
                 //No rows left: the rows on the GPU still come back to these threads (`gpu_pending` drops only after they are in `gpu_done`)
@@ -492,7 +507,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                         }
                         let rows_in_batch = batch.len();
                         let selected: Vec<(PassRow, Cow<[usize]>)> = batch.into_iter().map(|row| {
-                            let xs = select(row.0, (row.1).0.0.0.1);
+                            let xs = select(row.0, (row.1).0.0.0.0.1);
                             (row, xs)
                         }).collect();
                         //The fast loop gets the pixels and computes their points itself; the exact loop gets the points
@@ -555,7 +570,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                         }
                         let next_row = rows.lock().unwrap().next();
                         let Some(row) = next_row else { return };
-                        let xs = select(row.0, (row.1).0.0.0.1);
+                        let xs = select(row.0, (row.1).0.0.0.0.1);
                         finish_gpu_row(row, xs, None);
                     }
                 }
@@ -610,7 +625,7 @@ enum GpuOutcomes {
 }
 
 /// A row of a pass: its number, sums, counts, first and second colors, and colors
-type PassRow<'r> = (usize, ((((&'r mut [[u32; 3]], &'r mut [u8]), &'r mut [TrueColor]), &'r mut [TrueColor]), &'r mut [TrueColor]));
+type PassRow<'r> = (usize, (((((&'r mut [[u32; 3]], &'r mut [u8]), &'r mut [TrueColor]), &'r mut [TrueColor]), &'r mut [f64]), &'r mut [TrueColor]));
 
 /// Large color tables are built on all render threads. Starting the threads costs about 0.17 ms, so below this many entries one thread is as fast or faster
 /// (measured: 20,000 Bernstein entries take 0.08 ms on one thread and 0.18 ms on all; at 65,376 entries both take about 0.2 ms)
@@ -618,7 +633,7 @@ const PARALLEL_COLOR_TABLE_ENTRIES: usize = 50_000;
 
 /// The color of every iteration count from 0 to `max_iterations` of `m`. Every entry is independent of the others, so the table is the same however it is split.
 /// Measured on 16 threads, one thread and all threads: 65,376 HSV entries 0.75 and 0.23 ms; 200,000 entries 0.64 and 0.24 ms (Bernstein), 2.45 and 0.45 ms (HSV).
-pub(super) fn color_table(m: &MandelbrotSet, coloring_function: fn(u32, u32) -> TrueColor) -> Vec<TrueColor> {
+pub(super) fn color_table(m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor) -> Vec<TrueColor> {
     let entries = m.max_iterations as usize + 1;
     if entries < PARALLEL_COLOR_TABLE_ENTRIES {
         return (0..=m.max_iterations).map(|iterations| m.color(coloring_function, iterations)).collect();
@@ -754,8 +769,8 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
         let (across, bands) = (width.div_ceil(block), height.div_ceil(block));
         let mut representatives: Vec<Option<usize>> = vec![None; across * bands];
         let band = width * block;
-        let first_bands = chunks_or_empty(&mut state.first, band, bands);
-        let rows = Mutex::new(state.sums.chunks_mut(band).zip(state.counts.chunks_mut(band)).zip(first_bands).zip(has_first.chunks_mut(band)).zip(representatives.chunks_mut(across)).enumerate());
+        let (first_bands, position_bands) = (chunks_or_empty(&mut state.first, band, bands), chunks_or_empty(&mut state.positions, band, bands));
+        let rows = Mutex::new(state.sums.chunks_mut(band).zip(state.counts.chunks_mut(band)).zip(first_bands).zip(position_bands).zip(has_first.chunks_mut(band)).zip(representatives.chunks_mut(across)).enumerate());
         thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| loop {
@@ -763,7 +778,7 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
                         return;
                     }
                     let next_band = rows.lock().unwrap().next();
-                    let Some((by, ((((sums, counts), first), has), representatives))) = next_band else { return };
+                    let Some((by, (((((sums, counts), first), first_positions), has), representatives))) = next_band else { return };
                     let started = Instant::now();
                     let rows_in_band = counts.len() / width;
                     let mut to_sample: Vec<usize> = Vec::new();
@@ -791,6 +806,9 @@ fn render_previews(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), 
                             counts[index] = 1;
                             if !first.is_empty() {
                                 first[index] = color;
+                            }
+                            if !first_positions.is_empty() {
+                                first_positions[index] = position;
                             }
                             has[index] = true;
                         });

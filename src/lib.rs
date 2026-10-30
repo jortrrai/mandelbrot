@@ -65,7 +65,7 @@ pub mod resolution;
 pub mod thumbnails;
 
 /// A function that colors a pixel from its iteration count and the maximum iterations, e.g. `TrueColor::new_from_bernstein_polynomials`
-type ColoringFunction = fn(iterations: u32, max_iterations: u32) -> TrueColor;
+type ColoringFunction = fn(position: f64, length: f64) -> TrueColor;
 /// The coloring that the window starts with
 const COLORING_FUNCTION: ColoringFunction = TrueColor::new_from_bernstein_polynomials;
 

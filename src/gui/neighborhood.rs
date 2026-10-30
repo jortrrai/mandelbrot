@@ -36,7 +36,7 @@ fn views_across(margin: u16) -> f64 {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct NeighborhoodKey {
     max_iterations: u32,
-    palette_scale: Option<u32>,
+    palette: (u64, u64, bool),
     smooth_coloring: bool,
     orbit_radius: u64,
     coloring_function: usize,
@@ -47,7 +47,7 @@ impl NeighborhoodKey {
     fn new(m: &MandelbrotSet, coloring_function: crate::ColoringFunction, mapping: ColorChannelMapping) -> NeighborhoodKey {
         NeighborhoodKey {
             max_iterations: m.max_iterations,
-            palette_scale: m.palette_scale,
+            palette: (m.palette.divide.to_bits(), m.palette.offset.to_bits(), m.palette.stretch),
             smooth_coloring: m.smooth_coloring,
             orbit_radius: m.orbit_radius.to_bits(),
             coloring_function: coloring_function as usize,
