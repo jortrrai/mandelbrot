@@ -50,14 +50,15 @@ pub struct Render<'a> {
     f32_gpu: bool,
     /// How many CPU threads take rows of a pass (all render threads; none in a test where the GPU computes every sample)
     cpu_threads: usize,
-    /// Whether the render keeps its samples (see `colors_only`)
+    /// Whether the render keeps its samples (see `colors_only`), and which sample (its jitter) a render of colors only takes
     keep_samples: bool,
+    colors_sample: u8,
 }
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(f64, f64) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0 }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -170,6 +171,15 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// Like `colors_only`, with sample `sample` of every pixel (its jitter, see `jitter`) instead of the first: frames that are blended over time take another
+    /// sample each, so the blend comes close to supersampling (see `gui::temporal`)
+    #[must_use]
+    pub const fn colors_only_of_sample(mut self, sample: u8) -> Self {
+        self.keep_samples = false;
+        self.colors_sample = sample;
+        self
+    }
+
     /// Without CPU threads in the passes, so the GPU computes every sample (with `gpu`): to test that whole renders by the GPU are the CPU's, which a share that
     /// depends on the timing of the threads cannot show reliably
     #[cfg(test)]
@@ -194,7 +204,7 @@ impl<'a> Render<'a> {
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     #[allow(clippy::too_many_lines)] // The setup of a render (its state, previews, recolor) and its loop over the layers
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample } = self;
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
         //(The samples remember whether the fast math was asked for, see `SampleKey`)
         let fast_key = fast_gpu && gpu.is_some();
@@ -213,7 +223,7 @@ impl<'a> Render<'a> {
         if !keep_samples {
             debug_assert!(exposed.is_none(), "a render without samples renders the whole view");
             let pass_gpu = gpu.map(|(gpu, join_after)| (gpu, join_after, gpu_samples, math));
-            return colors_only(c, m, width, height, state, &color_of, cancel, pixels_done, pass_gpu, cpu_threads, &mut on_pass);
+            return colors_only(c, m, colors_sample, width, height, state, &color_of, cancel, pixels_done, pass_gpu, cpu_threads, &mut on_pass);
         }
         let supersampling_amount = supersampling_amount.clamp(1, 64);
         let adaptive = adaptive.filter(|_| supersampling_amount > ADAPTIVE_UNIFORM_SAMPLES);
@@ -321,13 +331,13 @@ impl<'a> Render<'a> {
 /// A render of `Render::colors_only`: one pass over every pixel with a state that has no samples to keep (its rows are empty, see `sample_pass`), in the color
 /// memory of `state` if there is one. Returns whether it completed.
 #[allow(clippy::too_many_arguments)] // The parts of `Render::run` that the pass needs
-fn colors_only(c: &ComplexPlane, m: &MandelbrotSet, width: usize, height: usize, state: Option<&mut SampleState>, color_of: &(impl Fn(f64) -> TrueColor + Sync), cancel: &AtomicBool,
+fn colors_only(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, width: usize, height: usize, state: Option<&mut SampleState>, color_of: &(impl Fn(f64) -> TrueColor + Sync), cancel: &AtomicBool,
     pixels_done: &AtomicUsize, gpu: Option<(&GpuIterator, Duration, &AtomicUsize, GpuMath)>, cpu_threads: usize, on_pass: &mut impl FnMut(&[TrueColor], u8)) -> bool {
     let mut state = state;
     let mut colors = state.as_mut().map_or_else(Vec::new, |state| std::mem::take(&mut state.colors));
     colors.clear();
     colors.resize(width * height, TrueColor::new(0, 0, 0));
-    sample_pass(c, m, 0, false, &mut SampleState::without_samples(width, height), &mut colors, None, &[], color_of, cancel, pixels_done, gpu, cpu_threads);
+    sample_pass(c, m, sample, false, &mut SampleState::without_samples(width, height), &mut colors, None, &[], color_of, cancel, pixels_done, gpu, cpu_threads);
     let completed = !cancel.load(Ordering::Relaxed);
     if completed {
         on_pass(&colors, 1);

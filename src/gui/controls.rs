@@ -186,6 +186,7 @@ impl MandelbrotApp {
             self.neighborhood = None;
         }
         self.video_ui(ui);
+        ui.checkbox(&mut self.blend_frames, "Blend frames during flights").on_hover_text("Flights at full resolution: every frame takes another sample of its pixels and is blended into the frames before it, moved to its view, so a moving image comes close to 4 samples per pixel for the cost of one. Edges that the camera uncovers start from the new frame; the image you arrive at is rendered normally. Off by default (a fast zoom out can show a slight trail).");
         ui.add_enabled(self.blur.is_some(), egui::Checkbox::new(&mut self.auto_blur, "Auto blur during flights")).on_hover_text("While a flight moves the view, the image gets a light blur on the GPU, which brings a moving frame closer to the finished image: stronger for coarse frames, lighter for supersampled ones (σ = 0.8 × (100 / resolution in %)^0.6 pixels). The finished image at the place is never blurred.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
