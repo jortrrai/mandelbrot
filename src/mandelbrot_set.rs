@@ -207,6 +207,8 @@ impl MandelbrotSet {
             }
         }
         let (mut zx, mut zy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
+        //The squares of z from the escape check of the step before: the squares the next step needs (the same numbers, 3 multiplications a step instead of 6)
+        let (mut x2, mut y2) = ([0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut captured, mut escape_x, mut escape_y) = ([false; LANES], [0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut saved_x, mut saved_y) = ([0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut blocks_since_saved, mut blocks_until_save) = (0_u32, 1_u32);
@@ -218,11 +220,12 @@ impl MandelbrotSet {
             //Only check whether any point is left every few steps; points that already stopped do not count anymore
             for _ in 0..CHECK_INTERVAL.min(self.max_iterations - step) {
                 for lane in 0..LANES {
-                    //Same arithmetic as z = z.squared().add(c)
-                    let new_x = zx[lane] * zx[lane] - zy[lane] * zy[lane] + cx[lane];
-                    let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
+                    //Same arithmetic as z = z.squared().add(c), with the squares of the step before and 2 * zx as zx + zx (exact either way)
+                    let new_x = x2[lane] - y2[lane] + cx[lane];
+                    let new_y = (zx[lane] + zx[lane]) * zy[lane] + cy[lane];
                     (zx[lane], zy[lane]) = (new_x, new_y);
-                    let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
+                    (x2[lane], y2[lane]) = (new_x * new_x, new_y * new_y);
+                    let escaped = (x2[lane] + y2[lane]) > orbit_radius_squared;
                     active[lane] &= !escaped;
                     iterations[lane] += u32::from(active[lane]);
                 }
@@ -288,6 +291,8 @@ impl MandelbrotSet {
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
         let (mut cx, mut cy, mut zx, mut zy) = ([0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES]);
         let (mut saved_x, mut saved_y) = ([0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES]);
+        //The squares of z from the escape check of the step before (see `iterate_lanes_smooth_generic`)
+        let (mut x2, mut y2) = ([0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES]);
         let (mut iterations, mut active) = ([0_u32; STREAM_LANES], [false; STREAM_LANES]);
         //The blocks of steps every lane has done
         let mut blocks = [0_u32; STREAM_LANES];
@@ -313,6 +318,7 @@ impl MandelbrotSet {
         for lane in 0..STREAM_LANES {
             if load(lane, &mut next, &mut index, &mut cx, &mut cy, out) {
                 (zx[lane], zy[lane], saved_x[lane], saved_y[lane], iterations[lane], active[lane], blocks[lane]) = (0.0, 0.0, 0.0, 0.0, 0, true, 0);
+                (x2[lane], y2[lane]) = (0.0, 0.0);
                 live += 1;
             }
         }
@@ -323,11 +329,12 @@ impl MandelbrotSet {
             }
             for _ in 0..CHECK_INTERVAL {
                 for lane in 0..STREAM_LANES {
-                    //Same arithmetic as z = z.squared().add(c)
-                    let new_x = zx[lane] * zx[lane] - zy[lane] * zy[lane] + cx[lane];
-                    let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
+                    //Same arithmetic as z = z.squared().add(c), with the squares of the step before and 2 * zx as zx + zx (exact either way)
+                    let new_x = x2[lane] - y2[lane] + cx[lane];
+                    let new_y = (zx[lane] + zx[lane]) * zy[lane] + cy[lane];
                     (zx[lane], zy[lane]) = (new_x, new_y);
-                    let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
+                    (x2[lane], y2[lane]) = (new_x * new_x, new_y * new_y);
+                    let escaped = (x2[lane] + y2[lane]) > orbit_radius_squared;
                     active[lane] &= !escaped;
                     iterations[lane] += u32::from(active[lane]);
                 }
@@ -362,6 +369,7 @@ impl MandelbrotSet {
                 };
                 if load(lane, &mut next, &mut index, &mut cx, &mut cy, out) {
                     (zx[lane], zy[lane], saved_x[lane], saved_y[lane], iterations[lane], active[lane], blocks[lane]) = (0.0, 0.0, 0.0, 0.0, 0, true, 0);
+                (x2[lane], y2[lane]) = (0.0, 0.0);
                 } else {
                     (zx[lane], zy[lane], active[lane]) = (0.0, 0.0, false);
                     live -= 1;

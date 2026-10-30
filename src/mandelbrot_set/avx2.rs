@@ -80,7 +80,7 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
         }
         return points.len();
     }
-    let (radius_squared, two, one) = (_mm256_set1_pd(m.orbit_radius * m.orbit_radius), _mm256_set1_pd(2.0), _mm256_set1_epi64x(1));
+    let (radius_squared, one) = (_mm256_set1_pd(m.orbit_radius * m.orbit_radius), _mm256_set1_epi64x(1));
     //A lane with more blocks than this has no whole block left before `max_iterations`
     let last_block = _mm256_set1_epi64x(i64::from(last_whole / CHECK_INTERVAL) - 1);
     let all = _mm256_castsi256_pd(_mm256_set1_epi64x(-1));
@@ -115,6 +115,8 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
     let (mut vcx, mut vcy) = (std::array::from_fn::<_, VECTORS, _>(|v| load(&cx, v)), std::array::from_fn::<_, VECTORS, _>(|v| load(&cy, v)));
     let (mut vzx, mut vzy) = (std::array::from_fn::<_, VECTORS, _>(|v| load(&zx, v)), std::array::from_fn::<_, VECTORS, _>(|v| load(&zy, v)));
     let (mut vsx, mut vsy) = (vzx, vzy);
+    //The squares of z, kept from the escape check of the step before: they are the squares the next step needs, so every step multiplies 3 times instead of 6
+    let (mut vx2, mut vy2) = (std::array::from_fn::<_, VECTORS, _>(|v| _mm256_mul_pd(vzx[v], vzx[v])), std::array::from_fn::<_, VECTORS, _>(|v| _mm256_mul_pd(vzy[v], vzy[v])));
     let (mut vit, mut vblocks) = (std::array::from_fn::<_, VECTORS, _>(|v| load_integers(&iterations, v)), std::array::from_fn::<_, VECTORS, _>(|v| load_integers(&blocks, v)));
     let mut vlive = std::array::from_fn::<_, VECTORS, _>(|v| _mm256_castsi256_pd(load_integers(&live, v)));
     let mut vactive = vlive;
@@ -125,11 +127,13 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
         }
         for _ in 0..CHECK_INTERVAL {
             for v in 0..VECTORS {
-                //Same arithmetic as z = z.squared().add(c): (zx * zx - zy * zy) + cx and (2 * zx) * zy + cy
-                let new_x = _mm256_add_pd(_mm256_sub_pd(_mm256_mul_pd(vzx[v], vzx[v]), _mm256_mul_pd(vzy[v], vzy[v])), vcx[v]);
-                let new_y = _mm256_add_pd(_mm256_mul_pd(_mm256_mul_pd(two, vzx[v]), vzy[v]), vcy[v]);
+                //Same arithmetic as z = z.squared().add(c): (zx * zx - zy * zy) + cx and (2 * zx) * zy + cy, with the squares of the step before (the same numbers),
+                //and 2 * zx as zx + zx (exact either way)
+                let new_x = _mm256_add_pd(_mm256_sub_pd(vx2[v], vy2[v]), vcx[v]);
+                let new_y = _mm256_add_pd(_mm256_mul_pd(_mm256_add_pd(vzx[v], vzx[v]), vzy[v]), vcy[v]);
                 (vzx[v], vzy[v]) = (new_x, new_y);
-                let escaped = _mm256_cmp_pd::<_CMP_GT_OQ>(_mm256_add_pd(_mm256_mul_pd(new_x, new_x), _mm256_mul_pd(new_y, new_y)), radius_squared);
+                (vx2[v], vy2[v]) = (_mm256_mul_pd(new_x, new_x), _mm256_mul_pd(new_y, new_y));
+                let escaped = _mm256_cmp_pd::<_CMP_GT_OQ>(_mm256_add_pd(vx2[v], vy2[v]), radius_squared);
                 vactive[v] = _mm256_andnot_pd(escaped, vactive[v]);
                 vit[v] = _mm256_sub_epi64(vit[v], _mm256_castpd_si256(vactive[v])); //An active lane is all ones: -1
             }
@@ -187,6 +191,7 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
             let finished = _mm256_castsi256_pd(integer_vector(&LANE_MASKS[((done >> (4 * v)) & 0xF) as usize]));
             (vcx[v], vcy[v]) = (load(&cx, v), load(&cy, v));
             (vzx[v], vzy[v], vsx[v], vsy[v]) = (_mm256_andnot_pd(finished, vzx[v]), _mm256_andnot_pd(finished, vzy[v]), _mm256_andnot_pd(finished, vsx[v]), _mm256_andnot_pd(finished, vsy[v]));
+            (vx2[v], vy2[v]) = (_mm256_andnot_pd(finished, vx2[v]), _mm256_andnot_pd(finished, vy2[v])); //z = 0, so its squares are 0
             vit[v] = _mm256_castpd_si256(_mm256_andnot_pd(finished, _mm256_castsi256_pd(vit[v])));
             vblocks[v] = _mm256_castpd_si256(_mm256_andnot_pd(finished, _mm256_castsi256_pd(vblocks[v])));
             //A lane that got a point is live and active; one that did not is neither
