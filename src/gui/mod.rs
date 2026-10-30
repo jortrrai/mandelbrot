@@ -150,6 +150,9 @@ pub struct MandelbrotApp {
     new_point: Option<(String, String)>,
     /// How fast a flight to a point of interest goes (fast by default), and the flight that is under way, see `flight`
     pace: flight::Pace,
+    /// The route of flights, and the speed of the constant pace in doublings of the zoom per second, see `flight`
+    route: flight::Route,
+    constant_speed: f64,
     /// The settings file (`None`: the settings are not kept, as in tests), the defaults for Reset settings, what was saved last and since when it changed, see `settings`
     settings_path: Option<std::path::PathBuf>,
     settings_defaults: settings::Settings,
@@ -283,6 +286,8 @@ impl MandelbrotApp {
             show_points: false,
             new_point: None,
             pace: flight::Pace::Fast,
+            route: flight::Route::Shortest,
+            constant_speed: flight::CONSTANT_SPEED,
             settings_path: None,
             settings_defaults: settings::Settings::default(),
             settings_saved: None,

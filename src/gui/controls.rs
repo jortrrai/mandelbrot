@@ -3,7 +3,7 @@
 
 use eframe::egui::{self};
 
-use super::flight::{FlightRendering, Pace};
+use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
 use crate::resolution;
@@ -158,7 +158,14 @@ impl MandelbrotApp {
                         response.on_hover_text("Clicking a place shows it at once, without flying there");
                     }
                 }
-            }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest, by the shortest path (zooming out only as far as the distance needs); using any control or the mouse stops a flight");
+            }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest: Fast, Normal and Cinematic start and end softly; Constant keeps one speed all the way, set by the slider; using any control or the mouse stops a flight");
+            if self.pace == Pace::Constant {
+                ui.add(egui::Slider::new(&mut self.constant_speed, CONSTANT_SPEEDS).logarithmic(true).max_decimals(2).suffix(" ×2/s")).on_hover_text("The speed of the constant pace, in doublings of the zoom per second (the pan moves as many views): the same speed from the start to the place");
+            }
+            egui::ComboBox::from_id_salt("flight_route").selected_text(self.route.name()).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.route, Route::Shortest, Route::Shortest.name()).on_hover_text("Zooms out to travel, only as far as the distance needs, and in again: the shortest way for the eye");
+                ui.selectable_value(&mut self.route, Route::Straight, Route::Straight.name()).on_hover_text("A straight line: the zoom changes steadily from one view to the other, never zooming out on the way. Between two far-apart places at a deep zoom the picture rushes by");
+            }).response.on_hover_text("The route of a flight");
             egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
                 for mode in FlightRendering::ALL {
                     ui.selectable_value(&mut self.flight_rendering, mode, mode.entry()).on_hover_text(match mode {

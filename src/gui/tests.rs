@@ -1662,6 +1662,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     let defaults = app.settings();
     (app.pace, app.fast_gpu, app.supersampling_amount, app.m.smooth_coloring) = (super::flight::Pace::Cinematic, false, 16, false);
     app.flight_rendering = super::flight::FlightRendering::Resolution(37);
+    (app.route, app.constant_speed) = (super::flight::Route::Straight, 7.5);
     let now = std::time::Instant::now();
     app.keep_settings(now);
     assert!(!path.exists(), "not on every frame of a drag");
@@ -1672,6 +1673,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert!(next.use_settings_file(Some(path.clone())));
     assert_eq!((next.pace, next.fast_gpu, next.supersampling_amount, next.m.smooth_coloring, next.flight_rendering),
         (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
+    assert_eq!((next.route, next.constant_speed), (super::flight::Route::Straight, 7.5));
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
     let mut partial = manual_app(&Config::sized(64, 48, 50, 4));
@@ -1736,5 +1738,25 @@ fn a_flight_with_frames_ahead_shows_its_frames_in_order_and_arrives() {
     assert!(app.flight_queue.is_empty());
     wait_for_job(&mut app);
     assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_straight_flight_at_the_constant_pace_arrives_and_says_so_in_the_log() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    (app.pace, app.route, app.constant_speed) = (super::flight::Pace::Constant, super::flight::Route::Straight, 20.0);
+    app.go_to_point_of_interest(0);
+    assert!(app.log.last().unwrap().contains("(Constant, straight route,"), "{:?}", app.log.last());
+    let start = app.c.get_scale();
+    let mut widest = start;
+    while app.flight.is_some() {
+        app.fly_at(std::time::Instant::now());
+        app.poll_job();
+        widest = widest.max(app.c.get_scale());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(widest <= start * (1.0 + 1e-9), "a straight flight never zooms out: {widest} from {start}");
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18);
     let _ = std::fs::remove_dir_all(folder);
 }

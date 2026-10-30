@@ -3,6 +3,9 @@
 //! A leg follows the path of van Wijk and Nuij, "Smooth and efficient zooming and panning" (IEEE Symposium on Information Visualization, 2003): to travel far it zooms out first and in again,
 //! so the picture moves at the same apparent speed at every zoom, and the length `S` of the path measures how much the view changes. A flight always takes this shortest
 //! path. Its duration follows from the length at the speed of its pace, and the pace eases the start and the end.
+//!
+//! Two options change that: the *Constant* pace moves along the path at one speed from start to end (no easing), at a speed of the user's choice, and the
+//! *Straight* route goes in a straight line, zooming steadily from one scale to the other without zooming out on the way (see `Route`).
 
 use std::time::Duration;
 
@@ -17,13 +20,44 @@ pub enum Pace {
     Fast,
     Normal,
     Cinematic,
+    /// One speed from start to end, without easing: the speed of the slider next to the drop-down (see `MandelbrotApp::constant_speed`)
+    Constant,
     /// No flight: going to a place shows it at once (see `MandelbrotApp::go_to_point_of_interest`)
     NoFlight,
 }
 
+/// The speed of the `Pace::Constant` slider at first, in doublings of the zoom per second
+pub const CONSTANT_SPEED: f64 = 3.0;
+
+/// The range of the `Pace::Constant` slider, in doublings of the zoom per second
+pub const CONSTANT_SPEEDS: std::ops::RangeInclusive<f64> = 0.25..=20.0;
+
+/// The way a flight takes from one view to another
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The shortest path of van Wijk and Nuij: zooming out (only as far as the distance needs) to travel, see the module
+    Shortest,
+    /// A straight line: the center moves straight to the destination while the scale changes steadily from one view to the other, never zooming out on the way.
+    /// The center moves at one speed on the screen, so it travels most where the view is widest; far apart at a deep zoom, the picture rushes by
+    Straight,
+}
+
+impl Route {
+    /// Every route, in the order of the drop-down (the default first)
+    pub const ALL: [Route; 2] = [Route::Shortest, Route::Straight];
+
+    /// The name in the drop-down
+    pub const fn name(self) -> &'static str {
+        match self {
+            Route::Shortest => "Shortest",
+            Route::Straight => "Straight",
+        }
+    }
+}
+
 impl Pace {
     /// Every pace, in the order of the drop-down (the default, see `MandelbrotApp::new`, first)
-    pub const ALL: [Pace; 4] = [Pace::Fast, Pace::Normal, Pace::Cinematic, Pace::NoFlight];
+    pub const ALL: [Pace; 5] = [Pace::Fast, Pace::Normal, Pace::Cinematic, Pace::Constant, Pace::NoFlight];
 
     /// The name in the drop-down
     pub const fn name(self) -> &'static str {
@@ -31,13 +65,16 @@ impl Pace {
             Pace::Fast => "Fast",
             Pace::Normal => "Normal",
             Pace::Cinematic => "Cinematic",
+            Pace::Constant => "Constant",
             Pace::NoFlight => "No flight",
         }
     }
 
-    /// The speed in units of path length per second, and the shortest and longest duration of a flight
-    const fn speed(self) -> (f64, f64, f64) {
+    /// The speed in units of path length per second, and the shortest and longest duration of a flight; `constant` is the speed of `Pace::Constant`, in doublings
+    /// of the zoom per second (a zoom by 2 is `ln 2 / RHO` of path length)
+    fn speed(self, constant: f64) -> (f64, f64, f64) {
         match self {
+            Pace::Constant => (constant.clamp(*CONSTANT_SPEEDS.start(), *CONSTANT_SPEEDS.end()) * std::f64::consts::LN_2 / RHO, 0.1, 600.0),
             Pace::Fast => (4.0, 0.5, 3.0),
             Pace::Normal => (2.0, 1.0, 6.0),
             Pace::Cinematic => (1.0, 2.0, 12.0),
@@ -45,12 +82,14 @@ impl Pace {
         }
     }
 
-    /// The share of the path that is done after the share `t` (0 to 1) of the time: smooth at both ends (smootherstep for cinematic, smoothstep otherwise)
+    /// The share of the path that is done after the share `t` (0 to 1) of the time: smooth at both ends (smootherstep for cinematic, smoothstep otherwise), or the
+    /// same share for the constant pace
     fn ease(self, t: f64) -> f64 {
         let t = t.clamp(0.0, 1.0);
         match self {
             Pace::Cinematic => t * t * t * (t * (t * 6.0 - 15.0) + 10.0),
             Pace::Fast | Pace::Normal => t * t * (3.0 - 2.0 * t),
+            Pace::Constant => t,
             Pace::NoFlight => 1.0,
         }
     }
@@ -151,6 +190,8 @@ struct Leg {
     length: f64,
     /// The distance between the centers, and the parameters r0 of the path (see `camera_at`); `None` for a pure zoom (the centers are the same)
     pan: Option<(f64, f64)>,
+    /// A straight leg (see `Route::Straight`): the natural logarithm of the zoom, `ln(to.scale / from.scale)`
+    straight: Option<f64>,
 }
 
 impl Leg {
@@ -159,13 +200,23 @@ impl Leg {
         let u1 = (to.x - from.x).hypot(to.y - from.y);
         //Below a ten-thousandth of the smaller view, a pan is a pure zoom: the formulas of a pan divide by the distance
         if u1 <= 1e-4 * w0.min(w1) {
-            return Leg { from, to, length: (w1 / w0).ln().abs() / RHO, pan: None };
+            return Leg { from, to, length: (w1 / w0).ln().abs() / RHO, pan: None, straight: None };
         }
         let rho2 = RHO * RHO;
         let b = |w: f64, sign: f64| (w1 * w1 - w0 * w0 + sign * rho2 * rho2 * u1 * u1) / (2.0 * w * rho2 * u1);
         //r = ln(-b + sqrt(b² + 1)) = -asinh(b), without the cancellation of the logarithm for a large b
         let (r0, r1) = (-b(w0, 1.0).asinh(), -b(w1, -1.0).asinh());
-        Leg { from, to, length: (r1 - r0) / RHO, pan: Some((u1, r0)) }
+        Leg { from, to, length: (r1 - r0) / RHO, pan: Some((u1, r0)), straight: None }
+    }
+
+    /// A straight leg from `from` to `to`, see `Route::Straight`. Along it the scale is `w0 · e^(zoom · τ)` (τ from 0 to 1) and the center has moved the share
+    /// `(e^(zoom · τ) - 1) / (e^zoom - 1)` of the way, so the center moves the same number of views every moment. Its length, in the units of van Wijk and Nuij,
+    /// is that of the zoom (`|zoom| / RHO`) and of the pan in views (the distance over the logarithmic mean of the scales), together
+    fn straight(from: Camera, to: Camera) -> Leg {
+        let zoom = (to.scale / from.scale).ln();
+        let distance = (to.x - from.x).hypot(to.y - from.y);
+        let mean_scale = if zoom.abs() < 1e-12 { from.scale } else { (to.scale - from.scale) / zoom };
+        Leg { from, to, length: (zoom / RHO).hypot(distance / mean_scale), pan: None, straight: Some(zoom) }
     }
 
     /// The camera at path length `s` (0 to `length`); exactly the start at 0 and the end at `length`
@@ -177,6 +228,11 @@ impl Leg {
             return self.to;
         }
         let (from, to, w0) = (self.from, self.to, self.from.scale);
+        if let Some(zoom) = self.straight {
+            let t = s / self.length;
+            let along = if zoom.abs() < 1e-12 { t } else { (zoom * t).exp_m1() / zoom.exp_m1() };
+            return Camera { x: from.x + (to.x - from.x) * along, y: from.y + (to.y - from.y) * along, scale: w0 * (zoom * t).exp() };
+        }
         match self.pan {
             None => {
                 let scale = w0 * ((to.scale / w0).ln() * s / self.length).exp();
@@ -204,9 +260,18 @@ pub struct Flight {
 
 impl Flight {
     /// A flight from `from` to `to` at `pace`, by the shortest path: zooming out only as far as the distance needs
+    #[cfg(test)]
     pub fn new(from: Camera, to: Camera, pace: Pace) -> Flight {
-        let leg = Leg::new(from, to);
-        let (speed, shortest, longest) = pace.speed();
+        Flight::with(from, to, pace, Route::Shortest, CONSTANT_SPEED)
+    }
+
+    /// A flight from `from` to `to` at `pace` along `route`; `constant` is the speed of `Pace::Constant`, in doublings of the zoom per second
+    pub fn with(from: Camera, to: Camera, pace: Pace, route: Route, constant: f64) -> Flight {
+        let leg = match route {
+            Route::Shortest => Leg::new(from, to),
+            Route::Straight => Leg::straight(from, to),
+        };
+        let (speed, shortest, longest) = pace.speed(constant);
         let duration = Duration::from_secs_f64((leg.length / speed).clamp(shortest, longest));
         Flight { leg, pace, duration }
     }
@@ -300,6 +365,39 @@ mod tests {
         let shares: Vec<f64> = (0..=100).map(|i| flight.share_of_path(flight.duration().mul_f64(f64::from(i) / 100.0))).collect();
         assert_eq!((shares[0], shares[100]), (0.0, 1.0));
         assert!(shares.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn the_constant_pace_covers_the_same_path_every_moment_at_the_speed_of_its_slider() {
+        //The path length per second is the same from start to end: no slow start or arrival
+        let flight = Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Shortest, 3.0);
+        let shares: Vec<f64> = (0..=10).map(|i| flight.share_of_path(flight.duration().mul_f64(f64::from(i) / 10.0))).collect();
+        assert!(shares.windows(2).all(|pair| (pair[1] - pair[0] - 0.1).abs() < 1e-9), "{shares:?}");
+        //A pure zoom by 2^12 at 3 doublings per second takes 4 s, at 6 doublings 2 s
+        let deeper = Camera { scale: RESET.scale / 4096.0, ..RESET };
+        assert!((Flight::with(RESET, deeper, Pace::Constant, Route::Shortest, 3.0).duration().as_secs_f64() - 4.0).abs() < 1e-9);
+        assert!((Flight::with(RESET, deeper, Pace::Constant, Route::Shortest, 6.0).duration().as_secs_f64() - 2.0).abs() < 1e-9);
+        //The deepest zoom is not capped at 12 s like the eased paces: 10^12 is about 40 doublings, 13 s at 3 per second
+        assert!(Flight::with(RESET, DEEP, Pace::Constant, Route::Shortest, 3.0).duration() > seconds(12.0));
+    }
+
+    #[test]
+    fn a_straight_flight_goes_in_a_line_without_zooming_out_and_moves_the_same_views_every_moment() {
+        for (from, to) in [(RESET, SEAHORSE), (SEAHORSE, DEEP), (DEEP, RESET), (SEAHORSE, Camera { x: -0.7, ..SEAHORSE })] {
+            let flight = Flight::with(from, to, Pace::Constant, Route::Straight, 3.0);
+            assert_eq!((flight.camera_at(Duration::ZERO), flight.camera_at(flight.duration())), (from, to));
+            let cameras: Vec<Camera> = (0..=200).map(|i| flight.camera_at(flight.duration().mul_f64(f64::from(i) / 200.0))).collect();
+            for camera in &cameras {
+                //Never wider than the wider end, and on the line between the centers
+                assert!(camera.scale <= from.scale.max(to.scale) * (1.0 + 1e-9));
+                let cross = (camera.x - from.x) * (to.y - from.y) - (camera.y - from.y) * (to.x - from.x);
+                assert!(cross.abs() <= 1e-9 * (to.x - from.x).hypot(to.y - from.y).max(1e-300), "{camera:?}");
+            }
+            //The pan in views (distance over the scale) is the same every step, and so is the zoom
+            let steps: Vec<(f64, f64)> = cameras.windows(2).map(|pair| ((pair[1].x - pair[0].x).hypot(pair[1].y - pair[0].y) / (pair[0].scale * pair[1].scale).sqrt(), (pair[1].scale / pair[0].scale).ln())).collect();
+            let (pan, zoom) = steps[0];
+            assert!(steps.iter().all(|(p, z)| (p - pan).abs() <= 0.02 * pan.max(1e-12) + 1e-12 && (z - zoom).abs() <= 1e-6 * zoom.abs() + 1e-12), "{from:?} -> {to:?}: {:?}", &steps[..3]);
+        }
     }
 
     #[test]
