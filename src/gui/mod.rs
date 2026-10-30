@@ -151,6 +151,10 @@ pub struct MandelbrotApp {
     last_flight: Option<video::VideoFlight>,
     video_job: Option<video::VideoJob>,
     video_fps: u32,
+    /// The speed of a video in percent of the flight's, its file format, and whether its frames are also written as PNG files, see `video`
+    video_speed: u16,
+    video_format: video::VideoFormat,
+    video_pngs: bool,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
@@ -218,6 +222,7 @@ pub struct MandelbrotApp {
 }
 
 impl MandelbrotApp {
+    #[allow(clippy::too_many_lines)] // The initial value of every field
     pub(super) fn new(config: &Config) -> MandelbrotApp {
         let c = ComplexPlane::new(config.window_width, config.window_height);
         let shown_plane = c.clone();
@@ -267,6 +272,9 @@ impl MandelbrotApp {
             last_flight: None,
             video_job: None,
             video_fps: 30,
+            video_speed: 100,
+            video_format: video::VideoFormat::HighQuality,
+            video_pngs: true,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
