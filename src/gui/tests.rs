@@ -1692,6 +1692,44 @@ fn a_spiral_flight_arrives_and_a_place_without_a_spiral_center_takes_the_shortes
     app.go_to_point_of_interest(test_place);
     assert!(app.log.iter().any(|line| line.starts_with("No spiral to Test Place")), "{:?}", app.log);
     app.cancel_flight();
+}
+
+#[test]
+fn the_frame_statistics_of_the_benchmark() {
+    let ms = Duration::from_millis;
+    let mut times: Vec<Duration> = vec![ms(10); 99];
+    times.push(ms(100));
+    let stats = super::benchmark::frame_stats(&times, Duration::from_secs(1));
+    assert_eq!((stats.frames, stats.min, stats.max), (100, 10.0, 100.0));
+    assert!((stats.average - 10.9).abs() < 1e-9 && (stats.average_fps - 100.0).abs() < 1e-9);
+    assert!((stats.low_fps - 10.0).abs() < 1e-9, "the slowest 1% is the 100 ms frame: {}", stats.low_fps);
+    assert_eq!(stats.p95, 10.0);
+}
+
+#[test]
+fn a_benchmark_tour_visits_the_deepest_places_reports_them_and_restores_the_settings() {
+    const FROST: &str = r#"{ "format_version": 1, "name": "Frost", "location": { "center": { "real": -0.6604166666666667, "imaginary": 0.4437500000000001 }, "scale": 0.1, "max_iterations": 300 } }"#;
+    let (mut app, folder) = app_with_points(&[("01-frost.json", FROST), ("02-test-place.json", HSV_BGR_PLACE)]);
+    app.benchmark_folder = folder.join("benchmarks");
+    let ctx = egui::Context::default();
+    let (pace, rendering) = (app.pace, app.flight_rendering);
+    app.start_benchmark();
+    assert!(app.benchmark.is_some());
+    let started = std::time::Instant::now();
+    while app.benchmark.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(120), "the tour did not finish");
+        app.poll_job();
+        app.fly_at(std::time::Instant::now());
+        app.step_benchmark(&ctx);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let names: Vec<&str> = app.benchmark_results.iter().map(|scene| scene.name.as_str()).collect();
+    assert_eq!(names, ["Frost", "Test Place"], "shallow to deep");
+    assert!(app.benchmark_results.iter().all(|scene| !scene.frame_times.is_empty() && scene.finished >= scene.first_layer));
+    assert_eq!((app.pace, app.flight_rendering), (pace, rendering), "the settings are restored");
+    let saved: Vec<_> = std::fs::read_dir(folder.join("benchmarks")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    assert_eq!(saved.len(), 2, "a JSON and a CSV: {saved:?}");
+    assert!(app.log.iter().any(|line| line.starts_with("Benchmark finished: ")), "{:?}", app.log);
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
 }
