@@ -1692,6 +1692,8 @@ fn a_spiral_flight_arrives_and_a_place_without_a_spiral_center_takes_the_shortes
     app.go_to_point_of_interest(test_place);
     assert!(app.log.iter().any(|line| line.starts_with("No spiral to Test Place")), "{:?}", app.log);
     app.cancel_flight();
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
 }
 
 #[test]
@@ -1731,6 +1733,7 @@ fn a_benchmark_tour_visits_the_deepest_places_reports_them_and_restores_the_sett
     assert_eq!(saved.len(), 2, "a JSON and a CSV: {saved:?}");
     assert!(app.log.iter().any(|line| line.starts_with("Benchmark finished: ")), "{:?}", app.log);
     wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
 }
 
 #[test]
@@ -1763,5 +1766,32 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     next.reset_settings();
     assert_eq!(next.settings(), defaults);
     wait_for_job(&mut next);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_video_of_the_last_flight_has_a_frame_for_every_step_of_its_frame_rate() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
+    app.start_video();
+    let ctx = egui::Context::default();
+    let started = std::time::Instant::now();
+    while app.video_job.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(60), "the video did not finish");
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let frames = (duration.as_secs_f64() * 24.0).ceil() as usize + 1;
+    let message = app.log.iter().rev().find(|line| line.starts_with("Video of the flight")).unwrap();
+    assert!(message.starts_with(&format!("Video of the flight: {frames} of {frames} frames at 24 FPS")), "{message}");
+    let written = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).find(|entry| entry.path().is_dir()).unwrap().path();
+    assert_eq!(std::fs::read_dir(&written).unwrap().count(), frames, "one PNG per frame");
+    wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
 }

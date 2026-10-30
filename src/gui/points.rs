@@ -388,6 +388,7 @@ impl MandelbrotApp {
         let now = Instant::now();
         let destination_palette = point.appearance.as_ref().filter(|_| self.restore_appearance).map_or(self.m.palette, |appearance| appearance.palette_over(self.m.palette));
         let palettes = (self.m.palette, destination_palette);
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
