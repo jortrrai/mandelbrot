@@ -270,8 +270,9 @@ impl MandelbrotSet {
         #[cfg(target_arch = "x86_64")]
         {
             if std::arch::is_x86_feature_detected!("avx2") {
-                //SAFETY: the CPU supports AVX2, which was just detected
-                return unsafe { avx2::positions(self, points, out, cancel) };
+                let wide = std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512vl");
+                //SAFETY: the CPU supports AVX2, and AVX-512 if `wide`, which was just detected
+                return unsafe { avx2::positions(self, points, out, cancel, wide) };
             }
         }
         self.positions_generic(points, out, cancel)
@@ -585,13 +586,25 @@ mod tests {
                         let expected: Vec<u64> = points.chunks(LANES)
                             .flat_map(|group| <&[Complex; LANES]>::try_from(group).map_or_else(|_| group.iter().map(|c| m.position(c)).collect(), |group| m.position_lanes(group).to_vec()))
                             .map(f64::to_bits).collect();
-                        //The AVX2 loop where the CPU has it, and the generic loop
-                        for generic in [false, true] {
+                        //The AVX2 loop with 2 and (with AVX-512) 3 vectors where the CPU has them, and the generic loop
+                        for way in ["avx2", "wide", "generic"] {
+                            #[cfg(target_arch = "x86_64")]
+                            let (avx2, wide) = (std::arch::is_x86_feature_detected!("avx2"), std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512vl"));
+                            #[cfg(not(target_arch = "x86_64"))]
+                            let (avx2, wide) = (false, false);
                             let mut out = vec![f64::NAN; points.len()];
-                            let done = if generic { m.positions_generic(&points, &mut out, None) } else { m.positions(&points, &mut out, None) };
+                            let done = match way {
+                                //SAFETY: the CPU has the instructions, which was just detected
+                                #[cfg(target_arch = "x86_64")]
+                                "avx2" if avx2 => unsafe { avx2::positions(&m, &points, &mut out, None, false) },
+                                #[cfg(target_arch = "x86_64")]
+                                "wide" if wide => unsafe { avx2::positions(&m, &points, &mut out, None, true) },
+                                "generic" => m.positions_generic(&points, &mut out, None),
+                                _ => continue,
+                            };
                             assert_eq!(done, points.len());
                             let differ = out.iter().zip(&expected).position(|(a, b)| a.to_bits() != *b);
-                            assert!(differ.is_none(), "generic = {generic}, max_iterations = {max_iterations}, orbit_radius = {orbit_radius}, smooth = {smooth}, point {:?}: {} instead of {}",
+                            assert!(differ.is_none(), "{way}, max_iterations = {max_iterations}, orbit_radius = {orbit_radius}, smooth = {smooth}, point {:?}: {} instead of {}",
                                 differ.map(|at| (points[at].x, points[at].y)), differ.map_or(0.0, |at| out[at]), differ.map_or(0.0, |at| f64::from_bits(expected[at])));
                         }
                     }
