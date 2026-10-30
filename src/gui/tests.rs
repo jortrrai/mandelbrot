@@ -6,6 +6,7 @@ use std::time::Duration;
 use eframe::egui::{self, ColorImage, TextureOptions};
 
 use super::*;
+use crate::mandelbrot_set::ColorCycle;
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::{ColorChannelMapping, TrueColor};
 use crate::complex::Complex;
@@ -202,7 +203,7 @@ fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
     let config = Config::sized(64, 48, 50, 32);
     let mut app = manual_app(&config);
     assert_eq!(app.m.max_iterations, 50);
-    assert_eq!(app.m.palette_scale, None, "manual mode colors exactly as before");
+    assert_eq!(app.m.palette, ColorCycle::CYCLE, "the colors do not depend on the limit");
     let manual_pixels = app.p.pixels.clone();
 
     //Turn auto on: the limit is chosen for the zoom, and shown in the max. iterations field
@@ -210,7 +211,7 @@ fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
     app.render("Turned auto iterations on");
     wait_for_job(&mut app);
     let limit = app.m.max_iterations;
-    assert_eq!(app.m.palette_scale, Some(app.auto_settings.initial_limit(app.c.get_scale())));
+    assert_eq!(app.m.palette, ColorCycle::CYCLE, "auto iterations do not change the colors");
     assert!(app.log.last().unwrap().contains("auto iterations: limit"), "{:?}", app.log.last());
     assert_eq!(app.max_iterations_input, 50, "the manual value is kept while auto is on");
 
@@ -233,7 +234,7 @@ fn auto_iterations_switch_with_manual_and_keep_the_palette_stable_on_moves() {
     app.render("Turned auto iterations off");
     wait_for_job(&mut app);
     assert_eq!(app.m.max_iterations, 50);
-    assert_eq!(app.m.palette_scale, None);
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
     assert_eq!(app.p.pixels, manual_pixels, "back in manual mode the same view renders the same image");
 }
 
@@ -247,7 +248,7 @@ fn moving_after_turning_auto_off_does_not_reuse_an_auto_colored_buffer() {
     app.auto_iterations = false;
     app.translate("up", 10, 0);
     wait_for_job(&mut app);
-    assert_eq!(app.m.palette_scale, None);
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
     assert_eq!(app.bars.as_ref().unwrap().pixels_total, 64 * 48, "the buffer was colored with the auto palette and is rendered again");
 }
 
@@ -268,7 +269,7 @@ fn presets_and_adaptive_supersampling_toggle_independently_of_auto_iterations() 
     app.adaptive_supersampling = true;
     app.render("adaptive on");
     wait_for_job(&mut app);
-    assert_eq!(app.m.palette_scale, None);
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
     assert_eq!(app.bars.as_ref().unwrap().layer_times.len(), 4, "every layer is still reported");
     app.adaptive_supersampling = false;
     app.render("adaptive off");
@@ -288,7 +289,7 @@ fn presets_and_adaptive_supersampling_toggle_independently_of_auto_iterations() 
     app.render("performance");
     wait_for_job(&mut app);
     assert!(app.m.max_iterations <= high);
-    assert_eq!(app.m.palette_scale, Some(AutoPreset::Performance.settings().initial_limit(app.c.get_scale())));
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
 }
 
 #[test]
@@ -305,7 +306,7 @@ fn selecting_a_preset_shows_its_limit_immediately_and_stale_renders_cannot_overw
     //Selecting: the starting limit of the preset is shown before any poll, while the render is only starting
     app.select_preset(AutoPreset::HighDetail);
     let initial = AutoPreset::HighDetail.settings().initial_limit(app.c.get_scale());
-    assert_eq!((app.m.max_iterations, app.m.palette_scale), (initial, Some(initial)), "published synchronously on selection");
+    assert_eq!(app.m.max_iterations, initial, "published synchronously on selection");
     assert!(app.limit_pending && app.is_busy());
     assert_ne!(app.m.max_iterations, balanced);
 
@@ -329,7 +330,7 @@ fn selecting_a_preset_shows_its_limit_immediately_and_stale_renders_cannot_overw
     let balanced_initial = AutoPreset::Balanced.settings().initial_limit(app.c.get_scale());
     assert_eq!(app.m.max_iterations, balanced_initial);
     wait_for_job(&mut app);
-    assert_eq!(app.m.palette_scale, Some(balanced_initial));
+    assert_eq!(app.m.palette, ColorCycle::CYCLE);
     assert_eq!(app.m.max_iterations, balanced, "the same view and preset give the same limit as before, not the Performance one");
     assert!(!app.limit_pending);
 }
@@ -347,16 +348,21 @@ fn controls_texts(app: &mut MandelbrotApp) -> Vec<String> {
 }
 
 #[test]
-fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering_controls() {
+fn the_controls_are_in_sections_with_the_image_quality_in_its_own_and_saving_with_the_video() {
     let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     let texts = controls_texts(&mut app);
     let position = |needle: &str| texts.iter().position(|t| t.starts_with(needle)).unwrap_or_else(|| panic!("{needle:?} is not drawn: {texts:?}"));
-    let (quality, coloring, channels) = (position("Quality (supersampling"), position("Coloring:"), position("Color channels"));
-    let (heading, saved_quality, save) = (position("Save Image"), position("Saved image quality:"), position("Save image"));
-    assert!(quality < coloring && coloring < channels, "the rendering quality is with the rendering controls");
-    assert!(channels < heading && heading < saved_quality && saved_quality < save, "the saved image quality and the Save button are together in the Save Image section, after the rendering controls");
+    let sections = ["Navigation", "Places", "Image quality", "Colors", "Flights", "Performance", "Save image and video", "Benchmark"].map(&position);
+    assert!(sections.windows(2).all(|pair| pair[0] < pair[1]), "the sections in order: {sections:?}");
+    let [_, _, quality_section, colors, flights, performance, saving, benchmark] = sections;
+    //Every control in its section
+    for (needle, section, next) in [("Quality:", quality_section, colors), ("Max. iterations:", quality_section, colors), ("Coloring:", colors, flights), ("Color channels", colors, flights),
+        ("Flight:", flights, performance), ("Frames ahead:", flights, performance), ("Saved image quality:", saving, benchmark), ("Video of the last flight", saving, benchmark)] {
+        let at = position(needle);
+        assert!(section < at && at < next, "{needle} is in its section");
+    }
     assert_eq!(texts.iter().filter(|t| t.starts_with("Saved image quality")).count(), 1);
 }
 
@@ -628,8 +634,8 @@ fn the_resident_thumbnails_are_bounded_and_follow_the_appearance_that_going_to_a
     }
     //The thumbnail looks like the place does when going to it: with the current appearance, or the saved one when appearances are restored
     let point = app.points[0].clone();
-    let current = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, false, app.p.color_channel_mapping, (64, 48));
-    let restored = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, true, app.p.color_channel_mapping, (64, 48));
+    let current = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, false, app.p.color_channel_mapping, app.m.palette, (64, 48));
+    let restored = MandelbrotApp::thumbnail_request_for(&point, app.coloring_index, true, app.p.color_channel_mapping, app.m.palette, (64, 48));
     assert_eq!(current.coloring, Coloring::Bernstein, "the current appearance of the window");
     assert_eq!(restored.coloring, Coloring::Hsv, "the saved appearance of the file");
     assert_ne!(current.key(), restored.key(), "another appearance is another thumbnail");
@@ -1139,15 +1145,16 @@ fn a_frame_is_only_shown_when_it_is_complete_enough() {
 }
 
 /// Lets a flight that waits for its frames run in real time until it arrives, as the window does (see `flight_job`), and returns the flight clock at every frame
-fn fly_until_arrived(app: &mut MandelbrotApp) -> Vec<Duration> {
+fn fly_until_arrived(app: &mut MandelbrotApp) -> Vec<(Duration, usize)> {
     let started = std::time::Instant::now();
     let mut clocks = Vec::new();
     while let Some(flight) = &app.flight {
         assert!(started.elapsed() < Duration::from_secs(60), "the flight did not arrive");
         let frames = flight.frames.len();
         app.poll_job();
+        //(Fast frames can arrive more than one at a time: then only the clock of the last is seen, with the frames it took)
         if let Some(flight) = app.flight.as_ref().filter(|flight| flight.frames.len() > frames) {
-            clocks.push(flight.elapsed);
+            clocks.push((flight.elapsed, flight.frames.len() - frames));
         }
         app.fly_at(std::time::Instant::now());
         std::thread::sleep(Duration::from_millis(1));
@@ -1166,8 +1173,8 @@ fn a_flight_that_waits_for_its_frames_is_rendered_frame_after_frame_by_one_job()
     assert_eq!(format!("{:?}", app.c.get_view()), format!("{before:?}"), "the camera waits for the first frame");
     let clocks = fly_until_arrived(&mut app);
     assert!(clocks.len() >= 3, "frames on the way: {clocks:?}");
-    assert!(clocks.windows(2).all(|pair| pair[1] > pair[0] && pair[1].saturating_sub(pair[0]) <= super::points::MAX_WAITING_STEP), "the clock moves on by at most a step per frame: {clocks:?}");
-    assert_eq!(*clocks.last().unwrap(), duration, "the last frame is at the destination");
+    assert!(clocks.windows(2).all(|pair| pair[1].0 > pair[0].0 && pair[1].0.saturating_sub(pair[0].0) <= super::points::MAX_WAITING_STEP * u32::try_from(pair[1].1).unwrap()), "the clock moves on by at most a step per frame: {clocks:?}");
+    assert_eq!(clocks.last().unwrap().0, duration, "the last frame is at the destination");
     //The arrival: the place itself, with a full-quality render
     assert!(!app.flight_job);
     wait_for_job(&mut app);
@@ -1215,7 +1222,7 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_a_flight_and_reaches_the_l
     destination.set_view(&View::new(location.real, location.imaginary, location.scale));
     let mut m = app.m.clone();
     let initial = app.auto_settings.initial_limit(destination.get_scale());
-    (m.max_iterations, m.palette_scale) = (initial, Some(initial));
+    m.max_iterations = initial;
     let destination_limit = crate::auto_iterations::choose_limit(&destination, &m, 64, 48, &app.auto_settings, 2, &std::sync::atomic::AtomicBool::new(false)).unwrap().limit;
     assert!(destination_limit > initial, "the probes raise the limit above the zoom rule here: {destination_limit} > {initial}");
 
@@ -1225,7 +1232,7 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_a_flight_and_reaches_the_l
     for share in [0.2, 0.4, 0.6, 0.8, 0.9999] {
         app.fly_at(start + duration.mul_f64(share));
         let scale = app.c.get_scale();
-        assert_eq!(app.m.palette_scale, Some(app.auto_settings.initial_limit(scale)), "the palette of the zoom, as auto iterations uses it");
+        assert_eq!(app.m.palette, ColorCycle::CYCLE, "the colors stay the same on the way");
         limits.push((scale, app.m.max_iterations));
         wait_for_job(&mut app);
         assert_eq!(app.m.max_iterations, limits.last().unwrap().1, "the frame is rendered with it");
@@ -1575,6 +1582,65 @@ fn the_blur_of_a_flight_frame_follows_the_resolution_it_really_has() {
 }
 
 #[test]
+fn auto_steers_to_the_finest_scale_that_keeps_the_frame_rate_and_holds_it_when_it_fits() {
+    use super::flight::{auto_scale, AUTO_COARSEST};
+    let ms = |ms: f64| Duration::from_secs_f64(ms / 1000.0);
+    let target = ms(1000.0 / 60.0); //60 FPS: the frames aim for 90% of 16.7 ms, 15 ms
+    //A frame that takes a fixed 4 ms plus 16 ms at full resolution (20 ms, 50 FPS): the scale settles where it fits, not at the coarse scale that the pixels
+    //alone predict (blocks of 2 or 3)
+    let took = |scale: f64| ms(4.0 + 16.0 * scale * scale);
+    let mut scale = 0.7;
+    for _ in 0..40 {
+        scale = auto_scale(scale, took(scale), target);
+    }
+    let fits = took(scale).as_secs_f64() * 1000.0;
+    assert!((0.77..=0.83).contains(&scale) && (13.5..=15.0).contains(&fits), "settled at {scale} ({fits:.1} ms)");
+    //Steady once it fits: the same scale every frame
+    assert_eq!(auto_scale(scale, took(scale), target), scale);
+    //Fast views go to full resolution, slow ones down to the coarsest scale and no further
+    let mut scale = 0.5;
+    for _ in 0..20 {
+        scale = auto_scale(scale, ms(5.0), target);
+    }
+    assert_eq!(scale, 1.0);
+    for _ in 0..40 {
+        scale = auto_scale(scale, ms(1000.0), target);
+    }
+    assert_eq!(scale, AUTO_COARSEST);
+    //At most 20% coarser or 15% finer in one frame, and at least a percent
+    assert_eq!(auto_scale(1.0, ms(1000.0), target), 0.8);
+    assert_eq!(auto_scale(0.5, ms(1.0), target), 0.57);
+    assert_eq!(auto_scale(0.5, ms(15.5), target), 0.49);
+}
+
+#[test]
+fn an_auto_flight_shows_frames_of_the_chosen_resolution_and_arrives() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::Auto(60);
+    assert_eq!(app.flight_readiness(), Readiness::COMPLETE);
+    app.go_to_point_of_interest(0);
+    app.fly_at(std::time::Instant::now());
+    assert!(app.flight_job, "the flight job renders the frames");
+    //The first frame is scaled (70% of the pixels across), and is drawn from the smaller image
+    let (started, ctx, width, height) = (std::time::Instant::now(), egui::Context::default(), app.p.pixel_plane.width, app.p.pixel_plane.height);
+    while app.shown_scaled.is_none() && app.flight.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no scaled frame");
+        app.poll_job();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (columns, rows) = app.shown_scaled.expect("a scaled frame");
+    assert_eq!((columns, rows), ((width as f64 * 0.7).round() as usize, (height as f64 * 0.7).round() as usize));
+    app.update_texture(&ctx);
+    assert_eq!(app.texture.as_ref().unwrap().size(), [columns, rows]);
+    let clocks = fly_until_arrived(&mut app);
+    assert!(clocks.len() >= 2, "frames on the way: {clocks:?}");
+    assert_eq!(app.shown_scaled, None, "the frame at the place is not scaled");
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete, "the place itself, fully rendered");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visible() {
     use super::blur::visible_part;
     let rect = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1));
@@ -1602,6 +1668,10 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     let defaults = app.settings();
     (app.pace, app.fast_gpu, app.supersampling_amount, app.m.smooth_coloring) = (super::flight::Pace::Cinematic, false, 16, false);
     app.flight_rendering = super::flight::FlightRendering::Resolution(37);
+    (app.route, app.constant_speed) = (super::flight::Route::Straight, 7.5);
+    (app.frames_ahead, app.blend_frames, app.f32_frames, app.quality_blur, app.neighborhood_margin) = (1, true, false, true, 250);
+    (app.video_fps, app.video_speed, app.video_format, app.video_pngs) = (144, 10, super::video::VideoFormat::Lossless, false);
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     let now = std::time::Instant::now();
     app.keep_settings(now);
     assert!(!path.exists(), "not on every frame of a drag");
@@ -1612,6 +1682,10 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert!(next.use_settings_file(Some(path.clone())));
     assert_eq!((next.pace, next.fast_gpu, next.supersampling_amount, next.m.smooth_coloring, next.flight_rendering),
         (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
+    assert_eq!((next.route, next.constant_speed), (super::flight::Route::Straight, 7.5));
+    assert_eq!((next.frames_ahead, next.blend_frames, next.f32_frames, next.quality_blur, next.neighborhood_margin), (1, true, false, true, 250));
+    assert_eq!((next.video_fps, next.video_speed, next.video_format, next.video_pngs), (144, 10, super::video::VideoFormat::Lossless, false));
+    assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
     let mut partial = manual_app(&Config::sized(64, 48, 50, 4));
@@ -1659,6 +1733,223 @@ fn a_benchmark_tour_visits_the_deepest_places_reports_them_and_restores_the_sett
     let saved: Vec<_> = std::fs::read_dir(folder.join("benchmarks")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
     assert_eq!(saved.len(), 2, "a JSON and a CSV: {saved:?}");
     assert!(app.log.iter().any(|line| line.starts_with("Benchmark finished: ")), "{:?}", app.log);
+    wait_for_job(&mut app);
+}
+
+#[test]
+fn a_flight_with_frames_ahead_shows_its_frames_in_order_and_arrives() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::FULL_RESOLUTION;
+    app.frames_ahead = 2;
+    app.go_to_point_of_interest(0);
+    let duration = app.flight.as_ref().unwrap().flight.duration();
+    let clocks = fly_until_arrived(&mut app);
+    assert!(clocks.len() >= 3, "frames on the way: {clocks:?}");
+    assert!(clocks.windows(2).all(|pair| pair[1].0 > pair[0].0), "in order: {clocks:?}");
+    assert_eq!(clocks.last().unwrap().0, duration, "the last frame is at the destination");
+    assert!(app.flight_queue.is_empty());
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_video_of_the_last_flight_has_a_frame_for_every_step_of_its_frame_rate() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
+    app.start_video();
+    let ctx = egui::Context::default();
+    let started = std::time::Instant::now();
+    while app.video_job.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(60), "the video did not finish");
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let frames = (duration.as_secs_f64() * 24.0).ceil() as usize + 1;
+    let message = app.log.iter().rev().find(|line| line.starts_with("Video of the flight")).unwrap();
+    assert!(message.starts_with(&format!("Video of the flight: {frames} of {frames} frames at 24 FPS")), "{message}");
+    if std::process::Command::new("ffmpeg").arg("-version").output().is_ok_and(|output| output.status.success()) {
+        assert!(message.contains(".mp4"), "the default format makes an .mp4: {message}");
+    }
+    let written = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).find(|entry| entry.path().is_dir()).unwrap().path();
+    assert_eq!(std::fs::read_dir(&written).unwrap().count(), frames, "one PNG per frame");
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_straight_flight_at_the_constant_pace_arrives_and_says_so_in_the_log() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    (app.pace, app.route, app.constant_speed) = (super::flight::Pace::Constant, super::flight::Route::Straight, 20.0);
+    app.go_to_point_of_interest(0);
+    assert!(app.log.last().unwrap().contains("(Constant, straight route,"), "{:?}", app.log.last());
+    let start = app.c.get_scale();
+    let mut widest = start;
+    while app.flight.is_some() {
+        app.fly_at(std::time::Instant::now());
+        app.poll_job();
+        widest = widest.max(app.c.get_scale());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(widest <= start * (1.0 + 1e-9), "a straight flight never zooms out: {widest} from {start}");
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_finished_view_gets_its_neighborhood_which_a_small_move_keeps_and_a_zoom_renders_again() {
+    let ctx = egui::Context::default();
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    let wait_for_neighborhood = |app: &mut MandelbrotApp| {
+        let started = std::time::Instant::now();
+        app.poll_neighborhood(&ctx);
+        while app.neighborhood_job.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(30), "the neighborhood was not rendered");
+            std::thread::sleep(Duration::from_millis(2));
+            app.poll_neighborhood(&ctx);
+        }
+    };
+    wait_for_neighborhood(&mut app);
+    let neighborhood = app.neighborhood.as_ref().expect("rendered once the view was finished");
+    //Three views across and down, around the view, at half its resolution
+    assert!((neighborhood.plane().get_scale() / app.c.get_scale() - 3.0).abs() < 1e-9);
+    assert_eq!(neighborhood.texture_size(), [96, 72]);
+    assert!(super::neighborhood::still_around(neighborhood.around(), &app.c, 100));
+    //A small move keeps it: no new job
+    let mut moved = app.c.clone();
+    rendering::move_complex_plane_by_pixels(&mut moved, 5, 10);
+    assert!(super::neighborhood::still_around(neighborhood.around(), &moved, 100));
+    //A zoom does not; a render stops the job at once
+    let mut zoomed = app.c.clone();
+    zoomed.scale(0.5);
+    assert!(!super::neighborhood::still_around(neighborhood.around(), &zoomed, 100));
+    app.c = zoomed;
+    app.render("Zoomed");
+    assert!(app.neighborhood_job.is_none(), "no neighborhood while a render runs");
+    wait_for_job(&mut app);
+    wait_for_neighborhood(&mut app);
+    assert!(super::neighborhood::still_around(app.neighborhood.as_ref().unwrap().around(), &app.c, 100), "rendered again for the zoomed view");
+    //A larger size: rendered again, 2.5 views to every side (6 views across) at half the resolution
+    app.neighborhood_margin = 250;
+    wait_for_neighborhood(&mut app);
+    let neighborhood = app.neighborhood.as_ref().unwrap();
+    assert!((neighborhood.plane().get_scale() / app.c.get_scale() - 6.0).abs() < 1e-9);
+    assert_eq!(neighborhood.texture_size(), [192, 144]);
+}
+
+#[test]
+fn a_large_neighborhood_keeps_its_texture_within_the_largest_side_and_a_small_one_is_kept_for_a_shorter_move() {
+    use super::neighborhood::{neighborhood_size, still_around, MAX_SIDE};
+    assert_eq!(neighborhood_size(3840, 2160, 100), (5760, 3240), "4K: three views of half the pixels");
+    let (width, height) = neighborhood_size(3840, 2160, 1000);
+    assert_eq!(width, MAX_SIDE, "21 views across would be 40320 pixels");
+    assert!((width as f64 / height as f64 - 3840.0 / 2160.0).abs() < 0.01);
+    //A margin of 20%: a move of 15% of the view is too far (half the margin is 10%)
+    let mut view = ComplexPlane::new(100, 100);
+    view.set_view(&crate::complex_plane::View::new(-0.75, 0.0, 1.0));
+    let mut moved = view.clone();
+    rendering::move_complex_plane_by_pixels(&mut moved, 15, 0);
+    assert!(still_around(&view, &moved, 100) && !still_around(&view, &moved, 20));
+}
+
+#[test]
+fn another_color_cycle_keeps_the_limit_and_shows_the_recolored_image_at_once() {
+    let config = Config::sized(64, 48, 50, 8);
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    assert!(app.auto_iterations);
+    app.fast_gpu = false; //Compared with the CPU bit for bit below: the samples of the fast math are not continued (see `SampleKey`)
+    app.render("Exact");
+    wait_for_job(&mut app);
+    let limit = app.m.max_iterations;
+    app.m.palette = ColorCycle { divide: 2.0, offset: 50.0, stretch: false };
+    app.render_moved("Set the colors");
+    assert_eq!(app.m.max_iterations, limit, "the limit is kept: the samples are only recolored");
+    wait_for_job(&mut app);
+    //The image is the image of a new render of these colors
+    let (width, height) = (app.p.pixel_plane.width, app.p.pixel_plane.height);
+    let mut fresh = Vec::new();
+    rendering::Render::new(&app.c, &app.m, width, height, app.coloring_function).supersampling(app.supersampling_amount).adaptive(app.adaptive_supersampling.then(rendering::AdaptiveSampling::default)).run(|colors, _| fresh = colors.to_vec());
+    let differ = app.p.colors.iter().zip(&fresh).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+    assert_eq!(differ, 0, "of {} pixels; log {:?}", fresh.len(), &app.log[app.log.len().saturating_sub(3)..]);
+}
+
+#[test]
+fn the_quality_presets_go_from_fastest_to_best_and_the_blur_preset_takes_one_sample() {
+    use super::blur::Quality;
+    let samples: Vec<u8> = Quality::PRESETS.iter().map(|preset| preset.samples).collect();
+    assert_eq!(samples, [1, 1, 2, 4, 8, 16, 32, 64]);
+    assert_eq!(Quality::PRESETS.iter().filter(|preset| preset.blurred).count(), 1);
+    assert_eq!(Quality::PRESETS[1].name(), "1x + blur (smooth, fast)");
+    assert_eq!(Quality { samples: 12, blurred: false }.name(), "12x", "a quality that is not a preset (from the configuration) is named too");
+}
+
+#[test]
+fn a_saved_image_of_the_blur_preset_is_blurred_like_the_screen() {
+    use crate::coloring::TrueColor;
+    let (width, height) = (9, 7);
+    //A flat image stays flat; one bright pixel spreads evenly to its neighbors and keeps its brightness on the whole
+    let flat = vec![TrueColor::new(40, 80, 120); width * height];
+    assert!(super::blur::blurred(&flat, width, height, 0.8).iter().all(|c| (c.red, c.green, c.blue) == (40, 80, 120)));
+    let mut dot = vec![TrueColor::new(0, 0, 0); width * height];
+    dot[3 * width + 4] = TrueColor::new(255, 255, 255);
+    let blurred = super::blur::blurred(&dot, width, height, 0.8);
+    let at = |x: usize, y: usize| blurred[y * width + x].red;
+    assert!(at(4, 3) < 255 && at(4, 3) > at(3, 3) && at(3, 3) > 0, "the center keeps the most");
+    assert_eq!((at(3, 3), at(4, 2)), (at(5, 3), at(4, 4)), "evenly to every side");
+    let total: u32 = blurred.iter().map(|c| u32::from(c.red)).sum();
+    assert!((240..=270).contains(&total), "the brightness is kept: {total}");
+}
+
+#[test]
+fn the_color_channels_have_a_drop_down_per_screen_channel_that_shows_its_source() {
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    app.p.color_channel_mapping = ColorChannelMapping::new("BGG").unwrap();
+    let ctx = egui::Context::default();
+    let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 2000.0))), ..Default::default() }, |ui| app.side_panel_ui(ui));
+    let texts: Vec<String> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+        _ => None,
+    }).collect();
+    output.drop_without_applying_deltas();
+    let at = texts.iter().position(|text| text == "R ←").expect("the drop-down of the red channel");
+    assert_eq!(texts[at..at + 6], ["R ←", "Blue", "G ←", "Green", "B ←", "Green"], "{:?}", &texts[at..]);
+}
+#[test]
+fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_file() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
+    (app.video_speed, app.video_format, app.video_pngs) = (50, super::video::VideoFormat::Lossless, false);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
+    app.start_video();
+    let ctx = egui::Context::default();
+    let started = std::time::Instant::now();
+    while app.video_job.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(60), "the video did not finish");
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let frames = (duration.as_secs_f64() * 2.0 * 24.0).ceil() as usize + 1;
+    let message = app.log.iter().rev().find(|line| line.starts_with("Video of the flight")).unwrap();
+    assert!(message.starts_with(&format!("Video of the flight: {frames} of {frames} frames at 24 FPS, 50% speed")), "{message}");
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    assert!(entries.iter().filter(|path| path.is_dir()).all(|path| std::fs::read_dir(path).unwrap().count() == 0), "no PNG frames");
+    if std::process::Command::new("ffmpeg").arg("-version").output().is_ok_and(|output| output.status.success()) {
+        let video = entries.iter().find(|path| path.extension().is_some_and(|extension| extension == "mkv")).expect("the .mkv of the video");
+        assert!(std::fs::metadata(video).unwrap().len() > 0);
+    }
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
 }

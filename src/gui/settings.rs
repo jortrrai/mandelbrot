@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::flight::{FlightRendering, Pace};
+use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS};
+use super::video::{VideoFormat, FRAME_RATES, SPEEDS};
+use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
@@ -40,10 +42,26 @@ pub(super) struct Settings {
     restore_appearance: Option<bool>,
     show_points: Option<bool>,
     pace: Option<String>,
+    route: Option<String>,
+    constant_speed: Option<f64>,
     flight_rendering: Option<String>,
     flight_resolution: Option<u16>,
     immersion: Option<bool>,
     auto_blur: Option<bool>,
+    frames_ahead: Option<usize>,
+    blend_frames: Option<bool>,
+    f32_frames: Option<bool>,
+    quality_blur: Option<bool>,
+    saved_image_blur: Option<bool>,
+    render_neighborhood: Option<bool>,
+    neighborhood_size: Option<u16>,
+    color_divide: Option<f64>,
+    color_offset: Option<f64>,
+    stretch_palette: Option<bool>,
+    video_fps: Option<u32>,
+    video_speed: Option<u16>,
+    video_format: Option<String>,
+    video_pngs: Option<bool>,
 }
 
 /// The auto iterations presets, to find one by its name
@@ -56,6 +74,7 @@ fn rendering_key(rendering: FlightRendering) -> (&'static str, Option<u16>) {
         FlightRendering::LowRes => ("low-res", None),
         FlightRendering::Resolution(percent) => ("resolution", Some(percent)),
         FlightRendering::SuperSampled => ("super-sampled", None),
+        FlightRendering::Auto(fps) => ("auto", Some(fps)),
     }
 }
 
@@ -65,6 +84,7 @@ fn rendering_of(key: &str, percent: Option<u16>) -> Option<FlightRendering> {
         "low-res" => Some(FlightRendering::LowRes),
         "resolution" => Some(FlightRendering::Resolution(percent.unwrap_or(100).clamp(1, 800))),
         "super-sampled" => Some(FlightRendering::SuperSampled),
+        "auto" => Some(FlightRendering::Auto(percent.unwrap_or(60).clamp(1, 240))),
         _ => None,
     }
 }
@@ -106,10 +126,26 @@ impl MandelbrotApp {
             restore_appearance: Some(self.restore_appearance),
             show_points: Some(self.show_points),
             pace: Some(self.pace.name().to_string()),
+            route: Some(self.route.name().to_string()),
+            constant_speed: Some(self.constant_speed),
             flight_rendering: Some(rendering.to_string()),
             flight_resolution: percent,
             immersion: Some(self.immersion),
             auto_blur: Some(self.auto_blur),
+            frames_ahead: Some(self.frames_ahead),
+            blend_frames: Some(self.blend_frames),
+            f32_frames: Some(self.f32_frames),
+            quality_blur: Some(self.quality_blur),
+            saved_image_blur: Some(self.image_quality_blur),
+            render_neighborhood: Some(self.render_neighborhood),
+            neighborhood_size: Some(self.neighborhood_margin),
+            color_divide: Some(self.m.palette.divide),
+            color_offset: Some(self.m.palette.offset),
+            stretch_palette: Some(self.m.palette.stretch),
+            video_fps: Some(self.video_fps),
+            video_speed: Some(self.video_speed),
+            video_format: Some(self.video_format.name().to_string()),
+            video_pngs: Some(self.video_pngs),
         }
     }
 
@@ -167,11 +203,46 @@ impl MandelbrotApp {
         if let Some(pace) = settings.pace.as_deref().and_then(|name| Pace::ALL.into_iter().find(|pace| pace.name() == name)) {
             self.pace = pace;
         }
+        if let Some(route) = settings.route.as_deref().and_then(|name| Route::ALL.into_iter().find(|route| route.name() == name)) {
+            self.route = route;
+        }
+        if let Some(speed) = settings.constant_speed.filter(|speed| CONSTANT_SPEEDS.contains(speed)) {
+            self.constant_speed = speed;
+        }
         if let Some(rendering) = settings.flight_rendering.as_deref().and_then(|key| rendering_of(key, settings.flight_resolution)) {
             self.flight_rendering = rendering;
         }
         set(settings.immersion, &mut self.immersion);
         set(settings.auto_blur, &mut self.auto_blur);
+        if let Some(ahead) = settings.frames_ahead.filter(|ahead| *ahead <= 3) {
+            self.frames_ahead = ahead;
+        }
+        set(settings.blend_frames, &mut self.blend_frames);
+        set(settings.f32_frames, &mut self.f32_frames);
+        set(settings.quality_blur, &mut self.quality_blur);
+        set(settings.saved_image_blur, &mut self.image_quality_blur);
+        set(settings.render_neighborhood, &mut self.render_neighborhood);
+        if let Some(size) = settings.neighborhood_size.filter(|size| (10..=5000).contains(size)) {
+            self.neighborhood_margin = size;
+        }
+        //(A divide outside the range of its slider: the nearest end, as for a place)
+        if let Some(divide) = settings.color_divide.filter(|divide| *divide > 0.0) {
+            self.m.palette.divide = divide.clamp(MIN_DIVIDE, MAX_DIVIDE);
+        }
+        if let Some(offset) = settings.color_offset.filter(|offset| offset.is_finite()) {
+            self.m.palette.offset = offset.rem_euclid(PALETTE_LENGTH);
+        }
+        set(settings.stretch_palette, &mut self.m.palette.stretch);
+        if let Some(fps) = settings.video_fps.filter(|fps| FRAME_RATES.contains(fps)) {
+            self.video_fps = fps;
+        }
+        if let Some(speed) = settings.video_speed.filter(|speed| SPEEDS.contains(speed)) {
+            self.video_speed = speed;
+        }
+        if let Some(format) = settings.video_format.as_deref().and_then(|name| VideoFormat::ALL.into_iter().find(|format| format.name() == name)) {
+            self.video_format = format;
+        }
+        set(settings.video_pngs, &mut self.video_pngs);
     }
 
     /// Keeps the settings in the file `path` from now on: the settings as they are now are the defaults (for Reset settings), and those of the file are applied.

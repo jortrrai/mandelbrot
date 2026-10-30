@@ -19,6 +19,7 @@ mod fit;
 mod flight;
 mod flight_job;
 mod history;
+mod neighborhood;
 mod pointer;
 mod points;
 mod render_job;
@@ -26,7 +27,9 @@ mod save_size;
 mod settings;
 pub use settings::settings_path;
 mod status;
+mod temporal;
 mod transform;
+mod video;
 #[cfg(test)]
 mod tests;
 
@@ -39,6 +42,7 @@ use self::render_job::{JobMessage, Progress, RenderBars};
 use self::save_size::SaveSize;
 
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -46,7 +50,7 @@ use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use crate::auto_iterations::{AutoIterationSettings, AutoPreset};
 use crate::coloring::{Channel, ColorChannelMapping, TrueColor};
 use crate::complex_plane::ComplexPlane;
-use crate::mandelbrot_set::MandelbrotSet;
+use crate::mandelbrot_set::{ColorCycle, MandelbrotSet};
 use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
 use crate::points_of_interest::{self, PointOfInterest};
 use crate::rendering::{self};
@@ -61,6 +65,8 @@ pub const MIN_WINDOW_HEIGHT: f32 = 700.0;
 
 const COLORING_FUNCTIONS: [(&str, ColoringFunction); 2] = [("HSV", TrueColor::new_from_hsv_colors), ("Bernstein polynomials", TrueColor::new_from_bernstein_polynomials)];
 
+/// Every color channel mapping (the drop-downs of the color channels can make each of them)
+#[cfg(test)]
 const COLOR_CHANNEL_MAPPINGS: [&str; 27] = [
     "RGB", "RBG", "GRB", "GBR", "BRG", "BGR", "RRR", "GGG", "BBB", "RRG", "RRB", "RGG", "RGR", "RBB", "RBR", "GGB", "GGR", "GBB", "GBG", "GRG", "GRR", "BBG", "BBR", "BGB", "BGG", "BRB", "BRR",
 ];
@@ -129,6 +135,9 @@ pub struct MandelbrotApp {
     adaptive_supersampling: bool,
     /// Edited value of the supersampling field, applied when editing ends
     supersampling_input: u8,
+    /// Whether the image is blurred (the blur quality preset: on the screen by the shader of `blur`, in a saved image by `blur::blurred`), and the same for saved images
+    quality_blur: bool,
+    image_quality_blur: bool,
     /// The points of interest of the folder, see `points_of_interest`, and the folder they were loaded from
     points: Vec<PointOfInterest>,
     points_folder: std::path::PathBuf,
@@ -149,6 +158,9 @@ pub struct MandelbrotApp {
     new_point: Option<(String, String)>,
     /// How fast a flight to a point of interest goes (fast by default), and the flight that is under way, see `flight`
     pace: flight::Pace,
+    /// The route of flights, and the speed of the constant pace in doublings of the zoom per second, see `flight`
+    route: flight::Route,
+    constant_speed: f64,
     /// The settings file (`None`: the settings are not kept, as in tests), the defaults for Reset settings, what was saved last and since when it changed, see `settings`
     settings_path: Option<std::path::PathBuf>,
     settings_defaults: settings::Settings,
@@ -158,6 +170,16 @@ pub struct MandelbrotApp {
     benchmark: Option<benchmark::Benchmark>,
     benchmark_results: Vec<benchmark::SceneResult>,
     benchmark_folder: std::path::PathBuf,
+    /// The last flight, for a video of it, the video under way, and the frame rate of videos, see `video`
+    last_flight: Option<video::VideoFlight>,
+    video_job: Option<video::VideoJob>,
+    video_fps: u32,
+    /// The speed of a video in percent of the flight's, its file format, and whether its frames are also written as PNG files, see `video`
+    video_speed: u16,
+    video_format: video::VideoFormat,
+    video_pngs: bool,
+    /// Where videos are written (`saved`)
+    video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
     /// Whether the running job renders the frames of the flight (see `flight_job`), and the time between two frames of the screen, which the job keeps to
     flight_job: bool,
@@ -175,12 +197,32 @@ pub struct MandelbrotApp {
     log: Vec<String>,
     texture: Option<TextureHandle>,
     texture_outdated: bool,
+    /// The neighborhood of the view, drawn behind the image, and the job that renders it, see `neighborhood`; whether it is rendered at all
+    neighborhood: Option<neighborhood::Neighborhood>,
+    neighborhood_job: Option<neighborhood::NeighborhoodJob>,
+    render_neighborhood: bool,
+    /// The size of the neighborhood, in percent of a view to every side, see `neighborhood`
+    neighborhood_margin: u16,
     /// The blur of the image during flights (`None` without a suitable OpenGL context, as in tests), see `blur`
     blur: Option<std::sync::Arc<blur::Blur>>,
     /// Whether the image is blurred while a flight moves the view, see `blur`
     auto_blur: bool,
+    /// How many frames of a flight the flight job may render ahead of the one on the screen (0: none, it renders one frame at a time as before), see `flight_job`
+    frames_ahead: usize,
+    /// The messages of the flight job that wait for their turn on the screen (frames rendered ahead), and how many frames that is (shared with the job, which
+    /// renders no further ahead than `frames_ahead`)
+    flight_queue: std::collections::VecDeque<render_job::JobMessage>,
+    frames_queued: Arc<std::sync::atomic::AtomicUsize>,
+    /// Whether the frame on the screen still stays there for this refresh (1) before the next frame of the queue may show (0)
+    frame_hold: u32,
+    /// Whether the full-resolution frames of a flight are blended over time (off by default), see `temporal`
+    blend_frames: bool,
     /// The samples per pixel of the frame on the screen (0 for a preview), for the strength of the blur
     shown_samples: u8,
+    /// The size of the Auto frame on the screen when it is below full resolution (its colors are the rows of that smaller image, see `SparePool::packed`), and of the
+    /// next frame of the flight job, known from its `FlightFrame`
+    shown_scaled: Option<(usize, usize)>,
+    frame_scaled: Option<(usize, usize)>,
     /// The part of the texture that covers the image: all of it, except for a coarse preview, see `coarse_texture`
     texture_uv: egui::Rect,
     /// The block size of the preview that the colors of `p` show, 1 for a full layer: a coarse preview is uploaded small and scaled up smoothly
@@ -217,6 +259,8 @@ pub struct MandelbrotApp {
     use_gpu: bool,
     /// Whether the GPU uses its fast double-float loop (on by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
     fast_gpu: bool,
+    /// Whether frames that move (flights, drags) at shallow zoom use the GPU's plain f32 loop (on by default), see `Render::f32_gpu`
+    f32_frames: bool,
     /// Whether nothing deeper than the fast GPU math is rendered (on by default: deeper views are left to the CPU and are slow), see `zoom_refused` and `keep_within_zoom_limit`
     limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
@@ -229,7 +273,8 @@ impl MandelbrotApp {
         let shown_plane = c.clone();
         let mut p = PixelBuffer::new(PixelPlane::new(config.window_width, config.window_height));
         p.color_channel_mapping = COLOR_CHANNEL_MAPPING;
-        let m = MandelbrotSet::new(config.max_iterations, config.orbit_radius);
+        //The window cycles the palette (see `ColorCycle`): a manual and an automatic limit color the same
+        let m = MandelbrotSet { palette: ColorCycle::CYCLE, ..MandelbrotSet::new(config.max_iterations, config.orbit_radius) };
         //The tests never read or write the presets file of the user
         let presets_path = if cfg!(test) { None } else { resolution::custom_presets_path() };
         let (save_size, preset_warnings) = SaveSize::new(Resolution::new(config.image_width, config.image_height), presets_path);
@@ -252,6 +297,8 @@ impl MandelbrotApp {
             supersampling_amount: config.supersampling_amount,
             supersampling_input: config.supersampling_amount,
             image_supersampling_amount: config.supersampling_amount,
+            quality_blur: false,
+            image_quality_blur: false,
             gesture_active: false,
             drag_remainder: (0.0, 0.0),
             history: ViewHistory::default(),
@@ -270,6 +317,8 @@ impl MandelbrotApp {
             show_points: false,
             new_point: None,
             pace: flight::Pace::Fast,
+            route: flight::Route::Shortest,
+            constant_speed: flight::CONSTANT_SPEED,
             settings_path: None,
             settings_defaults: settings::Settings::default(),
             settings_saved: None,
@@ -277,6 +326,13 @@ impl MandelbrotApp {
             benchmark: None,
             benchmark_results: Vec::new(),
             benchmark_folder: std::path::PathBuf::from(benchmark::FOLDER),
+            last_flight: None,
+            video_job: None,
+            video_fps: 30,
+            video_speed: 100,
+            video_format: video::VideoFormat::HighQuality,
+            video_pngs: true,
+            video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
             frame_interval: Duration::from_secs_f64(1.0 / 60.0),
@@ -288,9 +344,20 @@ impl MandelbrotApp {
             log: Vec::new(),
             texture: None,
             texture_outdated: true,
+            neighborhood: None,
+            neighborhood_job: None,
+            render_neighborhood: true,
+            neighborhood_margin: neighborhood::DEFAULT_MARGIN,
             blur: None,
             auto_blur: true,
+            frames_ahead: 2,
+            flight_queue: std::collections::VecDeque::new(),
+            frames_queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            frame_hold: 0,
+            blend_frames: false,
             shown_samples: 0,
+            shown_scaled: None,
+            frame_scaled: None,
             texture_uv: FULL_TEXTURE,
             preview_block: 1,
             preview_levels: Vec::new(),
@@ -309,6 +376,7 @@ impl MandelbrotApp {
             gpu: None,
             use_gpu: true,
             fast_gpu: true,
+            f32_frames: true,
             limit_zoom: true,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
@@ -396,7 +464,11 @@ impl MandelbrotApp {
             return;
         }
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
-        let (image, uv, options) = if self.preview_block > 1 {
+        let (image, uv, options) = if let Some((columns, rows)) = self.shown_scaled {
+            //A scaled Auto frame: the smaller image, scaled up smoothly over the whole view (the centers of its pixels are where the view puts them)
+            let small: Vec<TrueColor> = self.p.colors.chunks(width).take(rows).flat_map(|line| &line[..columns]).copied().collect();
+            (ColorImage::from_rgb([columns, rows], &colors_to_rgb_bytes(&small, self.p.color_channel_mapping)), FULL_TEXTURE, TextureOptions::LINEAR)
+        } else if self.preview_block > 1 {
             let (image, uv) = coarse_texture(&self.p.colors, self.p.color_channel_mapping, width, height, self.preview_block);
             (image, uv, TextureOptions::LINEAR)
         } else {
@@ -422,9 +494,11 @@ impl MandelbrotApp {
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         //The image of the last render, at its place in the current view (the whole rectangle when they are the same view, or when the view is held, see `drawn_fraction`)
         let target = transform::rect_of(self.drawn_fraction(), rect);
-        match self.blur.as_ref().filter(|_| self.auto_blur && self.flight.is_some()) {
+        //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
+        self.draw_neighborhood(&ui.painter_at(rect), rect);
+        match self.blur.as_ref().filter(|_| (self.auto_blur && self.flight.is_some()) || self.quality_blur) {
             Some(blur) => {
-                let sigma = blur::blur_sigma(self.preview_block, self.shown_samples);
+                let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
                     ui.painter_at(rect).add(callback);
                 }
@@ -474,7 +548,8 @@ impl Readiness {
     fn of_flight(rendering: flight::FlightRendering) -> Readiness {
         match rendering {
             flight::FlightRendering::BestEffort => Readiness::Any,
-            flight::FlightRendering::LowRes => Readiness::COMPLETE,
+            //Auto: every frame of the flight job is complete; the job decides how fine (see `flight::auto_block`)
+            flight::FlightRendering::LowRes | flight::FlightRendering::Auto(_) => Readiness::COMPLETE,
             flight::FlightRendering::Resolution(percent) if percent < 100 => match (100.0 / f64::from(percent.max(1))).round() as usize {
                 0 | 1 => Readiness::FULL_RESOLUTION,
                 block => Readiness::Blocks(block),
@@ -527,6 +602,8 @@ impl eframe::App for MandelbrotApp {
         let ctx = ui.ctx().clone();
         self.poll_job();
         self.poll_thumbnails(&ctx);
+        self.poll_neighborhood(&ctx);
+        self.poll_video(&ctx);
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
         }

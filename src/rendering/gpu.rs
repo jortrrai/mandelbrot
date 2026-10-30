@@ -95,6 +95,8 @@ pub struct GpuIterator {
     /// The exact loop (`gpu.wgsl`) and the fast double-float loop (`gpu_fast.wgsl`)
     exact: wgpu::ComputePipeline,
     fast: wgpu::ComputePipeline,
+    /// The plain f32 loop (`gpu_f32.wgsl`), for moving frames at shallow zoom, see `Render::f32_gpu`
+    single: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     name: String,
 }
@@ -132,8 +134,8 @@ impl GpuIterator {
             };
             Ok(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mandelbrot"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }))
         };
-        let (exact, fast) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?);
-        let gpu = GpuIterator { device, queue, exact, fast, layout, name };
+        let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?, pipeline(include_str!("gpu_f32.wgsl"))?);
+        let gpu = GpuIterator { device, queue, exact, fast, single, layout, name };
         gpu.self_test()?;
         Ok(gpu)
     }
@@ -174,7 +176,7 @@ impl GpuIterator {
     pub fn fast_positions(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32]) -> Result<Vec<f64>, String> {
         let mut positions = Vec::with_capacity(pixels.len());
         for batch in pixels.chunks(BATCH) {
-            let outcomes: Vec<FastOutcome> = self.finish(self.submit_pixels(m, anchor, sample, origin, batch)?)?;
+            let outcomes: Vec<FastOutcome> = self.finish(self.submit_pixels(m, anchor, sample, origin, batch, false)?)?;
             positions.extend(outcomes.into_iter().map(|outcome| outcome.position(m)));
         }
         Ok(positions)
@@ -194,7 +196,7 @@ impl GpuIterator {
 
     /// Starts one dispatch of the fast loop over sample `sample` of `pixels` (about `BATCH` at most, see `fast_positions`) and returns at once, see `finish`, which
     /// gives a `FastOutcome` for every pixel. The GPU computes the points itself (see `gpu_fast.wgsl`)
-    pub(crate) fn submit_pixels(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32]) -> Result<Submitted, String> {
+    pub(crate) fn submit_pixels(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32], single: bool) -> Result<Submitted, String> {
         let to_i32 = |value: isize| i32::try_from(value).map_err(|_| String::from("the origin is too far away"));
         let mut params = Vec::with_capacity(72);
         for value in [anchor.min_x, anchor.min_y, anchor.increment_x, anchor.increment_y, m.orbit_radius * m.orbit_radius] {
@@ -209,7 +211,7 @@ impl GpuIterator {
         for value in [u32::from(sample), 0] {
             params.extend(value.to_le_bytes());
         }
-        self.dispatch(&self.fast, &params, bytemuck::cast_slice(pixels), pixels.len(), std::mem::size_of::<FastOutcome>())
+        self.dispatch(if single { &self.single } else { &self.fast }, &params, bytemuck::cast_slice(pixels), pixels.len(), std::mem::size_of::<FastOutcome>())
     }
 
     /// One dispatch of `pipeline` over `count` points with these parameters and input, whose outcomes have `outcome_size` bytes each
@@ -337,7 +339,7 @@ mod tests {
 
     #[test]
     fn every_floating_point_operation_of_the_shaders_gets_no_contraction() {
-        for source in [include_str!("gpu.wgsl"), include_str!("gpu_fast.wgsl")] {
+        for source in [include_str!("gpu.wgsl"), include_str!("gpu_fast.wgsl"), include_str!("gpu_f32.wgsl")] {
             no_contraction_everywhere(source);
         }
     }

@@ -14,14 +14,16 @@
 //!     "scale": 0.1,
 //!     "max_iterations": 1000
 //!   },
-//!   "appearance": { "coloring": "bernstein", "color_channels": "RGB" }
+//!   "appearance": { "coloring": "bernstein", "color_channels": "RGB", "iteration_divide": 4, "color_offset": 120 }
 //! }
 //! ```
 //! * `scale` is the scale of the renderer (`ComplexPlane::get_scale`): the view is `2.5 * scale` wide on the real axis, so a smaller scale is a deeper zoom, and the magnification is `1 / scale`.
 //!   Numbers are `f64` and are read exactly: the shortest decimal text of an `f64` reads back to the same number (`serde_json` needs its `float_roundtrip` feature for that; without it
 //!   `-0.46395833333333325` was read one bit off, which a test of the shipped files caught).
 //! * `max_iterations` is a whole number from 1 to 1,000,000, the range of the control in the window.
-//! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. Both are optional.
+//! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. `iteration_divide` (0.1 to 1000; a positive number outside that range is moved to the nearest end) and `color_offset` (0 to 500)
+//!   are the color cycle of the place (`mandelbrot_set::ColorCycle`), and `stretch_palette` (`true` or `false`) whether the palette is stretched over the limit instead.
+//!   All are optional.
 //! * The points are listed by **zoom**, the shallowest first (the largest `scale` at the top), so the deeper places are further down. Places with the same zoom are listed in
 //!   alphabetical order of their file names (ignoring case), not of their display names.
 //!   The bundled files are named `00-reset-view.json` (the reset view, the shallowest, so first in the list), then `01-frost-on-the-shoreline.json` to `10-sunlit-reef.json`: the number of
@@ -35,6 +37,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::coloring::ColorChannelMapping;
+use crate::mandelbrot_set::{ColorCycle, MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 
 /// The name of the folder with the point of interest files
 pub const FOLDER_NAME: &str = "points_of_interest";
@@ -85,12 +88,25 @@ pub struct Location {
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Appearance {
     /// The coloring, if the file gives one
     pub coloring: Option<Coloring>,
     /// The color channel mapping, if the file gives one
     pub color_channels: Option<ColorChannelMapping>,
+    /// The iteration divide of the color cycle, if the file gives one, see `ColorCycle`
+    pub iteration_divide: Option<f64>,
+    /// The color offset of the color cycle, if the file gives one
+    pub color_offset: Option<f64>,
+    /// Whether the palette is stretched over the limit, if the file says so
+    pub stretch_palette: Option<bool>,
+}
+
+impl Appearance {
+    /// `palette` with the parts of the color cycle that this appearance gives
+    pub fn palette_over(&self, palette: ColorCycle) -> ColorCycle {
+        ColorCycle { divide: self.iteration_divide.unwrap_or(palette.divide), offset: self.color_offset.unwrap_or(palette.offset), stretch: self.stretch_palette.unwrap_or(palette.stretch) }
+    }
 }
 
 /// A named place: where to look, and optionally how it should look
@@ -127,6 +143,12 @@ struct RawAppearance {
     coloring: Option<String>,
     #[serde(default)]
     color_channels: Option<String>,
+    #[serde(default)]
+    iteration_divide: Option<f64>,
+    #[serde(default)]
+    color_offset: Option<f64>,
+    #[serde(default)]
+    stretch_palette: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +202,19 @@ pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String
                 Err(_) => warnings.push(format!("{file_name}: the color channels {channels:?} are not a mapping like \"RGB\", they are ignored")),
             }
         }
+        match raw.iteration_divide {
+            Some(divide) if (MIN_DIVIDE..=MAX_DIVIDE).contains(&divide) => appearance.iteration_divide = Some(divide),
+            //(Outside the range of the slider: the nearest end, as the slider would show it)
+            Some(divide) if divide > 0.0 => appearance.iteration_divide = Some(divide.clamp(MIN_DIVIDE, MAX_DIVIDE)),
+            Some(divide) => warnings.push(format!("{file_name}: the iteration divide {divide} should be more than 0, it is ignored")),
+            None => {}
+        }
+        match raw.color_offset {
+            Some(offset) if offset.is_finite() => appearance.color_offset = Some(offset.rem_euclid(PALETTE_LENGTH)),
+            Some(offset) => warnings.push(format!("{file_name}: the color offset {offset} should be a number, it is ignored")),
+            None => {}
+        }
+        appearance.stretch_palette = raw.stretch_palette;
         appearance
     });
     let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations };
@@ -269,6 +304,14 @@ pub fn to_json(point: &PointOfInterest) -> String {
         }
         if let Some(mapping) = appearance.color_channels {
             fields.insert(String::from("color_channels"), serde_json::Value::from(format!("{mapping:?}")));
+        }
+        for (key, value) in [("iteration_divide", appearance.iteration_divide), ("color_offset", appearance.color_offset)] {
+            if let Some(value) = value {
+                fields.insert(String::from(key), serde_json::Value::from(value));
+            }
+        }
+        if let Some(stretch) = appearance.stretch_palette {
+            fields.insert(String::from("stretch_palette"), serde_json::Value::from(stretch));
         }
         file["appearance"] = serde_json::Value::Object(fields);
     }
@@ -494,7 +537,7 @@ mod tests {
 
     #[test]
     fn a_saved_point_reads_back_exactly() {
-        for (description, appearance) in [("", None), ("A spiral with a long arm.", Some(Appearance { coloring: Some(Coloring::Hsv), color_channels: Some(ColorChannelMapping::new("BGR").unwrap()) }))] {
+        for (description, appearance) in [("", None), ("A spiral with a long arm.", Some(Appearance { coloring: Some(Coloring::Hsv), color_channels: Some(ColorChannelMapping::new("BGR").unwrap()), iteration_divide: Some(4.5), color_offset: Some(120.0), stretch_palette: Some(false) }))] {
             let point = PointOfInterest {
                 name: String::from("Comet's Crown"),
                 description: String::from(description),
@@ -519,5 +562,16 @@ mod tests {
         assert_eq!(new_file_name(&existing, "!!!"), "11-place.json", "a name without letters or digits");
         let taken = [String::from("Notes"), String::from("00-a.json")];
         assert_eq!(new_file_name(&taken, "A"), "01-a.json");
+    }
+
+    #[test]
+    fn an_iteration_divide_outside_the_slider_is_moved_to_its_nearest_end_and_a_negative_one_is_ignored() {
+        let with = |divide: &str| parse(&VALID.replace("\"color_channels\": \"bgr\"", &format!("\"color_channels\": \"bgr\", \"iteration_divide\": {divide}")), "test.json").unwrap();
+        assert_eq!(with("0.001").0.appearance.unwrap().iteration_divide, Some(0.1));
+        assert_eq!(with("100000").0.appearance.unwrap().iteration_divide, Some(1000.0));
+        assert_eq!(with("4.5").0.appearance.unwrap().iteration_divide, Some(4.5));
+        let (point, warnings) = with("-2");
+        assert_eq!(point.appearance.unwrap().iteration_divide, None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 }

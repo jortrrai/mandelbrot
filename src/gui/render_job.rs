@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::auto_iterations::{self};
 use crate::coloring::TrueColor;
 use crate::complex_plane::ComplexPlane;
-use crate::mandelbrot_set::MandelbrotSet;
+use crate::mandelbrot_set::{ColorCycle, MandelbrotSet};
 use crate::rendering::{self, Render};
 use eframe::egui;
 
@@ -94,6 +94,22 @@ impl SparePool {
         copy.extend_from_slice(colors);
         copy
     }
+
+    /// Colors of `length` pixels in rows of `stride` that hold the `small.0` x `small.1` image `colors` in their top-left corner (the rest is not set): a scaled
+    /// frame of Auto, which keeps the size of the image the window holds, so only the rows of the small image are copied
+    pub(super) fn packed(&self, colors: &[TrueColor], small: (usize, usize), length: usize, stride: usize) -> Vec<TrueColor> {
+        let spare = {
+            let mut pool = self.0.lock().unwrap();
+            pool.retain(|spare| spare.capacity() >= length);
+            pool.pop()
+        };
+        let mut packed = spare.unwrap_or_default();
+        packed.resize(length, TrueColor::new(0, 0, 0)); //(Only when the spare colors were not of this size: nothing is written to colors that are)
+        for (row, line) in colors.chunks_exact(small.0).take(small.1).enumerate() {
+            packed[row * stride..row * stride + small.0].copy_from_slice(line);
+        }
+        packed
+    }
 }
 
 /// A message from a rendering job that runs on a background thread
@@ -102,10 +118,11 @@ pub(super) enum JobMessage {
     /// `whole` is true when the render started from nothing, so the pass covers the whole view (not only pixels that a move exposed)
     Pass { colors: Vec<TrueColor>, plane: ComplexPlane, pass: u8, total: u8, layer_time: Duration, whole: bool },
     /// The iteration limit that auto iterations chose for the render, sent as soon as it is known, before the first layer is rendered
-    Limit { max_iterations: u32, palette_scale: u32 },
+    Limit { max_iterations: u32 },
     /// A frame of a flight (see `flight_job`) is complete enough: the flight clock at the frame, its view, its iteration limit and palette, and which preview of
     /// the render it is (the `Pass` that follows carries its colors)
-    FlightFrame { elapsed: Duration, plane: ComplexPlane, max_iterations: u32, palette_scale: Option<u32>, preview: usize },
+    /// `scaled` is the size of an Auto frame below full resolution, whose colors are the rows of that smaller image (see `SparePool::packed`)
+    FlightFrame { elapsed: Duration, plane: ComplexPlane, max_iterations: u32, palette: ColorCycle, preview: usize, levels: Vec<usize>, scaled: Option<(usize, usize)> },
     /// The job has finished (or was cancelled), this is its final result; `reported` is whether it showed anything of `c` (otherwise `p` still shows the previous view)
     Done { c: ComplexPlane, m: MandelbrotSet, message: String, elapsed: Duration, completed: bool, reported: bool },
 }
@@ -146,9 +163,43 @@ impl MandelbrotApp {
             progress.cancel.store(true, Ordering::SeqCst);
             self.job = None;
         }
+        //Frames rendered ahead by a stopped flight job are never shown
+        self.flight_queue.clear();
+        self.frame_hold = 0;
+    }
+
+    /// The next message of the job, `None` without a job. The frames of a flight job that renders ahead (see `flight_job`) wait in `flight_queue` until the frame on
+    /// the screen has stayed there for one refresh (`frame_hold`, counted down by `points::fly`); the other messages follow in order.
+    fn next_job_message(&mut self) -> Option<Result<JobMessage, TryRecvError>> {
+        let receiver = self.job.as_ref()?;
+        if !(self.flight_job && self.frames_ahead > 0) && self.flight_queue.is_empty() {
+            return Some(receiver.try_recv());
+        }
+        let mut disconnected = false;
+        loop {
+            match receiver.try_recv() {
+                Ok(message) => self.flight_queue.push_back(message),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        match self.flight_queue.front() {
+            Some(JobMessage::FlightFrame { .. }) if self.frame_hold > 0 => Some(Err(TryRecvError::Empty)),
+            Some(JobMessage::FlightFrame { .. }) => {
+                self.frames_queued.fetch_sub(1, Ordering::SeqCst);
+                self.flight_queue.pop_front().map(Ok)
+            }
+            Some(_) => self.flight_queue.pop_front().map(Ok),
+            None if disconnected => Some(Err(TryRecvError::Disconnected)),
+            None => Some(Err(TryRecvError::Empty)),
+        }
     }
 
     /// Takes the messages of the background job: intermediate images and the final result
+    #[allow(clippy::too_many_lines)] // One match over every message of a job
     pub(super) fn poll_job(&mut self) {
         while let Ok(notice) = self.notices.try_recv() {
             self.log(notice);
@@ -164,8 +215,8 @@ impl MandelbrotApp {
             }
         }
         loop {
-            let Some(receiver) = &self.job else { return };
-            match receiver.try_recv() {
+            let Some(next) = self.next_job_message() else { return };
+            match next {
                 Ok(JobMessage::Pass { colors, plane, pass, total, layer_time, whole }) => {
                     //A preview of the whole view is uploaded small and scaled up smoothly; a preview of a strip sits next to sharp pixels, so it stays sharp
                     let level = self.preview_levels.get(self.previews_received).copied().unwrap_or(1);
@@ -188,6 +239,7 @@ impl MandelbrotApp {
                         self.layer_shown = pass > 0;
                         self.preview_block = preview_block;
                         self.shown_samples = pass;
+                        self.shown_scaled = self.frame_scaled.take(); //(Only a frame of a flight job can be scaled)
                     }
                     if pass == 0 {
                         continue; //A preview is not a layer: the progress and the layer times are not changed
@@ -205,20 +257,23 @@ impl MandelbrotApp {
                         bars.layer_started = Instant::now();
                     }
                 }
-                Ok(JobMessage::Limit { max_iterations, palette_scale }) => {
+                Ok(JobMessage::Limit { max_iterations }) => {
                     //Only the running job can send this: the receiver of an interrupted job is dropped, so a stale limit never reaches the display
                     self.m.max_iterations = max_iterations;
-                    self.m.palette_scale = Some(palette_scale);
                     self.limit_pending = false;
                 }
-                Ok(JobMessage::FlightFrame { elapsed, plane, max_iterations, palette_scale, preview }) => {
+                Ok(JobMessage::FlightFrame { elapsed, plane, max_iterations, palette, preview, levels, scaled }) => {
+                    //A frame rendered ahead stays on the screen for one refresh before the next one shows (see `next_job_message`)
+                    self.frame_hold = u32::from(self.frames_ahead > 0);
                     if let Some(flight) = &mut self.flight {
                         flight.elapsed = elapsed;
                         flight.frames.push(Instant::now()); //A frame of the flight, for its frame rate
                     }
                     self.c = plane; //The camera is where the frame is
-                    (self.m.max_iterations, self.m.palette_scale) = (max_iterations, palette_scale);
+                    (self.m.max_iterations, self.m.palette) = (max_iterations, palette);
                     self.previews_received = preview; //So the pass that follows is known as that preview (or layer)
+                    self.preview_levels = levels; //(The levels of this frame: with Auto every frame can have its own)
+                    self.frame_scaled = scaled;
                 }
                 Ok(JobMessage::Done { c, m, message, elapsed, completed, reported }) => {
                     self.job = None;
@@ -309,6 +364,7 @@ impl MandelbrotApp {
     /// job computed. The renderer reuses it when the view is that view moved by whole pixels with the same settings, and starts from nothing otherwise.
     #[allow(clippy::too_many_lines)] // One place that sets up every render: its settings, its state and the thread that runs it
     pub(super) fn start_render_as(&mut self, message: &str, kind: RenderKind) {
+        self.cancel_neighborhood_job();
         self.keep_within_zoom_limit();
         let (moved, during_gesture, all_layers) = (kind.moved(), kind.passing(), kind.all_layers());
         self.cancel_thumbnail_job(); //The main view has priority over thumbnails
@@ -345,12 +401,10 @@ impl MandelbrotApp {
             if !keeps_limit {
                 let initial = self.auto_settings.initial_limit(self.c.get_scale());
                 self.m.max_iterations = initial;
-                self.m.palette_scale = Some(initial);
                 self.limit_pending = true;
             }
         } else {
             self.m.max_iterations = self.max_iterations_input;
-            self.m.palette_scale = None;
         }
         let mut m = self.m.clone();
         let supersampling_amount = if all_layers { self.supersampling_amount } else { 1 };
@@ -360,7 +414,8 @@ impl MandelbrotApp {
         //Previews only when the first layer is expected to take longer than a frame (always for the first render); a fast view then skips even the first preview level
         let expected_first_layer = self.first_layer_per_pixel.map(|per_pixel| per_pixel * u32::try_from(pixels_total).unwrap_or(u32::MAX));
         let preview = (!layer_on_screen && !levels.is_empty() && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
-        let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
+        //Frames that move (a drag, a flight) may use the f32 loop; the image the view settles on never does
+        let (gpu, fast_gpu, f32_frames) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu, self.f32_frames && during_gesture);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let pixels_done = Arc::new(AtomicUsize::new(0));
@@ -378,9 +433,8 @@ impl MandelbrotApp {
                 //Choose the iteration limit for this zoom first; a cancelled choice cancels the render
                 match auto_iterations::choose_limit(&c, &m, width, height, settings, rendering::render_thread_count(), &thread_cancel) {
                     Some(result) => {
-                        let _ = sender.send(JobMessage::Limit { max_iterations: result.limit, palette_scale: result.palette_scale });
+                        let _ = sender.send(JobMessage::Limit { max_iterations: result.limit });
                         m.max_iterations = result.limit;
-                        m.palette_scale = Some(result.palette_scale);
                         message = format!("{message} (auto iterations: limit {}, {} rounds, {:?}, {:.2} s)", result.limit, result.rounds.len(), result.stop, started.elapsed().as_secs_f64());
                         println!("{result:?}");
                     }
@@ -390,17 +444,15 @@ impl MandelbrotApp {
                         return;
                     }
                 }
-            } else if auto_settings.is_none() {
-                m.palette_scale = None;
             }
-            let kept = samples.prepare_for(&c, width, height, &m, coloring_function);
+            let kept = samples.prepare_for(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), f32_frames && fast_gpu && gpu.is_some());
             let whole = kept == 0;
             if kept > 0 {
                 message = format!("{message} (continued the samples of {kept} pixels)");
             }
             let mut layer_started = started;
             let mut reported = false;
-            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).fast_gpu(fast_gpu).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
+            let completed = Render::new(&c, &m, width, height, coloring_function).supersampling(supersampling_amount).adaptive(adaptive).resume(&mut samples).preview(preview).preview_blocks(&levels).gpu(gpu.as_deref().map(|gpu| (gpu, GPU_JOIN_AFTER))).fast_gpu(fast_gpu).f32_gpu(f32_frames).cancel_with(&thread_cancel).count_pixels_in(&thread_pixels_done).run( |colors, pass| {
                 //Only the colors are handed over, the window converts them when it draws; converting them here would delay the next layer
                 reported = true;
                 if pass == 0 {
@@ -418,6 +470,7 @@ impl MandelbrotApp {
         });
         let now = Instant::now();
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
+        self.flight_queue.clear();
         self.job = Some(receiver);
         self.flight_job = false;
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });

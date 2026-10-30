@@ -9,10 +9,11 @@ use eframe::egui::{self, Color32, ColorImage, TextureOptions};
 
 use crate::coloring::ColorChannelMapping;
 use crate::complex_plane::{ComplexPlane, View};
+use crate::mandelbrot_set::ColorCycle;
 use crate::pixel_buffer::PixelBuffer;
 use crate::points_of_interest::{self, Coloring, PointOfInterest};
 use crate::thumbnails::{self, ThumbnailRequest};
-use super::flight::{Camera, Flight, Pace};
+use super::flight::{Camera, Flight, Pace, Route};
 use super::{MandelbrotApp, Readiness, COLORING_FUNCTIONS};
 
 /// The most a flight that waits for its frames moves on after a frame, in flight time: two frames at 60 Hz (see `flight_job`)
@@ -33,9 +34,17 @@ pub(super) struct PointFlight {
     /// The frame rate in the progress bar, and when it was last updated: once a second, so it can be read (see `update_fps`)
     pub(super) fps_shown: usize,
     pub(super) fps_updated: Instant,
+    /// The color cycle where the flight starts and at the place: with "Restore the saved appearance", the place's divide and offset; the frames on the way blend
+    /// them by the share of the path, so the colors change gradually and only on the way (see `palette_at`)
+    pub(super) palettes: (ColorCycle, ColorCycle),
 }
 
 impl PointFlight {
+    /// The color cycle of the frame at `elapsed`, see `palettes`
+    pub(super) fn palette_at(&self, elapsed: Duration) -> ColorCycle {
+        self.palettes.0.blend(self.palettes.1, self.flight.share_of_path(elapsed))
+    }
+
     /// The frames shown in the second before `now`
     pub(super) fn fps(&self, now: Instant) -> usize {
         self.frames.iter().rev().take_while(|shown| now.saturating_duration_since(**shown) <= Duration::from_secs(1)).count()
@@ -207,13 +216,14 @@ impl MandelbrotApp {
     }
 
     /// The thumbnail request of a point: its location with the appearance that going to the point would use (the saved one when appearances are restored, otherwise the current one)
-    pub(super) fn thumbnail_request_for(point: &PointOfInterest, coloring_index: usize, restore_appearance: bool, mapping: ColorChannelMapping, window: (usize, usize)) -> ThumbnailRequest {
+    pub(super) fn thumbnail_request_for(point: &PointOfInterest, coloring_index: usize, restore_appearance: bool, mapping: ColorChannelMapping, palette: ColorCycle, window: (usize, usize)) -> ThumbnailRequest {
         let current = if coloring_index == 0 { Coloring::Hsv } else { Coloring::Bernstein }; //See COLORING_FUNCTIONS
         let saved = point.appearance.as_ref().filter(|_| restore_appearance);
         ThumbnailRequest {
             location: point.location.clone(),
             coloring: saved.and_then(|appearance| appearance.coloring).unwrap_or(current),
             color_channels: saved.and_then(|appearance| appearance.color_channels).unwrap_or(mapping),
+            palette: saved.map_or(palette, |appearance| appearance.palette_over(palette)),
             width: thumbnails::THUMBNAIL_WIDTH,
             height: thumbnails::thumbnail_height(window.0, window.1),
         }
@@ -270,7 +280,7 @@ impl MandelbrotApp {
             for index in rows {
                 let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), POINT_ROW_HEIGHT - 4.0), egui::Sense::click());
                 let point = &self.points[index];
-                let request = Self::thumbnail_request_for(point, self.coloring_index, self.restore_appearance, self.p.color_channel_mapping, (self.p.pixel_plane.width, self.p.pixel_plane.height));
+                let request = Self::thumbnail_request_for(point, self.coloring_index, self.restore_appearance, self.p.color_channel_mapping, self.m.palette, (self.p.pixel_plane.width, self.p.pixel_plane.height));
                 //Visible: at least a quarter of the row is inside the list and inside the scrolling controls around it (not clipped away)
                 let shown = rect.intersect(ui.clip_rect());
                 let visible = shown.is_positive() && shown.height() >= rect.height() * 0.25;
@@ -331,7 +341,13 @@ impl MandelbrotApp {
             name: name.clone(),
             description: description.trim().to_string(),
             location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations },
-            appearance: Some(points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(self.p.color_channel_mapping) }),
+            appearance: Some(points_of_interest::Appearance {
+                coloring: Some(coloring),
+                color_channels: Some(self.p.color_channel_mapping),
+                iteration_divide: Some(self.m.palette.divide),
+                color_offset: Some(self.m.palette.offset),
+                stretch_palette: Some(self.m.palette.stretch),
+            }),
             file_name: String::new(),
         };
         match points_of_interest::save_new(&self.points_folder, &point) {
@@ -362,11 +378,15 @@ impl MandelbrotApp {
             self.arrive_at(&point);
             return;
         }
-        let flight = Flight::new(from, to, self.pace);
-        self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
+        let flight = Flight::with(from, to, self.pace, self.route, self.constant_speed);
+        let route = if self.route == Route::Shortest { String::new() } else { format!(", {} route", self.route.name().to_lowercase()) };
+        self.log(format!("Flying to {} ({}{route}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| self.flight_limits(to));
         let now = Instant::now();
-        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now });
+        let destination_palette = point.appearance.as_ref().filter(|_| self.restore_appearance).map_or(self.m.palette, |appearance| appearance.palette_over(self.m.palette));
+        let palettes = (self.m.palette, destination_palette);
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
 
@@ -381,7 +401,7 @@ impl MandelbrotApp {
         let (settings, mut m) = (self.auto_settings.clone(), self.m.clone());
         let destination_scale = plane.get_scale();
         let initial = settings.initial_limit(destination_scale);
-        (m.max_iterations, m.palette_scale) = (initial, Some(initial));
+        m.max_iterations = initial;
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let threads = (crate::rendering::render_thread_count() / 2).max(1);
@@ -422,6 +442,8 @@ impl MandelbrotApp {
     /// With a flight rendering that waits for frames (or immersion), a job renders the frames one after the other (see `flight_job`): the camera only moves on once
     /// the frame of its current view is complete enough, and then by at most `MAX_WAITING_STEP`, so a slow view makes a slow, smooth crawl instead of jumps.
     pub(super) fn fly_at(&mut self, now: Instant) {
+        //A refresh of the screen (this runs once per frame of the window): the frame on it has stayed one more refresh (frames ahead, see `render_job::next_job_message`)
+        self.frame_hold = self.frame_hold.saturating_sub(1);
         let Some(mut flight) = self.flight.take() else { return };
         flight.update_fps(now);
         //A flight that waits for its frames is rendered by its own job, which moves the flight clock on (see `flight_job`); the window arrives when its last frame is there
@@ -448,15 +470,16 @@ impl MandelbrotApp {
         }
         self.c.set_view(&flight.flight.camera_at(elapsed).view());
         if self.auto_iterations {
-            //Auto iterations follow the zoom all the way: the limit of this frame (see `FlightLimits`), and the palette of its zoom, which is what auto iterations uses
+            //Auto iterations follow the zoom all the way: the limit of this frame (see `FlightLimits`)
             let scale = self.c.get_scale();
-            let palette = self.auto_settings.initial_limit(scale);
             let limit = match &mut flight.limits {
                 Some(limits) => limits.limit_at(scale, &self.auto_settings),
-                None => palette,
+                None => self.auto_settings.initial_limit(scale),
             };
-            (self.m.max_iterations, self.m.palette_scale) = (limit, Some(palette));
+            self.m.max_iterations = limit;
         }
+        //The color cycle on the way, from the start to the place's (see `PointFlight::palettes`)
+        self.m.palette = flight.palette_at(elapsed);
         //Best effort: a frame whose render has not shown anything yet is not interrupted, or on an expensive view almost no render would ever be shown. The camera
         //moves on anyway (the image on the screen follows it, see `transform`), and the next render starts at the latest camera as soon as this one has shown a frame.
         if self.is_busy() && !self.frame_accepted {
@@ -468,7 +491,7 @@ impl MandelbrotApp {
         self.flight = Some(flight);
     }
 
-    /// Goes to `point`: its center, scale and maximum iterations are applied, and with `restore_appearance` also the coloring and color channels saved in its file.
+    /// Goes to `point`: its center, scale and maximum iterations are applied, and with `restore_appearance` also the coloring, color channels and color cycle saved in its file.
     /// Otherwise the current appearance, and the supersampling, stay as they are.
     fn arrive_at(&mut self, point: &PointOfInterest) {
         let location = &point.location;
@@ -489,8 +512,18 @@ impl MandelbrotApp {
                 self.p.color_channel_mapping = mapping;
                 let _ = write!(restored, ", color channels {mapping:?}");
             }
+            let palette = appearance.palette_over(self.m.palette);
+            if palette != self.m.palette {
+                self.m.palette = palette;
+                let _ = write!(restored, ", colors {}", palette_description(palette));
+            }
         }
         let message = if restored.is_empty() { format!("Moved to {}", point.name) } else { format!("Moved to {} and restored its appearance{restored}", point.name) };
         self.render(&message);
     }
+}
+
+/// How a color cycle is described in the log: "divide 4, offset 120", or "stretched over the limit"
+pub(super) fn palette_description(palette: ColorCycle) -> String {
+    if palette.stretch { String::from("stretched over the limit") } else { format!("divide {}, offset {:.0}", palette.divide, palette.offset) }
 }
