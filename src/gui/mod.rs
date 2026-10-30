@@ -61,6 +61,8 @@ pub const MIN_WINDOW_HEIGHT: f32 = 700.0;
 
 const COLORING_FUNCTIONS: [(&str, ColoringFunction); 2] = [("HSV", TrueColor::new_from_hsv_colors), ("Bernstein polynomials", TrueColor::new_from_bernstein_polynomials)];
 
+/// Every color channel mapping (the drop-downs of the color channels can make each of them)
+#[cfg(test)]
 const COLOR_CHANNEL_MAPPINGS: [&str; 27] = [
     "RGB", "RBG", "GRB", "GBR", "BRG", "BGR", "RRR", "GGG", "BBB", "RRG", "RRB", "RGG", "RGR", "RBB", "RBR", "GGB", "GGR", "GBB", "GBG", "GRG", "GRR", "BBG", "BBR", "BGB", "BGG", "BRB", "BRR",
 ];

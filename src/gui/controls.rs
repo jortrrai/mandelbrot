@@ -9,7 +9,7 @@ use crate::coloring::ColorChannelMapping;
 use crate::resolution;
 use crate::complex_plane::Precision;
 use super::save_size::SaveSizeChoice;
-use super::{MandelbrotApp, COLORING_FUNCTIONS, COLOR_CHANNEL_MAPPINGS};
+use super::{MandelbrotApp, COLORING_FUNCTIONS};
 
 
 impl MandelbrotApp {
@@ -311,26 +311,37 @@ impl MandelbrotApp {
         if ui.checkbox(&mut self.m.smooth_coloring, "Smooth colors").on_hover_text("Colors flow smoothly from one iteration count to the next (the fractional iteration count). Off: every pixel gets the color of its whole iteration count, which shows bands of color and saves two logarithms per pixel outside the set. Saved images use this setting too.").changed() {
             self.render(&format!("Turned smooth colors {}", if self.m.smooth_coloring { "on" } else { "off" }));
         }
+        //One drop-down per channel of the screen: the channel of the coloring it shows, so every combination can be made
+        let mut chosen = None;
         ui.horizontal(|ui| {
-            ui.label("Color channels (R, G, B):");
+            ui.label("Color channels:").on_hover_text("Which channel of the coloring every channel of the screen shows: red, green and blue as they are (R ← Red, G ← Green, B ← Blue), swapped, or the same channel twice");
             let current = format!("{:?}", self.p.color_channel_mapping);
-            egui::ComboBox::from_id_salt("channels").selected_text(&current).show_ui(ui, |ui| {
-                for name in COLOR_CHANNEL_MAPPINGS {
-                    if ui.selectable_label(name == current, name).clicked() && name != current {
-                        if let Ok(mapping) = ColorChannelMapping::new(name) {
-                            self.p.color_channel_mapping = mapping;
-                            if self.progress.is_some() {
-                                self.render(&format!("Set the color channel mapping to {name}")); //The running render still uses the old mapping
-                            } else {
-                                self.p.update_pixels();
-                                self.texture_outdated = true;
-                                self.log(format!("Set the color channel mapping to {name}"));
-                            }
+            for (index, (screen, letter)) in [("R", 'R'), ("G", 'G'), ("B", 'B')].into_iter().enumerate() {
+                let source = current.chars().nth(index).unwrap_or(letter);
+                ui.label(format!("{screen} ←"));
+                egui::ComboBox::from_id_salt(("channel", index)).width(60.0).selected_text(channel_name(source)).show_ui(ui, |ui| {
+                    for option in ['R', 'G', 'B'] {
+                        if ui.selectable_label(option == source, channel_name(option)).clicked() && option != source {
+                            let mut name: Vec<char> = current.chars().collect();
+                            name[index] = option;
+                            chosen = Some(name.into_iter().collect::<String>());
                         }
                     }
-                }
-            });
+                });
+            }
         });
+        if let Some(name) = chosen {
+            if let Ok(mapping) = ColorChannelMapping::new(&name) {
+                self.p.color_channel_mapping = mapping;
+                if self.progress.is_some() {
+                    self.render(&format!("Set the color channel mapping to {name}")); //The running render still uses the old mapping
+                } else {
+                    self.p.update_pixels();
+                    self.texture_outdated = true;
+                    self.log(format!("Set the color channel mapping to {name}"));
+                }
+            }
+        }
     }
 
     /// Saving the image, with the quality of the saved image
@@ -394,5 +405,14 @@ impl MandelbrotApp {
                 }
             }
         }
+    }
+}
+
+/// The name of a channel in the drop-downs of the color channels, from its letter
+fn channel_name(letter: char) -> &'static str {
+    match letter {
+        'R' => "Red",
+        'G' => "Green",
+        _ => "Blue",
     }
 }
