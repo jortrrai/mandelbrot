@@ -167,18 +167,27 @@ impl MandelbrotApp {
                         FlightRendering::Resolution(100) => "The camera waits for a full-resolution frame of every view on the way: sharp, but it can crawl where the view is slow",
                         FlightRendering::Resolution(_) => "The camera waits for a frame of this resolution (blocks of 4 x 4 or 2 x 2 pixels): cleaner than Low res, faster than full resolution",
                         FlightRendering::SuperSampled => "Every view on the way is rendered with all its supersampling layers, and the camera waits for the finished frame: the best picture, the slowest crawl",
+                        FlightRendering::Auto(_) => "The resolution of every frame is chosen to keep the frame rate next to it: full resolution where the view is fast, coarser where it is slow",
                     });
                 }
             }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
+            if let FlightRendering::Auto(fps) = &mut self.flight_rendering {
+                ui.add(egui::DragValue::new(fps).range(1..=240).suffix(" FPS")).on_hover_text("The frame rate that Auto keeps (type a value): every frame of a flight gets the finest resolution that the frames so far say fits, from full resolution down to blocks of 8 x 8 pixels; the screen shows no more frames than it refreshes");
+            }
             if let FlightRendering::Resolution(percent) = &mut self.flight_rendering {
                 ui.add(egui::DragValue::new(percent).range(1..=800).suffix("%")).on_hover_text("The resolution of the frames of a flight, in percent of the pixels across (type a value): below 100 the camera waits for blocks of 100 / percent pixels (33%: 3 x 3), 100 is full resolution, above 100 it waits for supersampling layers ((percent / 100)²: 200% is 4 samples per pixel, up to the quality setting)");
             }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Frames ahead:");
+            ui.add(egui::DragValue::new(&mut self.frames_ahead).range(0..=3)).on_hover_text("How many frames of a flight are rendered ahead of the one on the screen, so the CPU and the GPU never wait for the screen (0: one frame at a time, as before). For flights that wait for their frames (all renderings but Best effort)");
         });
         ui.add_enabled(self.blur.is_some(), egui::Checkbox::new(&mut self.auto_blur, "Auto blur during flights")).on_hover_text("While a flight moves the view, the image gets a light blur on the GPU, which brings a moving frame closer to the finished image: stronger for coarse frames, lighter for supersampled ones (σ = 0.8 × (100 / resolution in %)^0.6 pixels). The finished image at the place is never blurred.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
             let share = flight.flight.share_of_path(flight.elapsed) as f32;
-            let text = format!("To {}: {:.0}% of the way, {} FPS", flight.point.name, share * 100.0, flight.fps_shown);
+            let resolution = if matches!(self.flight_rendering, FlightRendering::Auto(_)) { format!(", {:.0}% resolution", self.shown_scaled.map_or(100.0 / self.preview_block as f64, |(columns, _)| 100.0 * columns as f64 / self.p.pixel_plane.width as f64)) } else { String::new() };
+            let text = format!("To {}: {:.0}% of the way, {} FPS{resolution}", flight.point.name, share * 100.0, flight.fps_shown);
             ui.horizontal(|ui| {
                 if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
                     self.cancel_flight();

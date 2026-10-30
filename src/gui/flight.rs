@@ -68,6 +68,34 @@ pub enum FlightRendering {
     Resolution(u16),
     /// Every frame is rendered with all its supersampling layers, and the camera waits until the last one is done: the finished image of every view on the way, the slowest
     SuperSampled,
+    /// The camera waits for a frame of the resolution that keeps this many frames per second: the flight job chooses its scale frame by frame from how long the
+    /// frames take (see `auto_scale`), from full resolution down to `AUTO_COARSEST` of the pixels across, and the window scales it up smoothly; never supersampled
+    Auto(u16),
+}
+
+/// The coarsest frames of `FlightRendering::Auto`: an eighth of the pixels across (12.5%)
+pub const AUTO_COARSEST: f64 = 0.125;
+
+/// The share of the frame time that the frames of `FlightRendering::Auto` aim for, so the frames whose time varies still keep the frame rate
+const AUTO_AIM: f64 = 0.9;
+
+/// The scale (the share of the pixels across, `AUTO_COARSEST` to 1) of the next frame of `FlightRendering::Auto`, from the scale of the last frame and the time it
+/// `took`, for a frame time of `target`.
+///
+/// It steers by the measured time instead of predicting it: the time of a frame grows with its pixels (the square of the scale), but part of it is the same at
+/// every scale (the frame's way to the window, the latency of the GPU), so a prediction from the pixels alone chooses too coarse a frame. Every frame moves the
+/// scale half of the way, in proportion, to the one that would fit (at most 15% finer or 20% coarser), until the frames take between 90% and 100% of the aim:
+/// a steady view then keeps its scale, in whole percents, instead of changing it every frame.
+pub fn auto_scale(scale: f64, took: Duration, target: Duration) -> f64 {
+    let (aim, took) = (target.as_secs_f64() * AUTO_AIM, took.as_secs_f64().max(1e-6));
+    if (0.9 * aim..=aim).contains(&took) {
+        return scale;
+    }
+    let step = (aim / took).sqrt().sqrt().clamp(0.8, 1.15);
+    let next = ((scale * step) * 100.0).round() / 100.0;
+    //(At least a percent, so a small step is not rounded away)
+    let next = if took > aim { next.min(scale - 0.01) } else { next.max(scale + 0.01) };
+    next.clamp(AUTO_COARSEST, 1.0)
 }
 
 impl FlightRendering {
@@ -75,7 +103,7 @@ impl FlightRendering {
     pub const FULL_RESOLUTION: FlightRendering = FlightRendering::Resolution(100);
 
     /// The modes of the drop-down; any other resolution can be typed in
-    pub const ALL: [FlightRendering; 6] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::Resolution(25), FlightRendering::Resolution(50), FlightRendering::FULL_RESOLUTION, FlightRendering::SuperSampled];
+    pub const ALL: [FlightRendering; 7] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::Resolution(25), FlightRendering::Resolution(50), FlightRendering::FULL_RESOLUTION, FlightRendering::SuperSampled, FlightRendering::Auto(60)];
 
     /// The name of the mode: the drop-down shows it, with the resolution in percent next to it for `Resolution`
     pub const fn name(self) -> &'static str {
@@ -84,6 +112,7 @@ impl FlightRendering {
             FlightRendering::LowRes => "Low res",
             FlightRendering::Resolution(_) => "Resolution",
             FlightRendering::SuperSampled => "Super sampled",
+            FlightRendering::Auto(_) => "Auto",
         }
     }
 

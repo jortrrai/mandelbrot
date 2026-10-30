@@ -1139,15 +1139,16 @@ fn a_frame_is_only_shown_when_it_is_complete_enough() {
 }
 
 /// Lets a flight that waits for its frames run in real time until it arrives, as the window does (see `flight_job`), and returns the flight clock at every frame
-fn fly_until_arrived(app: &mut MandelbrotApp) -> Vec<Duration> {
+fn fly_until_arrived(app: &mut MandelbrotApp) -> Vec<(Duration, usize)> {
     let started = std::time::Instant::now();
     let mut clocks = Vec::new();
     while let Some(flight) = &app.flight {
         assert!(started.elapsed() < Duration::from_secs(60), "the flight did not arrive");
         let frames = flight.frames.len();
         app.poll_job();
+        //(Fast frames can arrive more than one at a time: then only the clock of the last is seen, with the frames it took)
         if let Some(flight) = app.flight.as_ref().filter(|flight| flight.frames.len() > frames) {
-            clocks.push(flight.elapsed);
+            clocks.push((flight.elapsed, flight.frames.len() - frames));
         }
         app.fly_at(std::time::Instant::now());
         std::thread::sleep(Duration::from_millis(1));
@@ -1166,8 +1167,8 @@ fn a_flight_that_waits_for_its_frames_is_rendered_frame_after_frame_by_one_job()
     assert_eq!(format!("{:?}", app.c.get_view()), format!("{before:?}"), "the camera waits for the first frame");
     let clocks = fly_until_arrived(&mut app);
     assert!(clocks.len() >= 3, "frames on the way: {clocks:?}");
-    assert!(clocks.windows(2).all(|pair| pair[1] > pair[0] && pair[1].saturating_sub(pair[0]) <= super::points::MAX_WAITING_STEP), "the clock moves on by at most a step per frame: {clocks:?}");
-    assert_eq!(*clocks.last().unwrap(), duration, "the last frame is at the destination");
+    assert!(clocks.windows(2).all(|pair| pair[1].0 > pair[0].0 && pair[1].0.saturating_sub(pair[0].0) <= super::points::MAX_WAITING_STEP * u32::try_from(pair[1].1).unwrap()), "the clock moves on by at most a step per frame: {clocks:?}");
+    assert_eq!(clocks.last().unwrap().0, duration, "the last frame is at the destination");
     //The arrival: the place itself, with a full-quality render
     assert!(!app.flight_job);
     wait_for_job(&mut app);
@@ -1575,6 +1576,65 @@ fn the_blur_of_a_flight_frame_follows_the_resolution_it_really_has() {
 }
 
 #[test]
+fn auto_steers_to_the_finest_scale_that_keeps_the_frame_rate_and_holds_it_when_it_fits() {
+    use super::flight::{auto_scale, AUTO_COARSEST};
+    let ms = |ms: f64| Duration::from_secs_f64(ms / 1000.0);
+    let target = ms(1000.0 / 60.0); //60 FPS: the frames aim for 90% of 16.7 ms, 15 ms
+    //A frame that takes a fixed 4 ms plus 16 ms at full resolution (20 ms, 50 FPS): the scale settles where it fits, not at the coarse scale that the pixels
+    //alone predict (blocks of 2 or 3)
+    let took = |scale: f64| ms(4.0 + 16.0 * scale * scale);
+    let mut scale = 0.7;
+    for _ in 0..40 {
+        scale = auto_scale(scale, took(scale), target);
+    }
+    let fits = took(scale).as_secs_f64() * 1000.0;
+    assert!((0.77..=0.83).contains(&scale) && (13.5..=15.0).contains(&fits), "settled at {scale} ({fits:.1} ms)");
+    //Steady once it fits: the same scale every frame
+    assert_eq!(auto_scale(scale, took(scale), target), scale);
+    //Fast views go to full resolution, slow ones down to the coarsest scale and no further
+    let mut scale = 0.5;
+    for _ in 0..20 {
+        scale = auto_scale(scale, ms(5.0), target);
+    }
+    assert_eq!(scale, 1.0);
+    for _ in 0..40 {
+        scale = auto_scale(scale, ms(1000.0), target);
+    }
+    assert_eq!(scale, AUTO_COARSEST);
+    //At most 20% coarser or 15% finer in one frame, and at least a percent
+    assert_eq!(auto_scale(1.0, ms(1000.0), target), 0.8);
+    assert_eq!(auto_scale(0.5, ms(1.0), target), 0.57);
+    assert_eq!(auto_scale(0.5, ms(15.5), target), 0.49);
+}
+
+#[test]
+fn an_auto_flight_shows_frames_of_the_chosen_resolution_and_arrives() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::Auto(60);
+    assert_eq!(app.flight_readiness(), Readiness::COMPLETE);
+    app.go_to_point_of_interest(0);
+    app.fly_at(std::time::Instant::now());
+    assert!(app.flight_job, "the flight job renders the frames");
+    //The first frame is scaled (70% of the pixels across), and is drawn from the smaller image
+    let (started, ctx, width, height) = (std::time::Instant::now(), egui::Context::default(), app.p.pixel_plane.width, app.p.pixel_plane.height);
+    while app.shown_scaled.is_none() && app.flight.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no scaled frame");
+        app.poll_job();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (columns, rows) = app.shown_scaled.expect("a scaled frame");
+    assert_eq!((columns, rows), ((width as f64 * 0.7).round() as usize, (height as f64 * 0.7).round() as usize));
+    app.update_texture(&ctx);
+    assert_eq!(app.texture.as_ref().unwrap().size(), [columns, rows]);
+    let clocks = fly_until_arrived(&mut app);
+    assert!(clocks.len() >= 2, "frames on the way: {clocks:?}");
+    assert_eq!(app.shown_scaled, None, "the frame at the place is not scaled");
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete, "the place itself, fully rendered");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_blurred_image_that_reaches_past_the_window_is_drawn_only_where_it_is_visible() {
     use super::blur::visible_part;
     let rect = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1));
@@ -1660,5 +1720,21 @@ fn a_benchmark_tour_visits_the_deepest_places_reports_them_and_restores_the_sett
     assert_eq!(saved.len(), 2, "a JSON and a CSV: {saved:?}");
     assert!(app.log.iter().any(|line| line.starts_with("Benchmark finished: ")), "{:?}", app.log);
     wait_for_job(&mut app);
+}
+
+#[test]
+fn a_flight_with_frames_ahead_shows_its_frames_in_order_and_arrives() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flight_rendering = super::flight::FlightRendering::FULL_RESOLUTION;
+    app.frames_ahead = 2;
+    app.go_to_point_of_interest(0);
+    let duration = app.flight.as_ref().unwrap().flight.duration();
+    let clocks = fly_until_arrived(&mut app);
+    assert!(clocks.len() >= 3, "frames on the way: {clocks:?}");
+    assert!(clocks.windows(2).all(|pair| pair[1].0 > pair[0].0), "in order: {clocks:?}");
+    assert_eq!(clocks.last().unwrap().0, duration, "the last frame is at the destination");
+    assert!(app.flight_queue.is_empty());
+    wait_for_job(&mut app);
+    assert!((app.c.get_scale() - 0.00006400000000000002).abs() < 1e-18 && app.buffer_is_complete);
     let _ = std::fs::remove_dir_all(folder);
 }
