@@ -1743,6 +1743,36 @@ fn a_flight_with_frames_ahead_shows_its_frames_in_order_and_arrives() {
 }
 
 #[test]
+fn a_video_of_the_last_flight_has_a_frame_for_every_step_of_its_frame_rate() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
+    app.start_video();
+    let ctx = egui::Context::default();
+    let started = std::time::Instant::now();
+    while app.video_job.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(60), "the video did not finish");
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let frames = (duration.as_secs_f64() * 24.0).ceil() as usize + 1;
+    let message = app.log.iter().rev().find(|line| line.starts_with("Video of the flight")).unwrap();
+    assert!(message.starts_with(&format!("Video of the flight: {frames} of {frames} frames at 24 FPS")), "{message}");
+    if std::process::Command::new("ffmpeg").arg("-version").output().is_ok_and(|output| output.status.success()) {
+        assert!(message.contains(".mp4"), "the default format makes an .mp4: {message}");
+    }
+    let written = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).find(|entry| entry.path().is_dir()).unwrap().path();
+    assert_eq!(std::fs::read_dir(&written).unwrap().count(), frames, "one PNG per frame");
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_straight_flight_at_the_constant_pace_arrives_and_says_so_in_the_log() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     (app.pace, app.route, app.constant_speed) = (super::flight::Pace::Constant, super::flight::Route::Straight, 20.0);
@@ -1880,4 +1910,35 @@ fn the_color_channels_have_a_drop_down_per_screen_channel_that_shows_its_source(
     output.drop_without_applying_deltas();
     let at = texts.iter().position(|text| text == "R ←").expect("the drop-down of the red channel");
     assert_eq!(texts[at..at + 6], ["R ←", "Blue", "G ←", "Green", "B ←", "Green"], "{:?}", &texts[at..]);
+}
+#[test]
+fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_file() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
+    (app.video_speed, app.video_format, app.video_pngs) = (50, super::video::VideoFormat::Lossless, false);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
+    app.start_video();
+    let ctx = egui::Context::default();
+    let started = std::time::Instant::now();
+    while app.video_job.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(60), "the video did not finish");
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let frames = (duration.as_secs_f64() * 2.0 * 24.0).ceil() as usize + 1;
+    let message = app.log.iter().rev().find(|line| line.starts_with("Video of the flight")).unwrap();
+    assert!(message.starts_with(&format!("Video of the flight: {frames} of {frames} frames at 24 FPS, 50% speed")), "{message}");
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    assert!(entries.iter().filter(|path| path.is_dir()).all(|path| std::fs::read_dir(path).unwrap().count() == 0), "no PNG frames");
+    if std::process::Command::new("ffmpeg").arg("-version").output().is_ok_and(|output| output.status.success()) {
+        let video = entries.iter().find(|path| path.extension().is_some_and(|extension| extension == "mkv")).expect("the .mkv of the video");
+        assert!(std::fs::metadata(video).unwrap().len() > 0);
+    }
+    wait_for_job(&mut app);
+    let _ = std::fs::remove_dir_all(folder);
 }

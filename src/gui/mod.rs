@@ -28,6 +28,7 @@ mod settings;
 pub use settings::settings_path;
 mod status;
 mod transform;
+mod video;
 #[cfg(test)]
 mod tests;
 
@@ -168,6 +169,16 @@ pub struct MandelbrotApp {
     benchmark: Option<benchmark::Benchmark>,
     benchmark_results: Vec<benchmark::SceneResult>,
     benchmark_folder: std::path::PathBuf,
+    /// The last flight, for a video of it, the video under way, and the frame rate of videos, see `video`
+    last_flight: Option<video::VideoFlight>,
+    video_job: Option<video::VideoJob>,
+    video_fps: u32,
+    /// The speed of a video in percent of the flight's, its file format, and whether its frames are also written as PNG files, see `video`
+    video_speed: u16,
+    video_format: video::VideoFormat,
+    video_pngs: bool,
+    /// Where videos are written (`saved`)
+    video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
     /// Whether the running job renders the frames of the flight (see `flight_job`), and the time between two frames of the screen, which the job keeps to
     flight_job: bool,
@@ -312,6 +323,13 @@ impl MandelbrotApp {
             benchmark: None,
             benchmark_results: Vec::new(),
             benchmark_folder: std::path::PathBuf::from(benchmark::FOLDER),
+            last_flight: None,
+            video_job: None,
+            video_fps: 30,
+            video_speed: 100,
+            video_format: video::VideoFormat::HighQuality,
+            video_pngs: true,
+            video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
             frame_interval: Duration::from_secs_f64(1.0 / 60.0),
@@ -581,6 +599,7 @@ impl eframe::App for MandelbrotApp {
         self.poll_job();
         self.poll_thumbnails(&ctx);
         self.poll_neighborhood(&ctx);
+        self.poll_video(&ctx);
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
         }

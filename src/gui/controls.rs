@@ -199,6 +199,7 @@ impl MandelbrotApp {
             ui.add_enabled(self.render_neighborhood, egui::DragValue::new(&mut self.neighborhood_margin).range(10..=5000).speed(5).suffix("% per side"))
                 .on_hover_text("How far the neighborhood reaches past every side, in percent of the view (type a value; 100% is one view to every side). A large neighborhood takes longer and gets a lower resolution, so it stays within 8192 pixels on a side");
         });
+        self.video_ui(ui);
         ui.add_enabled(self.blur.is_some(), egui::Checkbox::new(&mut self.auto_blur, "Auto blur during flights")).on_hover_text("While a flight moves the view, the image gets a light blur on the GPU, which brings a moving frame closer to the finished image: stronger for coarse frames, lighter for supersampled ones (σ = 0.8 × (100 / resolution in %)^0.6 pixels). The finished image at the place is never blurred.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
