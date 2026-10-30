@@ -27,6 +27,7 @@ impl MandelbrotApp {
         let Some(flight) = &mut self.flight else { return };
         let (path, mut elapsed, mut limits, palettes) = (flight.flight.clone(), flight.elapsed, flight.limits.take(), flight.palettes);
         self.cancel_thumbnail_job();
+        self.cancel_neighborhood_job();
         self.interrupt_progressive_render();
         (self.frame_ready, self.frame_accepted, self.buffer_is_complete, self.layer_shown) = (false, false, false, false);
         let previous_samples = self.samples.take();

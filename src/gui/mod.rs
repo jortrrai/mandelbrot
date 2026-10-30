@@ -18,6 +18,7 @@ mod fit;
 mod flight;
 mod flight_job;
 mod history;
+mod neighborhood;
 mod pointer;
 mod points;
 mod render_job;
@@ -166,6 +167,10 @@ pub struct MandelbrotApp {
     log: Vec<String>,
     texture: Option<TextureHandle>,
     texture_outdated: bool,
+    /// The neighborhood of the view, drawn behind the image, and the job that renders it, see `neighborhood`; whether it is rendered at all
+    neighborhood: Option<neighborhood::Neighborhood>,
+    neighborhood_job: Option<neighborhood::NeighborhoodJob>,
+    render_neighborhood: bool,
     /// The blur of the image during flights (`None` without a suitable OpenGL context, as in tests), see `blur`
     blur: Option<std::sync::Arc<blur::Blur>>,
     /// Whether the image is blurred while a flight moves the view, see `blur`
@@ -274,6 +279,9 @@ impl MandelbrotApp {
             log: Vec::new(),
             texture: None,
             texture_outdated: true,
+            neighborhood: None,
+            neighborhood_job: None,
+            render_neighborhood: true,
             blur: None,
             auto_blur: true,
             shown_samples: 0,
@@ -398,6 +406,8 @@ impl MandelbrotApp {
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         //The image of the last render, at its place in the current view (the whole rectangle when they are the same view, or when the view is held, see `drawn_fraction`)
         let target = transform::rect_of(self.drawn_fraction(), rect);
+        //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
+        self.draw_neighborhood(&ui.painter_at(rect), rect);
         match self.blur.as_ref().filter(|_| (self.auto_blur && self.flight.is_some()) || self.quality_blur) {
             Some(blur) => {
                 let sigma = blur::blur_sigma(self.preview_block, self.shown_samples);
@@ -503,6 +513,7 @@ impl eframe::App for MandelbrotApp {
         let ctx = ui.ctx().clone();
         self.poll_job();
         self.poll_thumbnails(&ctx);
+        self.poll_neighborhood(&ctx);
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
         }
