@@ -189,6 +189,14 @@ impl MandelbrotApp {
             ui.label("Frames ahead:");
             ui.add(egui::DragValue::new(&mut self.frames_ahead).range(0..=3)).on_hover_text("How many frames of a flight are rendered ahead of the one on the screen, so the CPU and the GPU never wait for the screen (0: one frame at a time, as before). For flights that wait for their frames (all renderings but Best effort)");
         });
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.render_neighborhood, "Render the neighborhood").on_hover_text("Once the view is finished and nothing else runs, the area around it (by default one view to every side, at half the resolution) is rendered too and drawn behind the image, so dragging, panning and zooming out show it at once instead of black").changed() && !self.render_neighborhood {
+                self.cancel_neighborhood_job();
+                self.neighborhood = None;
+            }
+            ui.add_enabled(self.render_neighborhood, egui::DragValue::new(&mut self.neighborhood_margin).range(10..=5000).speed(5).suffix("% per side"))
+                .on_hover_text("How far the neighborhood reaches past every side, in percent of the view (type a value; 100% is one view to every side). A large neighborhood takes longer and gets a lower resolution, so it stays within 8192 pixels on a side");
+        });
         ui.add_enabled(self.blur.is_some(), egui::Checkbox::new(&mut self.auto_blur, "Auto blur during flights")).on_hover_text("While a flight moves the view, the image gets a light blur on the GPU, which brings a moving frame closer to the finished image: stronger for coarse frames, lighter for supersampled ones (σ = 0.8 × (100 / resolution in %)^0.6 pixels). The finished image at the place is never blurred.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
