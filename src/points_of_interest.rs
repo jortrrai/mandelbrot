@@ -21,7 +21,7 @@
 //!   Numbers are `f64` and are read exactly: the shortest decimal text of an `f64` reads back to the same number (`serde_json` needs its `float_roundtrip` feature for that; without it
 //!   `-0.46395833333333325` was read one bit off, which a test of the shipped files caught).
 //! * `max_iterations` is a whole number from 1 to 1,000,000, the range of the control in the window.
-//! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. `iteration_divide` (a positive number) and `color_offset` (0 to 500)
+//! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. `iteration_divide` (0.1 to 1000; a positive number outside that range is moved to the nearest end) and `color_offset` (0 to 500)
 //!   are the color cycle of the place (`mandelbrot_set::ColorCycle`), and `stretch_palette` (`true` or `false`) whether the palette is stretched over the limit instead.
 //!   All are optional.
 //! * The points are listed by **zoom**, the shallowest first (the largest `scale` at the top), so the deeper places are further down. Places with the same zoom are listed in
@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::coloring::ColorChannelMapping;
-use crate::mandelbrot_set::{ColorCycle, MIN_DIVIDE, PALETTE_LENGTH};
+use crate::mandelbrot_set::{ColorCycle, MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 
 /// The name of the folder with the point of interest files
 pub const FOLDER_NAME: &str = "points_of_interest";
@@ -203,8 +203,10 @@ pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String
             }
         }
         match raw.iteration_divide {
-            Some(divide) if divide.is_finite() && divide >= MIN_DIVIDE => appearance.iteration_divide = Some(divide),
-            Some(divide) => warnings.push(format!("{file_name}: the iteration divide {divide} should be at least {MIN_DIVIDE}, it is ignored")),
+            Some(divide) if (MIN_DIVIDE..=MAX_DIVIDE).contains(&divide) => appearance.iteration_divide = Some(divide),
+            //(Outside the range of the slider: the nearest end, as the slider would show it)
+            Some(divide) if divide > 0.0 => appearance.iteration_divide = Some(divide.clamp(MIN_DIVIDE, MAX_DIVIDE)),
+            Some(divide) => warnings.push(format!("{file_name}: the iteration divide {divide} should be more than 0, it is ignored")),
             None => {}
         }
         match raw.color_offset {
@@ -560,5 +562,16 @@ mod tests {
         assert_eq!(new_file_name(&existing, "!!!"), "11-place.json", "a name without letters or digits");
         let taken = [String::from("Notes"), String::from("00-a.json")];
         assert_eq!(new_file_name(&taken, "A"), "01-a.json");
+    }
+
+    #[test]
+    fn an_iteration_divide_outside_the_slider_is_moved_to_its_nearest_end_and_a_negative_one_is_ignored() {
+        let with = |divide: &str| parse(&VALID.replace("\"color_channels\": \"bgr\"", &format!("\"color_channels\": \"bgr\", \"iteration_divide\": {divide}")), "test.json").unwrap();
+        assert_eq!(with("0.001").0.appearance.unwrap().iteration_divide, Some(0.1));
+        assert_eq!(with("100000").0.appearance.unwrap().iteration_divide, Some(1000.0));
+        assert_eq!(with("4.5").0.appearance.unwrap().iteration_divide, Some(4.5));
+        let (point, warnings) = with("-2");
+        assert_eq!(point.appearance.unwrap().iteration_divide, None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 }
