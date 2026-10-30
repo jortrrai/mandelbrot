@@ -1969,7 +1969,7 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
     while started.elapsed() < Duration::from_millis(300) {
         let offset = app.m.palette.offset;
         app.cycle_colors(&ctx, std::time::Instant::now());
-        steps += usize::from(app.m.palette.offset != offset);
+        steps += usize::from((app.m.palette.offset - offset).abs() > 1e-9);
         app.poll_job();
         std::thread::sleep(Duration::from_millis(5));
     }
