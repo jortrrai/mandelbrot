@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, FLIGHT_SPEEDS};
+use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
 use super::video::{Playback, VideoQuality, FRAMES_AT_ONCE, FRAME_RATES, SPEEDS};
 use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
@@ -45,6 +45,7 @@ pub(super) struct Settings {
     route: Option<String>,
     constant_speed: Option<f64>,
     flight_speed: Option<u16>,
+    dive_zoom: Option<f64>,
     flight_rendering: Option<String>,
     flight_resolution: Option<u16>,
     immersion: Option<bool>,
@@ -133,6 +134,7 @@ impl MandelbrotApp {
             route: Some(self.route.name().to_string()),
             constant_speed: Some(self.constant_speed),
             flight_speed: Some(self.flight_speed),
+            dive_zoom: Some(self.dive_zoom),
             flight_rendering: Some(rendering.to_string()),
             flight_resolution: percent,
             immersion: Some(self.immersion),
@@ -220,6 +222,9 @@ impl MandelbrotApp {
         }
         if let Some(speed) = settings.flight_speed.filter(|speed| FLIGHT_SPEEDS.contains(speed)) {
             self.flight_speed = speed;
+        }
+        if let Some(zoom) = settings.dive_zoom.filter(|zoom| DIVE_ZOOMS.contains(zoom)) {
+            self.dive_zoom = zoom;
         }
         if let Some(rendering) = settings.flight_rendering.as_deref().and_then(|key| rendering_of(key, settings.flight_resolution)) {
             self.flight_rendering = rendering;

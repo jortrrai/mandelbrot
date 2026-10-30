@@ -4,7 +4,7 @@
 use super::blur::Quality;
 use eframe::egui::{self};
 
-use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, FLIGHT_SPEEDS};
+use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
 use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
@@ -105,8 +105,11 @@ impl MandelbrotApp {
             egui::ComboBox::from_id_salt("flight_route").selected_text(self.route.name()).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.route, Route::Shortest, Route::Shortest.name()).on_hover_text("Zooms out to travel, only as far as the distance needs, and in again: the shortest way for the eye");
                 ui.selectable_value(&mut self.route, Route::Straight, Route::Straight.name()).on_hover_text("A straight line: the zoom changes steadily from one view to the other, never zooming out on the way. Between two far-apart places at a deep zoom the picture rushes by");
-                ui.selectable_value(&mut self.route, Route::Dive, Route::Dive.name()).on_hover_text("Starts right above the place at zoom 1, wherever the view was, and falls straight down into it, zooming only, without moving sideways (also for videos)");
+                ui.selectable_value(&mut self.route, Route::Dive, Route::Dive.name()).on_hover_text("Starts right above the place at the zoom next to it (×1 at first), wherever the view was, and falls straight down into it, zooming only, without moving sideways (also for videos)");
             }).response.on_hover_text("The route of a flight");
+            if self.route == Route::Dive {
+                ui.add(egui::DragValue::new(&mut self.dive_zoom).range(DIVE_ZOOMS).speed(0.05).max_decimals(2).prefix("from ×")).on_hover_text("The zoom the dive starts at (type a value; ×1 is the reset view, ×1000 a thousand times as deep): the flight starts right above the place at this zoom");
+            }
             egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
                 for mode in FlightRendering::ALL {
                     ui.selectable_value(&mut self.flight_rendering, mode, mode.entry()).on_hover_text(match mode {

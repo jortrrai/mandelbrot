@@ -164,6 +164,8 @@ pub struct MandelbrotApp {
     constant_speed: f64,
     /// The speed of the other paces, in percent of their own (see `flight::Flight::with`)
     flight_speed: u16,
+    /// The zoom a dive starts at (`flight::Route::Dive`)
+    dive_zoom: f64,
     /// What the running flight job was started with (see `flight_job::FlightJobOptions`): a change of one of them during a flight restarts it, so it takes effect at once
     flight_job_options: Option<flight_job::FlightJobOptions>,
     /// Whether the image is blurred after a flight arrived (with Auto blur), until the render of the place has finished: the landing has no pixelated pop
@@ -334,6 +336,7 @@ impl MandelbrotApp {
             route: flight::Route::Shortest,
             constant_speed: flight::CONSTANT_SPEED,
             flight_speed: 100,
+            dive_zoom: flight::DIVE_ZOOM,
             flight_job_options: None,
             landing_blur: false,
             settings_path: None,

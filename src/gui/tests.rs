@@ -1668,7 +1668,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     let defaults = app.settings();
     (app.pace, app.fast_gpu, app.supersampling_amount, app.m.smooth_coloring) = (super::flight::Pace::Cinematic, false, 16, false);
     app.flight_rendering = super::flight::FlightRendering::Resolution(37);
-    (app.route, app.constant_speed) = (super::flight::Route::Straight, 7.5);
+    (app.route, app.constant_speed, app.dive_zoom) = (super::flight::Route::Straight, 7.5, 250.0);
     (app.frames_ahead, app.blend_frames, app.f32_frames, app.quality_blur, app.neighborhood_margin) = (1, true, false, true, 250);
     (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs, app.video_frames_at_once) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::Phones, true, 3);
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
@@ -1682,7 +1682,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert!(next.use_settings_file(Some(path.clone())));
     assert_eq!((next.pace, next.fast_gpu, next.supersampling_amount, next.m.smooth_coloring, next.flight_rendering),
         (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
-    assert_eq!((next.route, next.constant_speed), (super::flight::Route::Straight, 7.5));
+    assert_eq!((next.route, next.constant_speed, next.dive_zoom), (super::flight::Route::Straight, 7.5, 250.0));
     assert_eq!((next.frames_ahead, next.blend_frames, next.f32_frames, next.quality_blur, next.neighborhood_margin), (1, true, false, true, 250));
     assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs, next.video_frames_at_once), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::Phones, true, 3));
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });

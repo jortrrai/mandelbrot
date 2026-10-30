@@ -47,8 +47,11 @@ pub enum Route {
     Dive,
 }
 
-/// The scale a dive starts at: zoom 1, the reset view's
-pub const DIVE_SCALE: f64 = 1.0;
+/// The zoom a dive starts at, at first: zoom 1, the reset view's (`MandelbrotApp::dive_zoom`)
+pub const DIVE_ZOOM: f64 = 1.0;
+
+/// The range of the zoom a dive starts at
+pub const DIVE_ZOOMS: std::ops::RangeInclusive<f64> = 0.1..=1e12;
 
 impl Route {
     /// Every route, in the order of the drop-down (the default first)
@@ -273,16 +276,16 @@ impl Flight {
     /// A flight from `from` to `to` at `pace`, by the shortest path: zooming out only as far as the distance needs
     #[cfg(test)]
     pub fn new(from: Camera, to: Camera, pace: Pace) -> Flight {
-        Flight::with(from, to, pace, Route::Shortest, CONSTANT_SPEED, 1.0)
+        Flight::with(from, to, pace, Route::Shortest, CONSTANT_SPEED, 1.0, DIVE_ZOOM)
     }
 
     /// A flight from `from` to `to` at `pace` along `route`; `constant` is the speed of `Pace::Constant`, in doublings of the zoom per second
-    /// `factor` speeds the other paces up or slows them down (2: twice as fast), their shortest and longest durations too
-    pub fn with(from: Camera, to: Camera, pace: Pace, route: Route, constant: f64, factor: f64) -> Flight {
+    /// `factor` speeds the other paces up or slows them down (2: twice as fast), their shortest and longest durations too; a dive starts at zoom `dive_zoom`
+    pub fn with(from: Camera, to: Camera, pace: Pace, route: Route, constant: f64, factor: f64, dive_zoom: f64) -> Flight {
         let leg = match route {
             Route::Shortest => Leg::new(from, to),
             Route::Straight => Leg::straight(from, to),
-            Route::Dive => Leg::straight(Camera { x: to.x, y: to.y, scale: DIVE_SCALE }, to),
+            Route::Dive => Leg::straight(Camera { x: to.x, y: to.y, scale: 1.0 / dive_zoom.clamp(*DIVE_ZOOMS.start(), *DIVE_ZOOMS.end()) }, to),
         };
         let duration = Flight::duration_of(&leg, pace, constant, factor);
         Flight { leg, pace, duration, timing: (constant, factor) }
@@ -399,21 +402,21 @@ mod tests {
     #[test]
     fn the_constant_pace_covers_the_same_path_every_moment_at_the_speed_of_its_slider() {
         //The path length per second is the same from start to end: no slow start or arrival
-        let flight = Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Shortest, 3.0, 1.0);
+        let flight = Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Shortest, 3.0, 1.0, DIVE_ZOOM);
         let shares: Vec<f64> = (0..=10).map(|i| flight.share_of_path(flight.duration().mul_f64(f64::from(i) / 10.0))).collect();
         assert!(shares.windows(2).all(|pair| (pair[1] - pair[0] - 0.1).abs() < 1e-9), "{shares:?}");
         //A pure zoom by 2^12 at 3 doublings per second takes 4 s, at 6 doublings 2 s
         let deeper = Camera { scale: RESET.scale / 4096.0, ..RESET };
-        assert!((Flight::with(RESET, deeper, Pace::Constant, Route::Shortest, 3.0, 1.0).duration().as_secs_f64() - 4.0).abs() < 1e-9);
-        assert!((Flight::with(RESET, deeper, Pace::Constant, Route::Shortest, 6.0, 1.0).duration().as_secs_f64() - 2.0).abs() < 1e-9);
+        assert!((Flight::with(RESET, deeper, Pace::Constant, Route::Shortest, 3.0, 1.0, DIVE_ZOOM).duration().as_secs_f64() - 4.0).abs() < 1e-9);
+        assert!((Flight::with(RESET, deeper, Pace::Constant, Route::Shortest, 6.0, 1.0, DIVE_ZOOM).duration().as_secs_f64() - 2.0).abs() < 1e-9);
         //The deepest zoom is not capped at 12 s like the eased paces: 10^12 is about 40 doublings, 13 s at 3 per second
-        assert!(Flight::with(RESET, DEEP, Pace::Constant, Route::Shortest, 3.0, 1.0).duration() > seconds(12.0));
+        assert!(Flight::with(RESET, DEEP, Pace::Constant, Route::Shortest, 3.0, 1.0, DIVE_ZOOM).duration() > seconds(12.0));
     }
 
     #[test]
     fn a_straight_flight_goes_in_a_line_without_zooming_out_and_moves_the_same_views_every_moment() {
         for (from, to) in [(RESET, SEAHORSE), (SEAHORSE, DEEP), (DEEP, RESET), (SEAHORSE, Camera { x: -0.7, ..SEAHORSE })] {
-            let flight = Flight::with(from, to, Pace::Constant, Route::Straight, 3.0, 1.0);
+            let flight = Flight::with(from, to, Pace::Constant, Route::Straight, 3.0, 1.0, DIVE_ZOOM);
             assert_eq!((flight.camera_at(Duration::ZERO), flight.camera_at(flight.duration())), (from, to));
             let cameras: Vec<Camera> = (0..=200).map(|i| flight.camera_at(flight.duration().mul_f64(f64::from(i) / 200.0))).collect();
             for camera in &cameras {
@@ -436,11 +439,11 @@ mod tests {
 
     #[test]
     fn a_speed_factor_speeds_the_eased_paces_up_and_a_retimed_flight_is_at_the_same_place_at_the_same_share_of_its_time() {
-        let normal = Flight::with(RESET, SEAHORSE, Pace::Normal, Route::Shortest, CONSTANT_SPEED, 1.0);
-        let twice = Flight::with(RESET, SEAHORSE, Pace::Normal, Route::Shortest, CONSTANT_SPEED, 2.0);
+        let normal = Flight::with(RESET, SEAHORSE, Pace::Normal, Route::Shortest, CONSTANT_SPEED, 1.0, DIVE_ZOOM);
+        let twice = Flight::with(RESET, SEAHORSE, Pace::Normal, Route::Shortest, CONSTANT_SPEED, 2.0, DIVE_ZOOM);
         assert!((normal.duration().as_secs_f64() / twice.duration().as_secs_f64() - 2.0).abs() < 1e-9, "twice as fast: half the time, its limits too");
         //The constant pace has its own speed: the factor does not change it
-        assert_eq!(Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Shortest, 3.0, 2.0).duration(), Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Shortest, 3.0, 1.0).duration());
+        assert_eq!(Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Shortest, 3.0, 2.0, DIVE_ZOOM).duration(), Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Shortest, 3.0, 1.0, DIVE_ZOOM).duration());
         //Retimed halfway: the same camera at the same share of the new time
         let half = normal.retimed(CONSTANT_SPEED, 0.5);
         assert_eq!(half.timing(), (CONSTANT_SPEED, 0.5));
@@ -449,11 +452,15 @@ mod tests {
     }
 
     #[test]
-    fn a_dive_starts_above_the_place_at_zoom_1_and_only_zooms() {
+    fn a_dive_starts_above_the_place_at_its_zoom_and_only_zooms() {
+        //From zoom 100: the first view is a hundred times as deep as the reset view
+        let deeper = Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Dive, 3.0, 1.0, 100.0);
+        assert_eq!(deeper.camera_at(Duration::ZERO), Camera { x: SEAHORSE.x, y: SEAHORSE.y, scale: 0.01 });
+        assert!(deeper.duration() < Flight::with(RESET, SEAHORSE, Pace::Constant, Route::Dive, 3.0, 1.0, 1.0).duration(), "a shorter dive");
         for from in [RESET, SEAHORSE, DEEP] {
-            let flight = Flight::with(from, SEAHORSE, Pace::Constant, Route::Dive, 3.0, 1.0);
+            let flight = Flight::with(from, SEAHORSE, Pace::Constant, Route::Dive, 3.0, 1.0, DIVE_ZOOM);
             let cameras: Vec<Camera> = (0..=100).map(|i| flight.camera_at(flight.duration().mul_f64(f64::from(i) / 100.0))).collect();
-            assert_eq!(cameras[0], Camera { x: SEAHORSE.x, y: SEAHORSE.y, scale: DIVE_SCALE }, "wherever the view was");
+            assert_eq!(cameras[0], Camera { x: SEAHORSE.x, y: SEAHORSE.y, scale: 1.0 }, "wherever the view was");
             assert_eq!(cameras[100], SEAHORSE);
             assert!(cameras.iter().all(|camera| (camera.x, camera.y) == (SEAHORSE.x, SEAHORSE.y)), "straight down, never sideways");
             assert!(cameras.windows(2).all(|pair| pair[1].scale < pair[0].scale), "zooming in all the way");

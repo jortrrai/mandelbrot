@@ -378,14 +378,14 @@ impl MandelbrotApp {
             self.arrive_at(&point);
             return;
         }
-        let flight = Flight::with(from, to, self.pace, self.route, self.constant_speed, self.speed_factor());
+        let flight = Flight::with(from, to, self.pace, self.route, self.constant_speed, self.speed_factor(), self.dive_zoom);
         let route = if self.route == Route::Shortest { String::new() } else { format!(", {} route", self.route.name().to_lowercase()) };
         self.log(format!("Flying to {} ({}{route}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| std::sync::Arc::new(std::sync::Mutex::new(self.flight_limits(to)))); //(Shared with the flight job, which a change of a setting restarts)
         let now = Instant::now();
         let destination_palette = point.appearance.as_ref().filter(|_| self.restore_appearance).map_or(self.m.palette, |appearance| appearance.palette_over(self.m.palette));
         let palettes = (self.m.palette, destination_palette);
-        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
