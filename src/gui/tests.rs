@@ -1919,8 +1919,8 @@ fn the_color_channels_have_a_drop_down_per_screen_channel_that_shows_its_source(
         _ => None,
     }).collect();
     output.drop_without_applying_deltas();
-    let at = texts.iter().position(|text| text == "R ←").expect("the drop-down of the red channel");
-    assert_eq!(texts[at..at + 6], ["R ←", "Blue", "G ←", "Green", "B ←", "Green"], "{:?}", &texts[at..]);
+    let at = texts.iter().position(|text| text == "R:").expect("the drop-down of the red channel");
+    assert_eq!(texts[at..at + 6], ["R:", "Blue", "G:", "Green", "B:", "Green"], "{:?}", &texts[at..]);
 }
 #[test]
 fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_file() {
@@ -1952,4 +1952,33 @@ fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_fi
     }
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() {
+    let ctx = egui::Context::default();
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 1.0, offset: 0.0, stretch: false };
+    app.render("Colors");
+    wait_for_job(&mut app);
+    let log_length = app.log.len();
+    (app.cycle_rate, app.color_cycling) = (100.0, false);
+    app.toggle_color_cycle();
+    let started = std::time::Instant::now();
+    let mut steps = 0;
+    while started.elapsed() < Duration::from_millis(300) {
+        let offset = app.m.palette.offset;
+        app.cycle_colors(&ctx, std::time::Instant::now());
+        steps += usize::from(app.m.palette.offset != offset);
+        app.poll_job();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let offset = app.m.palette.offset;
+    assert!(steps >= 5, "the colors moved in steps: {steps}");
+    assert!((offset - 100.0 * started.elapsed().as_secs_f64()).abs() < 10.0, "about 100 steps per second: {offset} after {:?}", started.elapsed());
+    app.toggle_color_cycle();
+    wait_for_job(&mut app);
+    assert_eq!(app.m.palette.offset, offset, "stopping keeps the colors it reached");
+    assert!(app.buffer_is_complete, "and renders the view to its full quality");
+    assert!(app.log.len() <= log_length + 3, "the steps do not fill the log: {:?}", &app.log[log_length..]);
 }

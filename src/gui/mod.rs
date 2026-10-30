@@ -15,6 +15,7 @@ mod actions;
 mod benchmark;
 mod blur;
 mod controls;
+mod cycle;
 mod fit;
 mod flight;
 mod flight_job;
@@ -207,6 +208,10 @@ pub struct MandelbrotApp {
     blur: Option<std::sync::Arc<blur::Blur>>,
     /// Whether the image is blurred while a flight moves the view, see `blur`
     auto_blur: bool,
+    /// Whether the colors cycle, how fast (steps of the palette per second), and when the offset moved last, see `cycle`
+    color_cycling: bool,
+    cycle_rate: f64,
+    cycle_last: Option<std::time::Instant>,
     /// How many frames of a flight the flight job may render ahead of the one on the screen (0: none, it renders one frame at a time as before), see `flight_job`
     frames_ahead: usize,
     /// The messages of the flight job that wait for their turn on the screen (frames rendered ahead), and how many frames that is (shared with the job, which
@@ -350,6 +355,9 @@ impl MandelbrotApp {
             neighborhood_margin: neighborhood::DEFAULT_MARGIN,
             blur: None,
             auto_blur: true,
+            color_cycling: false,
+            cycle_rate: cycle::CYCLE_RATE,
+            cycle_last: None,
             frames_ahead: 2,
             flight_queue: std::collections::VecDeque::new(),
             frames_queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -496,7 +504,7 @@ impl MandelbrotApp {
         let target = transform::rect_of(self.drawn_fraction(), rect);
         //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
         self.draw_neighborhood(&ui.painter_at(rect), rect);
-        match self.blur.as_ref().filter(|_| (self.auto_blur && self.flight.is_some()) || self.quality_blur) {
+        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.color_cycling)) || self.quality_blur) {
             Some(blur) => {
                 let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
@@ -604,6 +612,7 @@ impl eframe::App for MandelbrotApp {
         self.poll_thumbnails(&ctx);
         self.poll_neighborhood(&ctx);
         self.poll_video(&ctx);
+        self.cycle_colors(&ctx, std::time::Instant::now());
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
         }

@@ -385,6 +385,13 @@ impl MandelbrotApp {
                 ui.add(egui::Slider::new(&mut self.m.palette.offset, 0.0..=PALETTE_LENGTH - 1.0).step_by(1.0).max_decimals(0))
                     .on_hover_text("Where the palette starts, in steps (0 to 499 of 500): shifts every color along the palette; the colors change at once while you drag");
             });
+            ui.horizontal(|ui| {
+                if ui.button(if self.color_cycling { "Stop cycling" } else { "Cycle the colors" }).on_hover_text("Moves the offset on by itself, so the colors flow through the set while the view stays where it is; the image shows one sample per pixel (blurred with Auto blur) until the cycling stops").clicked() {
+                    self.toggle_color_cycle();
+                }
+                ui.add(egui::DragValue::new(&mut self.cycle_rate).range(super::cycle::CYCLE_RATES).speed(0.5).max_decimals(1).suffix(" steps/s"))
+                    .on_hover_text("How fast the colors cycle, in steps of the palette per second (type a value; negative: backwards; 500 steps are the whole palette)");
+            });
         });
         ui.checkbox(&mut self.m.palette.stretch, "Stretch the palette over the limit")
             .on_hover_text("On: the palette spans the iteration counts once, from 0 to the limit, without repeating (the colors change with the limit). Off: the palette repeats every 500 steps, see Iteration divide.");
@@ -398,11 +405,11 @@ impl MandelbrotApp {
         //One drop-down per channel of the screen: the channel of the coloring it shows, so every combination can be made
         let mut chosen = None;
         ui.horizontal(|ui| {
-            ui.label("Color channels:").on_hover_text("Which channel of the coloring every channel of the screen shows: red, green and blue as they are (R ← Red, G ← Green, B ← Blue), swapped, or the same channel twice");
+            ui.label("Color channels:").on_hover_text("Which channel of the coloring every channel of the screen shows: red, green and blue as they are (R: Red, G: Green, B: Blue), swapped, or the same channel twice");
             let current = format!("{:?}", self.p.color_channel_mapping);
             for (index, (screen, letter)) in [("R", 'R'), ("G", 'G'), ("B", 'B')].into_iter().enumerate() {
                 let source = current.chars().nth(index).unwrap_or(letter);
-                ui.label(format!("{screen} ←"));
+                ui.label(format!("{screen}:")); //(egui's font has no arrows)
                 egui::ComboBox::from_id_salt(("channel", index)).width(60.0).selected_text(channel_name(source)).show_ui(ui, |ui| {
                     for option in ['R', 'G', 'B'] {
                         if ui.selectable_label(option == source, channel_name(option)).clicked() && option != source {

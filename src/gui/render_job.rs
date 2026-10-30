@@ -299,7 +299,7 @@ impl MandelbrotApp {
                         self.c = c; //During a flight the camera moves on while a render runs (best effort), so it is not set back to the view of the render
                     }
                     self.texture_outdated = true;
-                    if !self.gesture_active && !message.is_empty() {
+                    if !self.gesture_active && !self.color_cycling && !message.is_empty() { //(Not every frame of a gesture or step of the color cycling)
                         let description = self.view_description();
                         self.log(format!("{message} in {:.2} s: {description}", elapsed.as_secs_f64()));
                     }
@@ -474,7 +474,7 @@ impl MandelbrotApp {
         self.job = Some(receiver);
         self.flight_job = false;
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });
-        if !self.gesture_active {
+        if !self.gesture_active && !self.color_cycling {
             self.log("Rendering...");
         }
     }

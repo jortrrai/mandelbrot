@@ -48,6 +48,7 @@ pub(super) struct Settings {
     flight_resolution: Option<u16>,
     immersion: Option<bool>,
     auto_blur: Option<bool>,
+    cycle_rate: Option<f64>,
     frames_ahead: Option<usize>,
     blend_frames: Option<bool>,
     f32_frames: Option<bool>,
@@ -132,6 +133,7 @@ impl MandelbrotApp {
             flight_resolution: percent,
             immersion: Some(self.immersion),
             auto_blur: Some(self.auto_blur),
+            cycle_rate: Some(self.cycle_rate),
             frames_ahead: Some(self.frames_ahead),
             blend_frames: Some(self.blend_frames),
             f32_frames: Some(self.f32_frames),
@@ -214,6 +216,9 @@ impl MandelbrotApp {
         }
         set(settings.immersion, &mut self.immersion);
         set(settings.auto_blur, &mut self.auto_blur);
+        if let Some(rate) = settings.cycle_rate.filter(|rate| super::cycle::CYCLE_RATES.contains(rate)) {
+            self.cycle_rate = rate;
+        }
         if let Some(ahead) = settings.frames_ahead.filter(|ahead| *ahead <= 3) {
             self.frames_ahead = ahead;
         }
