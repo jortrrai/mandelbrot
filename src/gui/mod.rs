@@ -25,6 +25,8 @@ mod points;
 mod render_job;
 mod save_size;
 mod spiral;
+mod settings;
+pub use settings::settings_path;
 mod status;
 mod transform;
 #[cfg(test)]
@@ -158,6 +160,11 @@ pub struct MandelbrotApp {
     benchmark: Option<benchmark::Benchmark>,
     benchmark_results: Vec<benchmark::SceneResult>,
     benchmark_folder: std::path::PathBuf,
+    /// The settings file (`None`: the settings are not kept, as in tests), the defaults for Reset settings, what was saved last and since when it changed, see `settings`
+    settings_path: Option<std::path::PathBuf>,
+    settings_defaults: settings::Settings,
+    settings_saved: Option<settings::Settings>,
+    settings_changed: Option<std::time::Instant>,
     flight: Option<points::PointFlight>,
     /// Whether the running job renders the frames of the flight (see `flight_job`), and the time between two frames of the screen, which the job keeps to
     flight_job: bool,
@@ -280,6 +287,10 @@ impl MandelbrotApp {
             benchmark: None,
             benchmark_results: Vec::new(),
             benchmark_folder: std::path::PathBuf::from(benchmark::FOLDER),
+            settings_path: None,
+            settings_defaults: settings::Settings::default(),
+            settings_saved: None,
+            settings_changed: None,
             flight: None,
             flight_job: false,
             frame_interval: Duration::from_secs_f64(1.0 / 60.0),
@@ -385,6 +396,11 @@ impl MandelbrotApp {
     /// Whether the controls can be used: not while a move runs, but always while a progressive render runs, since using a control interrupts it
     pub(super) fn controls_enabled(&self) -> bool {
         self.job.is_none() || self.progress.is_some()
+    }
+
+    /// Renders the view again with the settings of the settings file (when the window opens)
+    pub fn render_with_settings(&mut self) {
+        self.render("Restored your settings");
     }
 
     /// Prepares what needs the OpenGL context of the window: the blur of flights (see `blur`)
@@ -542,6 +558,7 @@ impl eframe::App for MandelbrotApp {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| fit_area = self.image_ui(ui));
         self.fly(&ctx);
         self.step_benchmark(&ctx);
+        self.keep_settings(std::time::Instant::now());
         self.settle_gesture(&ctx);
         self.fit_to_window(&ctx, fit_area);
     }

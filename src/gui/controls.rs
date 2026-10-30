@@ -17,7 +17,12 @@ use super::{MandelbrotApp, COLORING_FUNCTIONS, COLOR_CHANNEL_MAPPINGS};
 impl MandelbrotApp {
     /// Draws the controls: moving, zooming, the places, the iterations, the quality, the colors and saving. A control that changes the view or the settings starts a new render
     pub(super) fn controls_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Controls");
+        ui.horizontal(|ui| {
+            ui.heading("Controls");
+            if ui.small_button("Reset settings").on_hover_text("Puts every setting back to its default (the settings are remembered between runs otherwise, see the README)").clicked() {
+                self.reset_settings();
+            }
+        });
         self.move_controls(ui);
 
         ui.separator();

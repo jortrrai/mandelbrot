@@ -1731,5 +1731,37 @@ fn a_benchmark_tour_visits_the_deepest_places_reports_them_and_restores_the_sett
     assert_eq!(saved.len(), 2, "a JSON and a CSV: {saved:?}");
     assert!(app.log.iter().any(|line| line.starts_with("Benchmark finished: ")), "{:?}", app.log);
     wait_for_job(&mut app);
+}
+
+#[test]
+fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
+    let folder = std::env::temp_dir().join(format!("mandelbrot-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let path = folder.join("settings.json");
+    //A first run: no file yet, the defaults
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    assert!(!app.use_settings_file(Some(path.clone())));
+    let defaults = app.settings();
+    (app.pace, app.fast_gpu, app.supersampling_amount, app.m.smooth_coloring) = (super::flight::Pace::Cinematic, false, 16, false);
+    app.flight_rendering = super::flight::FlightRendering::Resolution(37);
+    let now = std::time::Instant::now();
+    app.keep_settings(now);
+    assert!(!path.exists(), "not on every frame of a drag");
+    app.keep_settings(now + Duration::from_secs(1));
+    assert!(path.exists(), "written once the change has settled");
+    //The next run gets them back
+    let mut next = manual_app(&Config::sized(64, 48, 50, 4));
+    assert!(next.use_settings_file(Some(path.clone())));
+    assert_eq!((next.pace, next.fast_gpu, next.supersampling_amount, next.m.smooth_coloring, next.flight_rendering),
+        (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
+    //A file with unknown and missing values loads what it knows
+    std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
+    let mut partial = manual_app(&Config::sized(64, 48, 50, 4));
+    partial.use_settings_file(Some(path));
+    assert_eq!((partial.pace, partial.supersampling_amount), (super::flight::Pace::Normal, defaults.clone().supersampling_for_test()));
+    //Reset
+    next.reset_settings();
+    assert_eq!(next.settings(), defaults);
+    wait_for_job(&mut next);
     let _ = std::fs::remove_dir_all(folder);
 }
