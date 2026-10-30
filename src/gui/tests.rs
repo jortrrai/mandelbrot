@@ -1670,7 +1670,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     app.flight_rendering = super::flight::FlightRendering::Resolution(37);
     (app.route, app.constant_speed) = (super::flight::Route::Straight, 7.5);
     (app.frames_ahead, app.blend_frames, app.f32_frames, app.quality_blur, app.neighborhood_margin) = (1, true, false, true, 250);
-    (app.video_fps, app.video_speed, app.video_format, app.video_pngs) = (144, 10, super::video::VideoFormat::Lossless, false);
+    (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs, app.video_frames_at_once) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::Phones, true, 3);
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     let now = std::time::Instant::now();
     app.keep_settings(now);
@@ -1684,7 +1684,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
         (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
     assert_eq!((next.route, next.constant_speed), (super::flight::Route::Straight, 7.5));
     assert_eq!((next.frames_ahead, next.blend_frames, next.f32_frames, next.quality_blur, next.neighborhood_margin), (1, true, false, true, 250));
-    assert_eq!((next.video_fps, next.video_speed, next.video_format, next.video_pngs), (144, 10, super::video::VideoFormat::Lossless, false));
+    assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs, next.video_frames_at_once), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::Phones, true, 3));
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
@@ -1759,7 +1759,7 @@ fn a_video_of_the_last_flight_has_a_frame_for_every_step_of_its_frame_rate() {
     app.video_folder = folder.join("saved");
     app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
     (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
-    app.pace = super::flight::Pace::Fast;
+    (app.pace, app.video_pngs, app.video_frames_at_once) = (super::flight::Pace::Fast, true, 3); //(Three frames at once: still every frame, in order)
     app.go_to_point_of_interest(0);
     app.skip_flight();
     let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
@@ -1928,7 +1928,7 @@ fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_fi
     app.video_folder = folder.join("saved");
     app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
     (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
-    (app.video_speed, app.video_format, app.video_pngs) = (50, super::video::VideoFormat::Lossless, false);
+    (app.video_speed, app.video_quality, app.video_pngs) = (50, super::video::VideoQuality::Lossless, false);
     app.pace = super::flight::Pace::Fast;
     app.go_to_point_of_interest(0);
     app.skip_flight();
@@ -1952,4 +1952,31 @@ fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_fi
     }
     wait_for_job(&mut app);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+#[ignore = "timing, run by hand"]
+fn video_render_time_with_frames_at_once() {
+    for at_once in [1, 2, 3] {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        if app.gpu.is_none() {
+            app.gpu = rendering::gpu::GpuIterator::new().ok().map(std::sync::Arc::new);
+        }
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (1920, 1080, 4, 30);
+        (app.pace, app.video_frames_at_once, app.use_gpu) = (super::flight::Pace::Fast, at_once, true);
+        app.go_to_point_of_interest(0);
+        app.skip_flight();
+        wait_for_job(&mut app);
+        let started = std::time::Instant::now();
+        app.start_video();
+        let ctx = egui::Context::default();
+        while app.video_job.is_some() {
+            app.poll_video(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        println!("{at_once} at once: {:.2} s, {}", started.elapsed().as_secs_f64(), app.log.last().unwrap());
+        let _ = std::fs::remove_dir_all(folder);
+    }
 }

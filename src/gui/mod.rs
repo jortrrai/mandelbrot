@@ -176,8 +176,11 @@ pub struct MandelbrotApp {
     video_fps: u32,
     /// The speed of a video in percent of the flight's, its file format, and whether its frames are also written as PNG files, see `video`
     video_speed: u16,
-    video_format: video::VideoFormat,
+    video_quality: video::VideoQuality,
+    video_playback: video::Playback,
     video_pngs: bool,
+    /// How many frames of a video render at once, see `video`
+    video_frames_at_once: usize,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
@@ -330,8 +333,10 @@ impl MandelbrotApp {
             video_job: None,
             video_fps: 30,
             video_speed: 100,
-            video_format: video::VideoFormat::HighQuality,
-            video_pngs: true,
+            video_quality: video::VideoQuality::VeryHigh,
+            video_playback: video::Playback::Computers,
+            video_pngs: false,
+            video_frames_at_once: 2,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
