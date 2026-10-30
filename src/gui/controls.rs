@@ -4,7 +4,7 @@
 use eframe::egui::{self};
 
 use super::flight::{FlightRendering, Pace};
-use crate::mandelbrot_set::{MIN_DIVIDE, PALETTE_LENGTH};
+use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
 use crate::resolution;
@@ -305,14 +305,18 @@ impl MandelbrotApp {
         });
         //The color cycle (see `ColorCycle`): how the iteration counts map onto the palette, the same with a manual and an automatic limit
         let before = self.m.palette;
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(!self.m.palette.stretch, |ui| {
+        ui.add_enabled_ui(!self.m.palette.stretch, |ui| {
+            ui.horizontal(|ui| {
                 ui.label("Iteration divide:");
-                ui.add(egui::DragValue::new(&mut self.m.palette.divide).range(MIN_DIVIDE..=100_000.0).speed(0.05).max_decimals(3))
-                    .on_hover_text("How many iterations one step of the palette takes: 1 changes the colors fastest; more gives broader, calmer bands. Deep views, whose iteration counts are high and far apart, often look best with more. A point keeps its color however far you zoom and whatever the iteration limit.");
+                //Logarithmic: 0.1, 1, 10, 100 and 1000 are equally far apart; the number next to it can be typed
+                ui.add(egui::Slider::new(&mut self.m.palette.divide, MIN_DIVIDE..=MAX_DIVIDE).logarithmic(true).max_decimals(3))
+                    .on_hover_text("How many iterations one step of the palette takes (0.1 to 1000; type a value in the box): below 1 the colors change several times per iteration, more gives broader, calmer bands. Deep views, whose iteration counts are high and far apart, often look best with more. A point keeps its color however far you zoom and whatever the iteration limit.");
+            });
+            ui.horizontal(|ui| {
                 ui.label("Offset:");
-                ui.add(egui::DragValue::new(&mut self.m.palette.offset).range(0.0..=PALETTE_LENGTH).speed(1.0).max_decimals(0))
-                    .on_hover_text("Where the palette starts, in steps (0 to 500): shifts every color along the palette");
+                //(To 499: 500 steps are the whole palette, the same colors as 0)
+                ui.add(egui::Slider::new(&mut self.m.palette.offset, 0.0..=PALETTE_LENGTH - 1.0).step_by(1.0).max_decimals(0))
+                    .on_hover_text("Where the palette starts, in steps (0 to 499 of 500): shifts every color along the palette; the colors change at once while you drag");
             });
         });
         ui.checkbox(&mut self.m.palette.stretch, "Stretch the palette over the limit")
