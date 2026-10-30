@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::flight::{FlightRendering, Pace};
+use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS};
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
@@ -40,6 +40,8 @@ pub(super) struct Settings {
     restore_appearance: Option<bool>,
     show_points: Option<bool>,
     pace: Option<String>,
+    route: Option<String>,
+    constant_speed: Option<f64>,
     flight_rendering: Option<String>,
     flight_resolution: Option<u16>,
     immersion: Option<bool>,
@@ -106,6 +108,8 @@ impl MandelbrotApp {
             restore_appearance: Some(self.restore_appearance),
             show_points: Some(self.show_points),
             pace: Some(self.pace.name().to_string()),
+            route: Some(self.route.name().to_string()),
+            constant_speed: Some(self.constant_speed),
             flight_rendering: Some(rendering.to_string()),
             flight_resolution: percent,
             immersion: Some(self.immersion),
@@ -166,6 +170,12 @@ impl MandelbrotApp {
         set(settings.show_points, &mut self.show_points);
         if let Some(pace) = settings.pace.as_deref().and_then(|name| Pace::ALL.into_iter().find(|pace| pace.name() == name)) {
             self.pace = pace;
+        }
+        if let Some(route) = settings.route.as_deref().and_then(|name| Route::ALL.into_iter().find(|route| route.name() == name)) {
+            self.route = route;
+        }
+        if let Some(speed) = settings.constant_speed.filter(|speed| CONSTANT_SPEEDS.contains(speed)) {
+            self.constant_speed = speed;
         }
         if let Some(rendering) = settings.flight_rendering.as_deref().and_then(|key| rendering_of(key, settings.flight_resolution)) {
             self.flight_rendering = rendering;

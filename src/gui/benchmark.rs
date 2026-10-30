@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use super::flight::{FlightRendering, Pace};
+use super::flight::{FlightRendering, Pace, Route};
 use super::MandelbrotApp;
 use crate::complex_plane::View;
 
@@ -24,6 +24,7 @@ pub(super) const FOLDER: &str = "benchmarks";
 /// The settings the tour changes, to restore them afterwards
 struct Saved {
     pace: Pace,
+    route: Route,
     flight_rendering: FlightRendering,
     auto_iterations: bool,
     view: View,
@@ -110,8 +111,8 @@ impl MandelbrotApp {
             self.log("Benchmark: no places to fly to");
             return;
         }
-        let saved = Saved { pace: self.pace, flight_rendering: self.flight_rendering, auto_iterations: self.auto_iterations, view: self.c.get_view() };
-        (self.pace, self.flight_rendering, self.auto_iterations) = (Pace::Cinematic, FlightRendering::LowRes, true);
+        let saved = Saved { pace: self.pace, route: self.route, flight_rendering: self.flight_rendering, auto_iterations: self.auto_iterations, view: self.c.get_view() };
+        (self.pace, self.route, self.flight_rendering, self.auto_iterations) = (Pace::Cinematic, Route::Shortest, FlightRendering::LowRes, true);
         self.log(format!("Benchmark: a tour of {} places, warming up at the reset view", scenes.len()));
         self.benchmark = Some(Benchmark { saved, scenes, phase: Phase::WarmUp, frames: (Vec::new(), Instant::now(), Duration::ZERO), results: Vec::new() });
         self.c.set_view(&View::new(-0.75, 0.0, 1.0));
@@ -121,7 +122,7 @@ impl MandelbrotApp {
     /// Ends the tour (finished or stopped) and restores the settings it changed
     pub(super) fn stop_benchmark(&mut self, finished: bool) {
         let Some(run) = self.benchmark.take() else { return };
-        (self.pace, self.flight_rendering, self.auto_iterations) = (run.saved.pace, run.saved.flight_rendering, run.saved.auto_iterations);
+        (self.pace, self.route, self.flight_rendering, self.auto_iterations) = (run.saved.pace, run.saved.route, run.saved.flight_rendering, run.saved.auto_iterations);
         if finished {
             self.report_benchmark(&run.results);
             self.benchmark_results = run.results;

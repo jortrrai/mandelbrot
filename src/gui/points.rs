@@ -12,7 +12,7 @@ use crate::complex_plane::{ComplexPlane, View};
 use crate::pixel_buffer::PixelBuffer;
 use crate::points_of_interest::{self, Coloring, PointOfInterest};
 use crate::thumbnails::{self, ThumbnailRequest};
-use super::flight::{Camera, Flight, Pace};
+use super::flight::{Camera, Flight, Pace, Route};
 use super::{MandelbrotApp, Readiness, COLORING_FUNCTIONS};
 
 /// The most a flight that waits for its frames moves on after a frame, in flight time: two frames at 60 Hz (see `flight_job`)
@@ -362,8 +362,9 @@ impl MandelbrotApp {
             self.arrive_at(&point);
             return;
         }
-        let flight = Flight::new(from, to, self.pace);
-        self.log(format!("Flying to {} ({}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
+        let flight = Flight::with(from, to, self.pace, self.route, self.constant_speed);
+        let route = if self.route == Route::Shortest { String::new() } else { format!(", {} route", self.route.name().to_lowercase()) };
+        self.log(format!("Flying to {} ({}{route}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| self.flight_limits(to));
         let now = Instant::now();
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now });
