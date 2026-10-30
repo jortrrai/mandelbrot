@@ -207,6 +207,8 @@ impl MandelbrotSet {
             }
         }
         let (mut zx, mut zy) = ([0.0_f64; LANES], [0.0_f64; LANES]);
+        //The squares of z from the escape check of the step before: the squares the next step needs (the same numbers, 3 multiplications a step instead of 6)
+        let (mut x2, mut y2) = ([0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut captured, mut escape_x, mut escape_y) = ([false; LANES], [0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut saved_x, mut saved_y) = ([0.0_f64; LANES], [0.0_f64; LANES]);
         let (mut blocks_since_saved, mut blocks_until_save) = (0_u32, 1_u32);
@@ -218,11 +220,12 @@ impl MandelbrotSet {
             //Only check whether any point is left every few steps; points that already stopped do not count anymore
             for _ in 0..CHECK_INTERVAL.min(self.max_iterations - step) {
                 for lane in 0..LANES {
-                    //Same arithmetic as z = z.squared().add(c)
-                    let new_x = zx[lane] * zx[lane] - zy[lane] * zy[lane] + cx[lane];
-                    let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
+                    //Same arithmetic as z = z.squared().add(c), with the squares of the step before and 2 * zx as zx + zx (exact either way)
+                    let new_x = x2[lane] - y2[lane] + cx[lane];
+                    let new_y = (zx[lane] + zx[lane]) * zy[lane] + cy[lane];
                     (zx[lane], zy[lane]) = (new_x, new_y);
-                    let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
+                    (x2[lane], y2[lane]) = (new_x * new_x, new_y * new_y);
+                    let escaped = (x2[lane] + y2[lane]) > orbit_radius_squared;
                     active[lane] &= !escaped;
                     iterations[lane] += u32::from(active[lane]);
                 }
@@ -267,8 +270,9 @@ impl MandelbrotSet {
         #[cfg(target_arch = "x86_64")]
         {
             if std::arch::is_x86_feature_detected!("avx2") {
-                //SAFETY: the CPU supports AVX2, which was just detected
-                return unsafe { avx2::positions(self, points, out, cancel) };
+                let wide = std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512vl");
+                //SAFETY: the CPU supports AVX2, and AVX-512 if `wide`, which was just detected
+                return unsafe { avx2::positions(self, points, out, cancel, wide) };
             }
         }
         self.positions_generic(points, out, cancel)
@@ -288,6 +292,8 @@ impl MandelbrotSet {
         let orbit_radius_squared = self.orbit_radius * self.orbit_radius;
         let (mut cx, mut cy, mut zx, mut zy) = ([0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES]);
         let (mut saved_x, mut saved_y) = ([0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES]);
+        //The squares of z from the escape check of the step before (see `iterate_lanes_smooth_generic`)
+        let (mut x2, mut y2) = ([0.0_f64; STREAM_LANES], [0.0_f64; STREAM_LANES]);
         let (mut iterations, mut active) = ([0_u32; STREAM_LANES], [false; STREAM_LANES]);
         //The blocks of steps every lane has done
         let mut blocks = [0_u32; STREAM_LANES];
@@ -313,6 +319,7 @@ impl MandelbrotSet {
         for lane in 0..STREAM_LANES {
             if load(lane, &mut next, &mut index, &mut cx, &mut cy, out) {
                 (zx[lane], zy[lane], saved_x[lane], saved_y[lane], iterations[lane], active[lane], blocks[lane]) = (0.0, 0.0, 0.0, 0.0, 0, true, 0);
+                (x2[lane], y2[lane]) = (0.0, 0.0);
                 live += 1;
             }
         }
@@ -323,11 +330,12 @@ impl MandelbrotSet {
             }
             for _ in 0..CHECK_INTERVAL {
                 for lane in 0..STREAM_LANES {
-                    //Same arithmetic as z = z.squared().add(c)
-                    let new_x = zx[lane] * zx[lane] - zy[lane] * zy[lane] + cx[lane];
-                    let new_y = 2.0 * zx[lane] * zy[lane] + cy[lane];
+                    //Same arithmetic as z = z.squared().add(c), with the squares of the step before and 2 * zx as zx + zx (exact either way)
+                    let new_x = x2[lane] - y2[lane] + cx[lane];
+                    let new_y = (zx[lane] + zx[lane]) * zy[lane] + cy[lane];
                     (zx[lane], zy[lane]) = (new_x, new_y);
-                    let escaped = (new_x * new_x + new_y * new_y) > orbit_radius_squared;
+                    (x2[lane], y2[lane]) = (new_x * new_x, new_y * new_y);
+                    let escaped = (x2[lane] + y2[lane]) > orbit_radius_squared;
                     active[lane] &= !escaped;
                     iterations[lane] += u32::from(active[lane]);
                 }
@@ -362,6 +370,7 @@ impl MandelbrotSet {
                 };
                 if load(lane, &mut next, &mut index, &mut cx, &mut cy, out) {
                     (zx[lane], zy[lane], saved_x[lane], saved_y[lane], iterations[lane], active[lane], blocks[lane]) = (0.0, 0.0, 0.0, 0.0, 0, true, 0);
+                (x2[lane], y2[lane]) = (0.0, 0.0);
                 } else {
                     (zx[lane], zy[lane], active[lane]) = (0.0, 0.0, false);
                     live -= 1;
@@ -577,13 +586,25 @@ mod tests {
                         let expected: Vec<u64> = points.chunks(LANES)
                             .flat_map(|group| <&[Complex; LANES]>::try_from(group).map_or_else(|_| group.iter().map(|c| m.position(c)).collect(), |group| m.position_lanes(group).to_vec()))
                             .map(f64::to_bits).collect();
-                        //The AVX2 loop where the CPU has it, and the generic loop
-                        for generic in [false, true] {
+                        //The AVX2 loop with 2 and (with AVX-512) 3 vectors where the CPU has them, and the generic loop
+                        for way in ["avx2", "wide", "generic"] {
+                            #[cfg(target_arch = "x86_64")]
+                            let (avx2, wide) = (std::arch::is_x86_feature_detected!("avx2"), std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512vl"));
+                            #[cfg(not(target_arch = "x86_64"))]
+                            let (avx2, wide) = (false, false);
                             let mut out = vec![f64::NAN; points.len()];
-                            let done = if generic { m.positions_generic(&points, &mut out, None) } else { m.positions(&points, &mut out, None) };
+                            let done = match way {
+                                //SAFETY: the CPU has the instructions, which was just detected
+                                #[cfg(target_arch = "x86_64")]
+                                "avx2" if avx2 => unsafe { avx2::positions(&m, &points, &mut out, None, false) },
+                                #[cfg(target_arch = "x86_64")]
+                                "wide" if wide => unsafe { avx2::positions(&m, &points, &mut out, None, true) },
+                                "generic" => m.positions_generic(&points, &mut out, None),
+                                _ => continue,
+                            };
                             assert_eq!(done, points.len());
                             let differ = out.iter().zip(&expected).position(|(a, b)| a.to_bits() != *b);
-                            assert!(differ.is_none(), "generic = {generic}, max_iterations = {max_iterations}, orbit_radius = {orbit_radius}, smooth = {smooth}, point {:?}: {} instead of {}",
+                            assert!(differ.is_none(), "{way}, max_iterations = {max_iterations}, orbit_radius = {orbit_radius}, smooth = {smooth}, point {:?}: {} instead of {}",
                                 differ.map(|at| (points[at].x, points[at].y)), differ.map_or(0.0, |at| out[at]), differ.map_or(0.0, |at| f64::from_bits(expected[at])));
                         }
                     }

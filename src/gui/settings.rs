@@ -196,6 +196,9 @@ impl MandelbrotApp {
     /// Writes the settings when they changed (every frame of the window, see `SAVE_AFTER`)
     pub(super) fn keep_settings(&mut self, now: Instant) {
         let Some(path) = self.settings_path.clone() else { return };
+        if self.benchmark.is_some() {
+            return; //A benchmark tour changes the pace and the rendering for a while, see `benchmark`: those are not the user's settings
+        }
         let settings = self.settings();
         if self.settings_saved.as_ref() == Some(&settings) {
             self.settings_changed = None;

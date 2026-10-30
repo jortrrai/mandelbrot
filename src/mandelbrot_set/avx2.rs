@@ -36,11 +36,11 @@ const LANE_MASKS: [[i64; 4]; 16] = {
     masks
 };
 
-/// `MandelbrotSet::positions` with AVX2, see the module
+/// `MandelbrotSet::positions` with AVX2, see the module; with `wide` the refilling loop steps 3 vectors instead of 2 (see `refill_wide`)
 /// # Safety
-/// The CPU must support AVX2
+/// The CPU must support AVX2, and with `wide` AVX-512F and AVX-512VL
 #[target_feature(enable = "avx2")]
-pub(super) unsafe fn positions(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+pub(super) unsafe fn positions(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>, wide: bool) -> usize {
     let cancelled = || cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed));
     let (groups, _) = points.as_chunks::<LANES>();
     let mut start = 0;
@@ -55,22 +55,44 @@ pub(super) unsafe fn positions(m: &MandelbrotSet, points: &[Complex], out: &mut 
             break;
         }
     }
-    //SAFETY: the caller's CPU supports AVX2
-    start + unsafe { refill(m, &points[start..], &mut out[start..], cancel) }
+    //SAFETY: the caller's CPU supports AVX2, and AVX-512 with `wide`
+    start + unsafe { if wide { refill_wide(m, &points[start..], &mut out[start..], cancel) } else { refill_avx2(m, &points[start..], &mut out[start..], cancel) } }
 }
 
-/// The vectors of four lanes that the refilling loop steps together: independent of each other, so the CPU works on one while it waits for the result of the other
-/// (measured on Seahorse Valley at 1x: 103 ms with one vector, 94 ms with two, 90 ms with three, which needs more than the 16 AVX2 registers)
-const VECTORS: usize = 2;
+/// The most vectors of four lanes that `refill` steps together, see `refill_avx2` and `refill_wide`
+const MAX_VECTORS: usize = 3;
 
-/// The refilling loop over all of `points`; returns how many points from the start have their position, like `MandelbrotSet::positions`
+/// The refilling loop with 2 vectors of four lanes, stepped together: independent of each other, so the CPU works on one while it waits for the result of the
+/// other (measured on Seahorse Valley at 1x: 103 ms with one vector, 94 ms with two; three need more than the 16 AVX2 registers, see `refill_wide`)
 /// # Safety
 /// The CPU must support AVX2
 #[target_feature(enable = "avx2")]
-#[allow(clippy::float_cmp, clippy::too_many_lines, clippy::cast_ptr_alignment)] // The cycle certificate compares floats exactly; one loop with its lane bookkeeping; unaligned loads and stores
-unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+unsafe fn refill_avx2(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+    //SAFETY: the caller's CPU supports AVX2
+    unsafe { refill::<2>(m, points, out, cancel) }
+}
+
+/// The refilling loop with 3 vectors, for a CPU with AVX-512: the same AVX2 instructions, but with its 32 vector registers the third vector fits without spilling
+/// (measured on Seahorse Valley at 1x on a Ryzen 7 7800X3D: 83 ms instead of 92 ms with 2 vectors; 4 vectors took 86 ms). The same positions, bit for bit
+/// # Safety
+/// The CPU must support AVX2, AVX-512F and AVX-512VL
+#[target_feature(enable = "avx2,avx512f,avx512vl")]
+unsafe fn refill_wide(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
+    //SAFETY: the caller's CPU supports AVX2 and AVX-512
+    unsafe { refill::<3>(m, points, out, cancel) }
+}
+
+/// The refilling loop over all of `points` with `VECTORS` vectors of four lanes (at most `MAX_VECTORS`); returns how many points from the start have their
+/// position, like `MandelbrotSet::positions`. Always inlined, into `refill_avx2` and `refill_wide`, which compile it with their instructions
+/// # Safety
+/// The CPU must support AVX2
+#[inline(always)]
+#[allow(clippy::float_cmp, clippy::too_many_lines, clippy::cast_ptr_alignment, clippy::inline_always)] // The cycle certificate compares floats exactly; one loop with its lane bookkeeping; unaligned loads and stores; inlined into the copies with their instructions
+unsafe fn refill<const VECTORS: usize>(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
     const IDLE: usize = usize::MAX;
-    const LANES_IN_ALL: usize = 4 * VECTORS;
+    //The lanes of the arrays below that are used (the arrays have room for `MAX_VECTORS` vectors)
+    const LANES_IN_ALL: usize = 4 * MAX_VECTORS;
+    let lanes_used = 4 * VECTORS;
     let max = m.max_iterations;
     let last_whole = max - max % CHECK_INTERVAL;
     if last_whole == 0 {
@@ -80,7 +102,7 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
         }
         return points.len();
     }
-    let (radius_squared, two, one) = (_mm256_set1_pd(m.orbit_radius * m.orbit_radius), _mm256_set1_pd(2.0), _mm256_set1_epi64x(1));
+    let (radius_squared, one) = (_mm256_set1_pd(m.orbit_radius * m.orbit_radius), _mm256_set1_epi64x(1));
     //A lane with more blocks than this has no whole block left before `max_iterations`
     let last_block = _mm256_set1_epi64x(i64::from(last_whole / CHECK_INTERVAL) - 1);
     let all = _mm256_castsi256_pd(_mm256_set1_epi64x(-1));
@@ -103,7 +125,7 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
         None
     };
     let mut lanes_live = 0;
-    for lane in 0..LANES_IN_ALL {
+    for lane in 0..lanes_used {
         if let Some((at, x, y)) = take(&mut next, out) {
             (index[lane], cx[lane], cy[lane], live[lane]) = (at, x, y, -1);
             lanes_live += 1;
@@ -115,6 +137,8 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
     let (mut vcx, mut vcy) = (std::array::from_fn::<_, VECTORS, _>(|v| load(&cx, v)), std::array::from_fn::<_, VECTORS, _>(|v| load(&cy, v)));
     let (mut vzx, mut vzy) = (std::array::from_fn::<_, VECTORS, _>(|v| load(&zx, v)), std::array::from_fn::<_, VECTORS, _>(|v| load(&zy, v)));
     let (mut vsx, mut vsy) = (vzx, vzy);
+    //The squares of z, kept from the escape check of the step before: they are the squares the next step needs, so every step multiplies 3 times instead of 6
+    let (mut vx2, mut vy2) = (std::array::from_fn::<_, VECTORS, _>(|v| _mm256_mul_pd(vzx[v], vzx[v])), std::array::from_fn::<_, VECTORS, _>(|v| _mm256_mul_pd(vzy[v], vzy[v])));
     let (mut vit, mut vblocks) = (std::array::from_fn::<_, VECTORS, _>(|v| load_integers(&iterations, v)), std::array::from_fn::<_, VECTORS, _>(|v| load_integers(&blocks, v)));
     let mut vlive = std::array::from_fn::<_, VECTORS, _>(|v| _mm256_castsi256_pd(load_integers(&live, v)));
     let mut vactive = vlive;
@@ -125,11 +149,13 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
         }
         for _ in 0..CHECK_INTERVAL {
             for v in 0..VECTORS {
-                //Same arithmetic as z = z.squared().add(c): (zx * zx - zy * zy) + cx and (2 * zx) * zy + cy
-                let new_x = _mm256_add_pd(_mm256_sub_pd(_mm256_mul_pd(vzx[v], vzx[v]), _mm256_mul_pd(vzy[v], vzy[v])), vcx[v]);
-                let new_y = _mm256_add_pd(_mm256_mul_pd(_mm256_mul_pd(two, vzx[v]), vzy[v]), vcy[v]);
+                //Same arithmetic as z = z.squared().add(c): (zx * zx - zy * zy) + cx and (2 * zx) * zy + cy, with the squares of the step before (the same numbers),
+                //and 2 * zx as zx + zx (exact either way)
+                let new_x = _mm256_add_pd(_mm256_sub_pd(vx2[v], vy2[v]), vcx[v]);
+                let new_y = _mm256_add_pd(_mm256_mul_pd(_mm256_add_pd(vzx[v], vzx[v]), vzy[v]), vcy[v]);
                 (vzx[v], vzy[v]) = (new_x, new_y);
-                let escaped = _mm256_cmp_pd::<_CMP_GT_OQ>(_mm256_add_pd(_mm256_mul_pd(new_x, new_x), _mm256_mul_pd(new_y, new_y)), radius_squared);
+                (vx2[v], vy2[v]) = (_mm256_mul_pd(new_x, new_x), _mm256_mul_pd(new_y, new_y));
+                let escaped = _mm256_cmp_pd::<_CMP_GT_OQ>(_mm256_add_pd(vx2[v], vy2[v]), radius_squared);
                 vactive[v] = _mm256_andnot_pd(escaped, vactive[v]);
                 vit[v] = _mm256_sub_epi64(vit[v], _mm256_castpd_si256(vactive[v])); //An active lane is all ones: -1
             }
@@ -187,6 +213,7 @@ unsafe fn refill(m: &MandelbrotSet, points: &[Complex], out: &mut [f64], cancel:
             let finished = _mm256_castsi256_pd(integer_vector(&LANE_MASKS[((done >> (4 * v)) & 0xF) as usize]));
             (vcx[v], vcy[v]) = (load(&cx, v), load(&cy, v));
             (vzx[v], vzy[v], vsx[v], vsy[v]) = (_mm256_andnot_pd(finished, vzx[v]), _mm256_andnot_pd(finished, vzy[v]), _mm256_andnot_pd(finished, vsx[v]), _mm256_andnot_pd(finished, vsy[v]));
+            (vx2[v], vy2[v]) = (_mm256_andnot_pd(finished, vx2[v]), _mm256_andnot_pd(finished, vy2[v])); //z = 0, so its squares are 0
             vit[v] = _mm256_castpd_si256(_mm256_andnot_pd(finished, _mm256_castsi256_pd(vit[v])));
             vblocks[v] = _mm256_castpd_si256(_mm256_andnot_pd(finished, _mm256_castsi256_pd(vblocks[v])));
             //A lane that got a point is live and active; one that did not is neither

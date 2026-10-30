@@ -12,6 +12,7 @@
 //! * `status`: the current view, the status log and the progress bar.
 
 mod actions;
+mod benchmark;
 mod blur;
 mod controls;
 mod fit;
@@ -153,6 +154,10 @@ pub struct MandelbrotApp {
     settings_defaults: settings::Settings,
     settings_saved: Option<settings::Settings>,
     settings_changed: Option<std::time::Instant>,
+    /// The benchmark tour under way, and the results of the last one, see `benchmark`
+    benchmark: Option<benchmark::Benchmark>,
+    benchmark_results: Vec<benchmark::SceneResult>,
+    benchmark_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
     /// Whether the running job renders the frames of the flight (see `flight_job`), and the time between two frames of the screen, which the job keeps to
     flight_job: bool,
@@ -212,12 +217,13 @@ pub struct MandelbrotApp {
     use_gpu: bool,
     /// Whether the GPU uses its fast double-float loop (on by default): faster, not bit for bit the CPU's, see `rendering::Render::fast_gpu`. Saved images are always exact
     fast_gpu: bool,
-    /// Whether nothing deeper than the fast GPU math is rendered (off by default), see `zoom_refused` and `keep_within_zoom_limit`
+    /// Whether nothing deeper than the fast GPU math is rendered (on by default: deeper views are left to the CPU and are slow), see `zoom_refused` and `keep_within_zoom_limit`
     limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
 }
 
 impl MandelbrotApp {
+    #[allow(clippy::too_many_lines)] // The initial value of every field
     pub(super) fn new(config: &Config) -> MandelbrotApp {
         let c = ComplexPlane::new(config.window_width, config.window_height);
         let shown_plane = c.clone();
@@ -268,6 +274,9 @@ impl MandelbrotApp {
             settings_defaults: settings::Settings::default(),
             settings_saved: None,
             settings_changed: None,
+            benchmark: None,
+            benchmark_results: Vec::new(),
+            benchmark_folder: std::path::PathBuf::from(benchmark::FOLDER),
             flight: None,
             flight_job: false,
             frame_interval: Duration::from_secs_f64(1.0 / 60.0),
@@ -300,7 +309,7 @@ impl MandelbrotApp {
             gpu: None,
             use_gpu: true,
             fast_gpu: true,
-            limit_zoom: false,
+            limit_zoom: true,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
                 let (sender, receiver) = mpsc::channel();
@@ -322,11 +331,16 @@ impl MandelbrotApp {
     }
 
     /// Adds a message to the status box, and prints it to the terminal for developers
+    /// Whether `zoomed` is deeper than the zoom limit allows (without the warning of `zoom_refused`)
+    pub(super) fn zoom_limited(&self, zoomed: &ComplexPlane) -> bool {
+        let limited = self.limit_zoom && self.fast_gpu && self.use_gpu && (self.gpu.is_some() || self.gpu_opening.is_some());
+        limited && zoomed.precision_steps() < rendering::FAST_GPU_STEPS
+    }
+
     /// Whether zooming in to `zoomed` is refused because the zoom is limited to the views of the fast GPU math (`limit_zoom`, with the fast GPU math on, and a GPU
     /// that is open or still opening); then the warning is logged, once for a row of refused zooms
     pub(super) fn zoom_refused(&mut self, zoomed: &ComplexPlane) -> bool {
-        let limited = self.limit_zoom && self.fast_gpu && self.use_gpu && (self.gpu.is_some() || self.gpu_opening.is_some());
-        if !limited || zoomed.precision_steps() >= rendering::FAST_GPU_STEPS {
+        if !self.zoom_limited(zoomed) {
             return false;
         }
         if self.log.last().map(String::as_str) != Some(ZOOM_LIMIT_TEXT) {
@@ -524,6 +538,7 @@ impl eframe::App for MandelbrotApp {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| fit_area = self.image_ui(ui));
         self.fly(&ctx);
         self.keep_settings(std::time::Instant::now());
+        self.step_benchmark(&ctx);
         self.settle_gesture(&ctx);
         self.fit_to_window(&ctx, fit_area);
     }
