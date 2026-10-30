@@ -273,6 +273,9 @@ impl MandelbrotApp {
                         self.render("Zoomed out to the zoom limit");
                     }
                 });
+                ui.indent("f32_frames", |ui| {
+                    ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.f32_frames, "Faster moving frames (f32)")).on_hover_text("Frames of flights and drags at shallow zoom (wider than a scale of about 0.01 at 4K) are computed by the GPU in plain 32-bit numbers: several times as fast as the fast GPU math, but in chaotic parts of the set more pixels get other colors while the view moves. The image you stop at is always rendered with the fast or exact math. On by default.");
+                });
             }
             None => {
                 let text = if self.gpu_opening.is_some() { "Opening the GPU..." } else { "No GPU (see the status log)" };
