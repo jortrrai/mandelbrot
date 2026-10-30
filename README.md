@@ -46,7 +46,7 @@ The program has no command-line arguments: the window starts with the defaults (
 The terminal is only for developers: everything you need is in the window.
 
 ## The window
-The fractal is on the left. On the right, from top to bottom, are the controls, the current view and the status.
+The fractal is on the left. On the right, from top to bottom, are the controls, the current view and the status. The controls are in sections with a title that opens and closes them: *Navigation*, *Places* and *Image quality* are open at first; *Colors*, *Flights*, *Performance* (the GPU options, the neighborhood, immersion), *Save image and video* and *Benchmark* open with a click. The progress of a flight or a video stays at the top, whichever sections are open.
 
 **Controls**
 - **Move**: the arrow buttons move the view by the *Move step* in pixels; only the newly exposed strip is rendered.

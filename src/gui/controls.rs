@@ -23,25 +23,149 @@ impl MandelbrotApp {
                 self.reset_settings();
             }
         });
-        self.move_controls(ui);
-
-        ui.separator();
-        self.zoom_controls(ui);
-
-        ui.separator();
-        self.places_controls(ui);
-
-        ui.separator();
-        self.render_settings_controls(ui);
-
-        ui.separator();
-        self.color_controls(ui);
-
-        ui.separator();
-        self.save_controls(ui);
+        //What runs (a flight, a video) is always in sight, whichever sections are open
+        self.progress_controls(ui);
+        self.video_progress_ui(ui);
+        //The sections: the ones used most are open at first; a click on a title opens or closes it
+        self.section(ui, "Navigation", true, |app, ui| {
+            app.move_controls(ui);
+            ui.separator();
+            app.zoom_controls(ui);
+            app.go_to_view_controls(ui);
+        });
+        self.section(ui, "Places", true, Self::places_controls);
+        self.section(ui, "Image quality", true, Self::quality_controls);
+        self.section(ui, "Colors", false, Self::color_controls);
+        self.section(ui, "Flights", false, Self::flight_controls);
+        self.section(ui, "Performance", false, Self::performance_controls);
+        self.section(ui, "Save image and video", false, |app, ui| {
+            app.save_controls(ui);
+            ui.separator();
+            app.video_ui(ui);
+        });
+        self.section(ui, "Benchmark", false, Self::benchmark_ui);
 
         ui.separator();
         ui.label("Click the fractal to see a point's coordinates, right-click to center the view on it.");
+    }
+
+    /// A section of the controls with a title that opens and closes it (`open`: open at first; every section is open in the tests, which read the controls)
+    fn section(&mut self, ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut Self, &mut egui::Ui)) {
+        egui::CollapsingHeader::new(egui::RichText::new(title).strong().size(16.0)).id_salt(title).default_open(open || cfg!(test)).show(ui, |ui| add(self, ui));
+    }
+
+    /// The progress of a flight, with its buttons to stop it or to be there at once
+    fn progress_controls(&mut self, ui: &mut egui::Ui) {
+        if let Some(flight) = &self.flight {
+            //The progress along the path, and the buttons to stop the flight or to be there at once
+            let share = flight.flight.share_of_path(flight.elapsed) as f32;
+            let resolution = if matches!(self.flight_rendering, FlightRendering::Auto(_)) { format!(", {:.0}% resolution", self.shown_scaled.map_or(100.0 / self.preview_block as f64, |(columns, _)| 100.0 * columns as f64 / self.p.pixel_plane.width as f64)) } else { String::new() };
+            let text = format!("To {}: {:.0}% of the way, {} FPS{resolution}", flight.point.name, share * 100.0, flight.fps_shown);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
+                    self.cancel_flight();
+                } else if ui.button("Skip").on_hover_text("Goes to the place at once").clicked() {
+                    self.skip_flight();
+                }
+            });
+            ui.add(egui::ProgressBar::new(share).text(text));
+        }
+    }
+
+    /// Going to a view by its center and scale
+    fn go_to_view_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for (input, hint) in self.view_inputs.iter_mut().zip(["x", "y", "scale"]) {
+                ui.add(egui::TextEdit::singleline(input).hint_text(hint).desired_width(80.0));
+            }
+            if ui.button("Go").clicked() {
+                self.go_to_view();
+            }
+        });
+    }
+
+    /// How flights fly: the pace, the route and the rendering of their frames, frames ahead, and blending and blurring their frames
+    fn flight_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Flight:");
+            egui::ComboBox::from_id_salt("flight_pace").selected_text(self.pace.name()).show_ui(ui, |ui| {
+                for pace in Pace::ALL {
+                    let response = ui.selectable_value(&mut self.pace, pace, pace.name());
+                    if pace == Pace::NoFlight {
+                        response.on_hover_text("Clicking a place shows it at once, without flying there");
+                    }
+                }
+            }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest: Fast, Normal and Cinematic start and end softly; Constant keeps one speed all the way, set by the slider; using any control or the mouse stops a flight");
+            if self.pace == Pace::Constant {
+                ui.add(egui::Slider::new(&mut self.constant_speed, CONSTANT_SPEEDS).logarithmic(true).max_decimals(2).suffix(" ×2/s")).on_hover_text("The speed of the constant pace, in doublings of the zoom per second (the pan moves as many views): the same speed from the start to the place");
+            }
+            egui::ComboBox::from_id_salt("flight_route").selected_text(self.route.name()).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.route, Route::Shortest, Route::Shortest.name()).on_hover_text("Zooms out to travel, only as far as the distance needs, and in again: the shortest way for the eye");
+                ui.selectable_value(&mut self.route, Route::Straight, Route::Straight.name()).on_hover_text("A straight line: the zoom changes steadily from one view to the other, never zooming out on the way. Between two far-apart places at a deep zoom the picture rushes by");
+            }).response.on_hover_text("The route of a flight");
+            egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
+                for mode in FlightRendering::ALL {
+                    ui.selectable_value(&mut self.flight_rendering, mode, mode.entry()).on_hover_text(match mode {
+                        FlightRendering::BestEffort => "The camera follows the clock; the picture fills in as the render goes",
+                        FlightRendering::LowRes => "The camera waits for a complete low-resolution frame of every view on the way",
+                        FlightRendering::Resolution(100) => "The camera waits for a full-resolution frame of every view on the way: sharp, but it can crawl where the view is slow",
+                        FlightRendering::Resolution(_) => "The camera waits for a frame of this resolution (blocks of 4 x 4 or 2 x 2 pixels): cleaner than Low res, faster than full resolution",
+                        FlightRendering::SuperSampled => "Every view on the way is rendered with all its supersampling layers, and the camera waits for the finished frame: the best picture, the slowest crawl",
+                        FlightRendering::Auto(_) => "The resolution of every frame is chosen to keep the frame rate next to it: full resolution where the view is fast, coarser where it is slow",
+                    });
+                }
+            }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
+            if let FlightRendering::Auto(fps) = &mut self.flight_rendering {
+                ui.add(egui::DragValue::new(fps).range(1..=240).suffix(" FPS")).on_hover_text("The frame rate that Auto keeps (type a value): every frame of a flight gets the finest resolution that the frames so far say fits, from full resolution down to blocks of 8 x 8 pixels; the screen shows no more frames than it refreshes");
+            }
+            if let FlightRendering::Resolution(percent) = &mut self.flight_rendering {
+                ui.add(egui::DragValue::new(percent).range(1..=800).suffix("%")).on_hover_text("The resolution of the frames of a flight, in percent of the pixels across (type a value): below 100 the camera waits for blocks of 100 / percent pixels (33%: 3 x 3), 100 is full resolution, above 100 it waits for supersampling layers ((percent / 100)²: 200% is 4 samples per pixel, up to the quality setting)");
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Frames ahead:");
+            ui.add(egui::DragValue::new(&mut self.frames_ahead).range(0..=3)).on_hover_text("How many frames of a flight are rendered ahead of the one on the screen, so the CPU and the GPU never wait for the screen (0: one frame at a time, as before). For flights that wait for their frames (all renderings but Best effort)");
+        });
+        ui.checkbox(&mut self.blend_frames, "Blend frames during flights").on_hover_text("Flights at full resolution: every frame takes another sample of its pixels and is blended into the frames before it, moved to its view, so a moving image comes close to 4 samples per pixel for the cost of one. Edges that the camera uncovers start from the new frame; the image you arrive at is rendered normally. Off by default (a fast zoom out can show a slight trail).");
+        ui.add_enabled(self.blur.is_some(), egui::Checkbox::new(&mut self.auto_blur, "Auto blur during flights")).on_hover_text("While a flight moves the view, the image gets a light blur on the GPU, which brings a moving frame closer to the finished image: stronger for coarse frames, lighter for supersampled ones (σ = 0.8 × (100 / resolution in %)^0.6 pixels). The finished image at the place is never blurred.");
+    }
+
+    /// What makes renders faster: the GPU and its options, the neighborhood, and immersion
+    fn performance_controls(&mut self, ui: &mut egui::Ui) {
+        match &self.gpu {
+            Some(gpu) => {
+                if ui.checkbox(&mut self.use_gpu, "Use the GPU").on_hover_text(format!("{} helps with the slow parts of a render. It computes bit for bit the same samples as the CPU (checked when the window opened), so the image is the same.", gpu.name())).changed() {
+                    self.log(format!("Turned the GPU {}", if self.use_gpu { "on" } else { "off" }));
+                }
+                let response = ui.add_enabled(self.use_gpu, egui::Checkbox::new(&mut self.fast_gpu, "Fast GPU math"));
+                if response.on_hover_text("On by default. The GPU computes with pairs of 32-bit numbers instead of 64-bit numbers: about three times as fast on slow views, but not bit for bit the CPU's. Most of the image is the same; in chaotic parts of the set some pixels get other colors (as they would with any other rounding). Only used down to a zoom of about 10⁻⁹; saved images are always exact.").changed() {
+                    self.samples = None; //The samples so far were computed the other way: start again
+                    self.render(&format!("Turned fast GPU math {}", if self.fast_gpu { "on" } else { "off" }));
+                }
+                ui.indent("zoom_limit", |ui| {
+                    let response = ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.limit_zoom, "Limit the zoom to fast GPU math")).on_hover_text("Nothing deeper than a scale of about 10⁻⁹ is rendered, where the fast GPU math would switch back to exact math (renders get slower from there): zooming in, Go to view, Back and Forward and flights to deeper places are refused, and anything else (a larger window) zooms out to the limit. Off: as deep as 64-bit numbers allow.");
+                    if response.changed() && self.limit_zoom && self.zoom_refused(&self.c.clone()) {
+                        self.render("Zoomed out to the zoom limit");
+                    }
+                });
+                ui.indent("f32_frames", |ui| {
+                    ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.f32_frames, "Faster moving frames (f32)")).on_hover_text("Frames of flights and drags at shallow zoom (wider than a scale of about 0.01 at 4K) are computed by the GPU in plain 32-bit numbers: several times as fast as the fast GPU math, but in chaotic parts of the set more pixels get other colors while the view moves. The image you stop at is always rendered with the fast or exact math. On by default.");
+                });
+            }
+            None => {
+                let text = if self.gpu_opening.is_some() { "Opening the GPU..." } else { "No GPU (see the status log)" };
+                ui.add_enabled(false, egui::Checkbox::new(&mut false, text));
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.render_neighborhood, "Render the neighborhood").on_hover_text("Once the view is finished and nothing else runs, the area around it (by default one view to every side, at half the resolution) is rendered too and drawn behind the image, so dragging, panning and zooming out show it at once instead of black").changed() && !self.render_neighborhood {
+                self.cancel_neighborhood_job();
+                self.neighborhood = None;
+            }
+            ui.add_enabled(self.render_neighborhood, egui::DragValue::new(&mut self.neighborhood_margin).range(10..=5000).speed(5).suffix("% per side"))
+                .on_hover_text("How far the neighborhood reaches past every side, in percent of the view (type a value; 100% is one view to every side). A large neighborhood takes longer and gets a lower resolution, so it stays within 8192 pixels on a side");
+        });
+        ui.checkbox(&mut self.immersion, "Immersion").on_hover_text("Never shows black where nothing is rendered yet: while you move the view, and during flights, the view only moves once the new view has at least a complete low-resolution frame. Off: the view follows at once and fills in as the render goes (best effort).");
     }
 
     /// The buttons that move the view, and the size of a step
@@ -150,84 +274,30 @@ impl MandelbrotApp {
         }
         ui.checkbox(&mut self.show_points, "Show points of interest").on_hover_text("Marks the saved points of interest on the view where they are, with their names");
         ui.checkbox(&mut self.restore_appearance, "Restore the saved appearance (coloring, color channels)").on_hover_text("Off: going to a place keeps your current appearance. The supersampling is never part of a place.");
-        self.benchmark_ui(ui);
-        ui.horizontal(|ui| {
-            ui.label("Flight:");
-            egui::ComboBox::from_id_salt("flight_pace").selected_text(self.pace.name()).show_ui(ui, |ui| {
-                for pace in Pace::ALL {
-                    let response = ui.selectable_value(&mut self.pace, pace, pace.name());
-                    if pace == Pace::NoFlight {
-                        response.on_hover_text("Clicking a place shows it at once, without flying there");
-                    }
-                }
-            }).response.on_hover_text("How fast and how smoothly the view moves to a point of interest: Fast, Normal and Cinematic start and end softly; Constant keeps one speed all the way, set by the slider; using any control or the mouse stops a flight");
-            if self.pace == Pace::Constant {
-                ui.add(egui::Slider::new(&mut self.constant_speed, CONSTANT_SPEEDS).logarithmic(true).max_decimals(2).suffix(" ×2/s")).on_hover_text("The speed of the constant pace, in doublings of the zoom per second (the pan moves as many views): the same speed from the start to the place");
-            }
-            egui::ComboBox::from_id_salt("flight_route").selected_text(self.route.name()).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.route, Route::Shortest, Route::Shortest.name()).on_hover_text("Zooms out to travel, only as far as the distance needs, and in again: the shortest way for the eye");
-                ui.selectable_value(&mut self.route, Route::Straight, Route::Straight.name()).on_hover_text("A straight line: the zoom changes steadily from one view to the other, never zooming out on the way. Between two far-apart places at a deep zoom the picture rushes by");
-            }).response.on_hover_text("The route of a flight");
-            egui::ComboBox::from_id_salt("flight_rendering").selected_text(self.flight_rendering.name()).show_ui(ui, |ui| {
-                for mode in FlightRendering::ALL {
-                    ui.selectable_value(&mut self.flight_rendering, mode, mode.entry()).on_hover_text(match mode {
-                        FlightRendering::BestEffort => "The camera follows the clock; the picture fills in as the render goes",
-                        FlightRendering::LowRes => "The camera waits for a complete low-resolution frame of every view on the way",
-                        FlightRendering::Resolution(100) => "The camera waits for a full-resolution frame of every view on the way: sharp, but it can crawl where the view is slow",
-                        FlightRendering::Resolution(_) => "The camera waits for a frame of this resolution (blocks of 4 x 4 or 2 x 2 pixels): cleaner than Low res, faster than full resolution",
-                        FlightRendering::SuperSampled => "Every view on the way is rendered with all its supersampling layers, and the camera waits for the finished frame: the best picture, the slowest crawl",
-                        FlightRendering::Auto(_) => "The resolution of every frame is chosen to keep the frame rate next to it: full resolution where the view is fast, coarser where it is slow",
-                    });
-                }
-            }).response.on_hover_text("How complete every frame of a flight is before the camera moves on");
-            if let FlightRendering::Auto(fps) = &mut self.flight_rendering {
-                ui.add(egui::DragValue::new(fps).range(1..=240).suffix(" FPS")).on_hover_text("The frame rate that Auto keeps (type a value): every frame of a flight gets the finest resolution that the frames so far say fits, from full resolution down to blocks of 8 x 8 pixels; the screen shows no more frames than it refreshes");
-            }
-            if let FlightRendering::Resolution(percent) = &mut self.flight_rendering {
-                ui.add(egui::DragValue::new(percent).range(1..=800).suffix("%")).on_hover_text("The resolution of the frames of a flight, in percent of the pixels across (type a value): below 100 the camera waits for blocks of 100 / percent pixels (33%: 3 x 3), 100 is full resolution, above 100 it waits for supersampling layers ((percent / 100)²: 200% is 4 samples per pixel, up to the quality setting)");
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Frames ahead:");
-            ui.add(egui::DragValue::new(&mut self.frames_ahead).range(0..=3)).on_hover_text("How many frames of a flight are rendered ahead of the one on the screen, so the CPU and the GPU never wait for the screen (0: one frame at a time, as before). For flights that wait for their frames (all renderings but Best effort)");
-        });
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut self.render_neighborhood, "Render the neighborhood").on_hover_text("Once the view is finished and nothing else runs, the area around it (by default one view to every side, at half the resolution) is rendered too and drawn behind the image, so dragging, panning and zooming out show it at once instead of black").changed() && !self.render_neighborhood {
-                self.cancel_neighborhood_job();
-                self.neighborhood = None;
-            }
-            ui.add_enabled(self.render_neighborhood, egui::DragValue::new(&mut self.neighborhood_margin).range(10..=5000).speed(5).suffix("% per side"))
-                .on_hover_text("How far the neighborhood reaches past every side, in percent of the view (type a value; 100% is one view to every side). A large neighborhood takes longer and gets a lower resolution, so it stays within 8192 pixels on a side");
-        });
-        self.video_ui(ui);
-        ui.checkbox(&mut self.blend_frames, "Blend frames during flights").on_hover_text("Flights at full resolution: every frame takes another sample of its pixels and is blended into the frames before it, moved to its view, so a moving image comes close to 4 samples per pixel for the cost of one. Edges that the camera uncovers start from the new frame; the image you arrive at is rendered normally. Off by default (a fast zoom out can show a slight trail).");
-        ui.add_enabled(self.blur.is_some(), egui::Checkbox::new(&mut self.auto_blur, "Auto blur during flights")).on_hover_text("While a flight moves the view, the image gets a light blur on the GPU, which brings a moving frame closer to the finished image: stronger for coarse frames, lighter for supersampled ones (σ = 0.8 × (100 / resolution in %)^0.6 pixels). The finished image at the place is never blurred.");
-        if let Some(flight) = &self.flight {
-            //The progress along the path, and the buttons to stop the flight or to be there at once
-            let share = flight.flight.share_of_path(flight.elapsed) as f32;
-            let resolution = if matches!(self.flight_rendering, FlightRendering::Auto(_)) { format!(", {:.0}% resolution", self.shown_scaled.map_or(100.0 / self.preview_block as f64, |(columns, _)| 100.0 * columns as f64 / self.p.pixel_plane.width as f64)) } else { String::new() };
-            let text = format!("To {}: {:.0}% of the way, {} FPS{resolution}", flight.point.name, share * 100.0, flight.fps_shown);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
-                    self.cancel_flight();
-                } else if ui.button("Skip").on_hover_text("Goes to the place at once").clicked() {
-                    self.skip_flight();
-                }
-            });
-            ui.add(egui::ProgressBar::new(share).text(text));
-        }
-        ui.horizontal(|ui| {
-            for (input, hint) in self.view_inputs.iter_mut().zip(["x", "y", "scale"]) {
-                ui.add(egui::TextEdit::singleline(input).hint_text(hint).desired_width(80.0));
-            }
-            if ui.button("Go").clicked() {
-                self.go_to_view();
-            }
-        });
     }
 
-    /// The maximum iterations (manual or automatic, with its presets), adaptive supersampling and the quality of the window
-    fn render_settings_controls(&mut self, ui: &mut egui::Ui) {
+    /// The quality of the window, adaptive supersampling, the size of the image, and the maximum iterations (manual or automatic, with its presets)
+    fn quality_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Quality:");
+            let current = Quality { samples: self.supersampling_amount, blurred: self.quality_blur };
+            let mut chosen = current;
+            egui::ComboBox::from_id_salt("quality").selected_text(current.name()).show_ui(ui, |ui| {
+                for preset in Quality::PRESETS.into_iter().filter(|preset| !preset.blurred || self.blur.is_some()) {
+                    ui.selectable_value(&mut chosen, preset, preset.name());
+                }
+            }).response.on_hover_text("Samples per pixel (supersampling): more is smoother and sharper at the edges of the set, and takes longer. The blur preset takes one sample per pixel and blurs the image a little (σ 0.8 pixel), which comes close to 4x for the time of 1x.");
+            if chosen != current {
+                (self.supersampling_amount, self.supersampling_input, self.quality_blur) = (chosen.samples, chosen.samples, chosen.blurred);
+                (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
+                self.texture_outdated = true;
+                self.render(&format!("Set the quality to {}", chosen.name()));
+            }
+        });
+        if ui.checkbox(&mut self.adaptive_supersampling, "Adaptive supersampling").on_hover_text("Takes the first 2 samples of every pixel, and the remaining samples only for boundary and detail pixels (and their neighbors). Faster on smooth views; a heuristic that can differ from full supersampling. Saved images always use the full saved image quality.").changed() {
+            let state = if self.adaptive_supersampling { "on" } else { "off" };
+            self.render(&format!("Turned adaptive supersampling {state}"));
+        }
         ui.horizontal(|ui| {
             let mut follow = self.fit.enabled;
             if ui.checkbox(&mut follow, "Match the window size").on_hover_text("The image is rendered with one pixel for every pixel of the area it is shown in, and again when the window is resized. The view keeps its center and zoom. Off: the image keeps its size and is scaled to the window.").changed() {
@@ -269,36 +339,6 @@ impl MandelbrotApp {
                 self.render(&format!("Turned auto iterations off, max. iterations {}", self.max_iterations_input));
             }
         }
-        match &self.gpu {
-            Some(gpu) => {
-                if ui.checkbox(&mut self.use_gpu, "Use the GPU").on_hover_text(format!("{} helps with the slow parts of a render. It computes bit for bit the same samples as the CPU (checked when the window opened), so the image is the same.", gpu.name())).changed() {
-                    self.log(format!("Turned the GPU {}", if self.use_gpu { "on" } else { "off" }));
-                }
-                let response = ui.add_enabled(self.use_gpu, egui::Checkbox::new(&mut self.fast_gpu, "Fast GPU math"));
-                if response.on_hover_text("On by default. The GPU computes with pairs of 32-bit numbers instead of 64-bit numbers: about three times as fast on slow views, but not bit for bit the CPU's. Most of the image is the same; in chaotic parts of the set some pixels get other colors (as they would with any other rounding). Only used down to a zoom of about 10⁻⁹; saved images are always exact.").changed() {
-                    self.samples = None; //The samples so far were computed the other way: start again
-                    self.render(&format!("Turned fast GPU math {}", if self.fast_gpu { "on" } else { "off" }));
-                }
-                ui.indent("zoom_limit", |ui| {
-                    let response = ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.limit_zoom, "Limit the zoom to fast GPU math")).on_hover_text("Nothing deeper than a scale of about 10⁻⁹ is rendered, where the fast GPU math would switch back to exact math (renders get slower from there): zooming in, Go to view, Back and Forward and flights to deeper places are refused, and anything else (a larger window) zooms out to the limit. Off: as deep as 64-bit numbers allow.");
-                    if response.changed() && self.limit_zoom && self.zoom_refused(&self.c.clone()) {
-                        self.render("Zoomed out to the zoom limit");
-                    }
-                });
-                ui.indent("f32_frames", |ui| {
-                    ui.add_enabled(self.use_gpu && self.fast_gpu, egui::Checkbox::new(&mut self.f32_frames, "Faster moving frames (f32)")).on_hover_text("Frames of flights and drags at shallow zoom (wider than a scale of about 0.01 at 4K) are computed by the GPU in plain 32-bit numbers: several times as fast as the fast GPU math, but in chaotic parts of the set more pixels get other colors while the view moves. The image you stop at is always rendered with the fast or exact math. On by default.");
-                });
-            }
-            None => {
-                let text = if self.gpu_opening.is_some() { "Opening the GPU..." } else { "No GPU (see the status log)" };
-                ui.add_enabled(false, egui::Checkbox::new(&mut false, text));
-            }
-        }
-        ui.checkbox(&mut self.immersion, "Immersion").on_hover_text("Never shows black where nothing is rendered yet: while you move the view, and during flights, the view only moves once the new view has at least a complete low-resolution frame. Off: the view follows at once and fills in as the render goes (best effort).");
-        if ui.checkbox(&mut self.adaptive_supersampling, "Adaptive supersampling").on_hover_text("Takes the first 2 samples of every pixel, and the remaining samples only for boundary and detail pixels (and their neighbors). Faster on smooth views; a heuristic that can differ from full supersampling. Saved images always use the full saved image quality.").changed() {
-            let state = if self.adaptive_supersampling { "on" } else { "off" };
-            self.render(&format!("Turned adaptive supersampling {state}"));
-        }
         if self.auto_iterations {
             ui.label(format!("Current limit: {} iterations ({})", self.m.max_iterations, if self.limit_pending { "starting value, being refined..." } else { "chosen automatically" }));
             ui.horizontal(|ui| {
@@ -314,22 +354,6 @@ impl MandelbrotApp {
                 }
             });
         }
-        ui.horizontal(|ui| {
-            ui.label("Quality:");
-            let current = Quality { samples: self.supersampling_amount, blurred: self.quality_blur };
-            let mut chosen = current;
-            egui::ComboBox::from_id_salt("quality").selected_text(current.name()).show_ui(ui, |ui| {
-                for preset in Quality::PRESETS.into_iter().filter(|preset| !preset.blurred || self.blur.is_some()) {
-                    ui.selectable_value(&mut chosen, preset, preset.name());
-                }
-            }).response.on_hover_text("Samples per pixel (supersampling): more is smoother and sharper at the edges of the set, and takes longer. The blur preset takes one sample per pixel and blurs the image a little (σ 0.8 pixel), which comes close to 4x for the time of 1x.");
-            if chosen != current {
-                (self.supersampling_amount, self.supersampling_input, self.quality_blur) = (chosen.samples, chosen.samples, chosen.blurred);
-                (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
-                self.texture_outdated = true;
-                self.render(&format!("Set the quality to {}", chosen.name()));
-            }
-        });
     }
 
     /// The coloring and the color channel mapping
@@ -406,7 +430,7 @@ impl MandelbrotApp {
 
     /// Saving the image, with the quality of the saved image
     fn save_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Save Image");
+        ui.strong("Image");
         ui.horizontal(|ui| {
             ui.label("Saved image quality:");
             let current = Quality { samples: self.image_supersampling_amount, blurred: self.image_quality_blur };

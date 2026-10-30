@@ -348,16 +348,21 @@ fn controls_texts(app: &mut MandelbrotApp) -> Vec<String> {
 }
 
 #[test]
-fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering_controls() {
+fn the_controls_are_in_sections_with_the_image_quality_in_its_own_and_saving_with_the_video() {
     let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
     let texts = controls_texts(&mut app);
     let position = |needle: &str| texts.iter().position(|t| t.starts_with(needle)).unwrap_or_else(|| panic!("{needle:?} is not drawn: {texts:?}"));
-    let (quality, coloring, channels) = (position("Quality:"), position("Coloring:"), position("Color channels"));
-    let (heading, saved_quality, save) = (position("Save Image"), position("Saved image quality:"), position("Save image"));
-    assert!(quality < coloring && coloring < channels, "the rendering quality is with the rendering controls");
-    assert!(channels < heading && heading < saved_quality && saved_quality < save, "the saved image quality and the Save button are together in the Save Image section, after the rendering controls");
+    let sections = ["Navigation", "Places", "Image quality", "Colors", "Flights", "Performance", "Save image and video", "Benchmark"].map(&position);
+    assert!(sections.windows(2).all(|pair| pair[0] < pair[1]), "the sections in order: {sections:?}");
+    let [_, _, quality_section, colors, flights, performance, saving, benchmark] = sections;
+    //Every control in its section
+    for (needle, section, next) in [("Quality:", quality_section, colors), ("Max. iterations:", quality_section, colors), ("Coloring:", colors, flights), ("Color channels", colors, flights),
+        ("Flight:", flights, performance), ("Frames ahead:", flights, performance), ("Saved image quality:", saving, benchmark), ("Video of the last flight", saving, benchmark)] {
+        let at = position(needle);
+        assert!(section < at && at < next, "{needle} is in its section");
+    }
     assert_eq!(texts.iter().filter(|t| t.starts_with("Saved image quality")).count(), 1);
 }
 

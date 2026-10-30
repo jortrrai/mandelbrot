@@ -286,19 +286,29 @@ impl MandelbrotApp {
         }
     }
 
-    /// The video controls: the frame rate, the button, and the progress of a video under way
-    pub(super) fn video_ui(&mut self, ui: &mut egui::Ui) {
+    /// The progress of a video under way, with its button to cancel it
+    pub(super) fn video_progress_ui(&self, ui: &mut egui::Ui) {
+        let Some(job) = &self.video_job else { return };
         ui.horizontal(|ui| {
-            if let Some(job) = &self.video_job {
-                let done = job.done.load(Ordering::Relaxed);
-                let elapsed = job.started.elapsed().as_secs_f64();
-                let left = if done > 0 { elapsed / done as f64 * (job.total - done) as f64 } else { 0.0 };
-                if ui.button("Cancel video").clicked() {
-                    job.cancel.store(true, Ordering::Relaxed);
-                }
-                ui.add(egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!("Video: {done} of {} frames, {left:.0} s left", job.total)));
-                return;
+            let done = job.done.load(Ordering::Relaxed);
+            let elapsed = job.started.elapsed().as_secs_f64();
+            let left = if done > 0 { elapsed / done as f64 * (job.total - done) as f64 } else { 0.0 };
+            if ui.button("Cancel video").clicked() {
+                job.cancel.store(true, Ordering::Relaxed);
             }
+            ui.add(egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!("Video: {done} of {} frames, {left:.0} s left", job.total)));
+        });
+    }
+
+    /// The video controls: the button, the frame rate, the speed, the format and the PNG frames (the progress of a video under way is at the top, see
+    /// `video_progress_ui`)
+    pub(super) fn video_ui(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Video of the last flight");
+        ui.add_enabled_ui(self.video_job.is_none(), |ui| self.video_settings_ui(ui));
+    }
+
+    fn video_settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
             let name = self.last_flight.as_ref().map_or_else(|| String::from("no flight yet"), |flight| flight.name.clone());
             if ui.add_enabled(self.last_flight.is_some(), egui::Button::new("Render video of the last flight")).on_hover_text(format!("The last flight ({name}) as a video: every frame rendered offline at the saved image size and quality, at a fixed frame rate, written as PNG frames to saved/ (and as an .mp4 when ffmpeg is installed)")).clicked() {
                 self.start_video();
@@ -309,11 +319,7 @@ impl MandelbrotApp {
                 }
             });
         });
-        if self.video_job.is_some() {
-            return;
-        }
         ui.horizontal(|ui| {
-            ui.label("Video:");
             ui.add(egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
             egui::ComboBox::from_id_salt("video_format").selected_text(self.video_format.name()).show_ui(ui, |ui| {
                 for format in VideoFormat::ALL {
