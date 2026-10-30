@@ -170,17 +170,18 @@ pub struct MandelbrotApp {
     auto_blur: bool,
     /// How many frames of a flight the flight job may render ahead of the one on the screen (0: none, it renders one frame at a time as before), see `flight_job`
     frames_ahead: usize,
-    /// Whether every frame of a flight stays on the screen for the same whole number of refreshes (even motion), or the next frame shows at the next refresh
-    /// (the most frames per second), see `flight_job`
-    even_pacing: bool,
     /// The messages of the flight job that wait for their turn on the screen (frames rendered ahead), and how many frames that is (shared with the job, which
     /// renders no further ahead than `frames_ahead`)
     flight_queue: std::collections::VecDeque<render_job::JobMessage>,
     frames_queued: Arc<std::sync::atomic::AtomicUsize>,
-    /// The refreshes the frame on the screen still stays there; at 0 the next frame of the queue may show
+    /// Whether the frame on the screen still stays there for this refresh (1) before the next frame of the queue may show (0)
     frame_hold: u32,
     /// The samples per pixel of the frame on the screen (0 for a preview), for the strength of the blur
     shown_samples: u8,
+    /// The size of the Auto frame on the screen when it is below full resolution (its colors are the rows of that smaller image, see `SparePool::packed`), and of the
+    /// next frame of the flight job, known from its `FlightFrame`
+    shown_scaled: Option<(usize, usize)>,
+    frame_scaled: Option<(usize, usize)>,
     /// The part of the texture that covers the image: all of it, except for a coarse preview, see `coarse_texture`
     texture_uv: egui::Rect,
     /// The block size of the preview that the colors of `p` show, 1 for a full layer: a coarse preview is uploaded small and scaled up smoothly
@@ -283,11 +284,12 @@ impl MandelbrotApp {
             blur: None,
             auto_blur: true,
             frames_ahead: 2,
-            even_pacing: false,
             flight_queue: std::collections::VecDeque::new(),
             frames_queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             frame_hold: 0,
             shown_samples: 0,
+            shown_scaled: None,
+            frame_scaled: None,
             texture_uv: FULL_TEXTURE,
             preview_block: 1,
             preview_levels: Vec::new(),
@@ -383,7 +385,11 @@ impl MandelbrotApp {
             return;
         }
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
-        let (image, uv, options) = if self.preview_block > 1 {
+        let (image, uv, options) = if let Some((columns, rows)) = self.shown_scaled {
+            //A scaled Auto frame: the smaller image, scaled up smoothly over the whole view (the centers of its pixels are where the view puts them)
+            let small: Vec<TrueColor> = self.p.colors.chunks(width).take(rows).flat_map(|line| &line[..columns]).copied().collect();
+            (ColorImage::from_rgb([columns, rows], &colors_to_rgb_bytes(&small, self.p.color_channel_mapping)), FULL_TEXTURE, TextureOptions::LINEAR)
+        } else if self.preview_block > 1 {
             let (image, uv) = coarse_texture(&self.p.colors, self.p.color_channel_mapping, width, height, self.preview_block);
             (image, uv, TextureOptions::LINEAR)
         } else {
@@ -411,7 +417,7 @@ impl MandelbrotApp {
         let target = transform::rect_of(self.drawn_fraction(), rect);
         match self.blur.as_ref().filter(|_| self.auto_blur && self.flight.is_some()) {
             Some(blur) => {
-                let sigma = blur::blur_sigma(self.preview_block, self.shown_samples);
+                let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
                     ui.painter_at(rect).add(callback);
                 }

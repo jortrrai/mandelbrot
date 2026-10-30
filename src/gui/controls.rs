@@ -175,13 +175,12 @@ impl MandelbrotApp {
         ui.horizontal(|ui| {
             ui.label("Frames ahead:");
             ui.add(egui::DragValue::new(&mut self.frames_ahead).range(0..=3)).on_hover_text("How many frames of a flight are rendered ahead of the one on the screen, so the CPU and the GPU never wait for the screen (0: one frame at a time, as before). For flights that wait for their frames (all renderings but Best effort)");
-            ui.add_enabled(self.frames_ahead > 0, egui::Checkbox::new(&mut self.even_pacing, "Even pacing")).on_hover_text("On: every frame stays on the screen for the same whole number of refreshes, chosen from how long the frames take, so the motion is even (at 60 Hz: 60, 30, 20 FPS ...). Off: every frame shows at the next refresh after it is ready, the most frames per second, but the motion can be uneven when the frames take about as long as a refresh");
         });
         ui.add_enabled(self.blur.is_some(), egui::Checkbox::new(&mut self.auto_blur, "Auto blur during flights")).on_hover_text("While a flight moves the view, the image gets a light blur on the GPU, which brings a moving frame closer to the finished image: stronger for coarse frames, lighter for supersampled ones (σ = 0.8 × (100 / resolution in %)^0.6 pixels). The finished image at the place is never blurred.");
         if let Some(flight) = &self.flight {
             //The progress along the path, and the buttons to stop the flight or to be there at once
             let share = flight.flight.share_of_path(flight.elapsed) as f32;
-            let resolution = if matches!(self.flight_rendering, FlightRendering::Auto(_)) { format!(", {:.0}% resolution", 100.0 / self.preview_block as f64) } else { String::new() };
+            let resolution = if matches!(self.flight_rendering, FlightRendering::Auto(_)) { format!(", {:.0}% resolution", self.shown_scaled.map_or(100.0 / self.preview_block as f64, |(columns, _)| 100.0 * columns as f64 / self.p.pixel_plane.width as f64)) } else { String::new() };
             let text = format!("To {}: {:.0}% of the way, {} FPS{resolution}", flight.point.name, share * 100.0, flight.fps_shown);
             ui.horizontal(|ui| {
                 if ui.button("Cancel").on_hover_text("Stops the flight here and gives you the controls back").clicked() {
