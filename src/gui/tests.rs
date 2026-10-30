@@ -1866,3 +1866,18 @@ fn a_saved_image_of_the_blur_preset_is_blurred_like_the_screen() {
     let total: u32 = blurred.iter().map(|c| u32::from(c.red)).sum();
     assert!((240..=270).contains(&total), "the brightness is kept: {total}");
 }
+
+#[test]
+fn the_color_channels_have_a_drop_down_per_screen_channel_that_shows_its_source() {
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    app.p.color_channel_mapping = ColorChannelMapping::new("BGG").unwrap();
+    let ctx = egui::Context::default();
+    let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 2000.0))), ..Default::default() }, |ui| app.side_panel_ui(ui));
+    let texts: Vec<String> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+        _ => None,
+    }).collect();
+    output.drop_without_applying_deltas();
+    let at = texts.iter().position(|text| text == "R ←").expect("the drop-down of the red channel");
+    assert_eq!(texts[at..at + 6], ["R ←", "Blue", "G ←", "Green", "B ←", "Green"], "{:?}", &texts[at..]);
+}
