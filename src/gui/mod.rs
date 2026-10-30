@@ -43,6 +43,7 @@ use self::render_job::{JobMessage, Progress, RenderBars};
 use self::save_size::SaveSize;
 
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -200,6 +201,17 @@ pub struct MandelbrotApp {
     auto_blur: bool,
     /// Whether the full-resolution frames of a flight are blended over time (off by default), see `temporal`
     blend_frames: bool,
+    /// How many frames of a flight the flight job may render ahead of the one on the screen (0: none, it renders one frame at a time as before), see `flight_job`
+    frames_ahead: usize,
+    /// Whether every frame of a flight stays on the screen for the same whole number of refreshes (even motion), or the next frame shows at the next refresh
+    /// (the most frames per second), see `flight_job`
+    even_pacing: bool,
+    /// The messages of the flight job that wait for their turn on the screen (frames rendered ahead), and how many frames that is (shared with the job, which
+    /// renders no further ahead than `frames_ahead`)
+    flight_queue: std::collections::VecDeque<render_job::JobMessage>,
+    frames_queued: Arc<std::sync::atomic::AtomicUsize>,
+    /// The refreshes the frame on the screen still stays there; at 0 the next frame of the queue may show
+    frame_hold: u32,
     /// The samples per pixel of the frame on the screen (0 for a preview), for the strength of the blur
     shown_samples: u8,
     /// The part of the texture that covers the image: all of it, except for a coarse preview, see `coarse_texture`
@@ -324,6 +336,11 @@ impl MandelbrotApp {
             blur: None,
             auto_blur: true,
             blend_frames: false,
+            frames_ahead: 2,
+            even_pacing: false,
+            flight_queue: std::collections::VecDeque::new(),
+            frames_queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            frame_hold: 0,
             shown_samples: 0,
             texture_uv: FULL_TEXTURE,
             preview_block: 1,
@@ -511,7 +528,8 @@ impl Readiness {
     fn of_flight(rendering: flight::FlightRendering) -> Readiness {
         match rendering {
             flight::FlightRendering::BestEffort => Readiness::Any,
-            flight::FlightRendering::LowRes => Readiness::COMPLETE,
+            //Auto: every frame of the flight job is complete; the job decides how fine (see `flight::auto_block`)
+            flight::FlightRendering::LowRes | flight::FlightRendering::Auto(_) => Readiness::COMPLETE,
             flight::FlightRendering::Resolution(percent) if percent < 100 => match (100.0 / f64::from(percent.max(1))).round() as usize {
                 0 | 1 => Readiness::FULL_RESOLUTION,
                 block => Readiness::Blocks(block),

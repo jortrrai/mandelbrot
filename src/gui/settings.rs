@@ -56,6 +56,7 @@ fn rendering_key(rendering: FlightRendering) -> (&'static str, Option<u16>) {
         FlightRendering::LowRes => ("low-res", None),
         FlightRendering::Resolution(percent) => ("resolution", Some(percent)),
         FlightRendering::SuperSampled => ("super-sampled", None),
+        FlightRendering::Auto(fps) => ("auto", Some(fps)),
     }
 }
 
@@ -65,6 +66,7 @@ fn rendering_of(key: &str, percent: Option<u16>) -> Option<FlightRendering> {
         "low-res" => Some(FlightRendering::LowRes),
         "resolution" => Some(FlightRendering::Resolution(percent.unwrap_or(100).clamp(1, 800))),
         "super-sampled" => Some(FlightRendering::SuperSampled),
+        "auto" => Some(FlightRendering::Auto(percent.unwrap_or(60).clamp(1, 1000))),
         _ => None,
     }
 }

@@ -69,6 +69,20 @@ pub enum FlightRendering {
     Resolution(u16),
     /// Every frame is rendered with all its supersampling layers, and the camera waits until the last one is done: the finished image of every view on the way, the slowest
     SuperSampled,
+    /// The camera waits for a frame of the resolution that keeps this many frames per second: the flight job chooses it frame by frame from how long the frames take
+    /// (see `auto_block`), from full resolution down to blocks of `AUTO_COARSEST` pixels; never supersampled
+    Auto(u16),
+}
+
+/// The coarsest frames of `FlightRendering::Auto`: blocks of 8 x 8 pixels (12.5%)
+pub const AUTO_COARSEST: usize = 8;
+
+/// The block size of the next frame of `FlightRendering::Auto` (1: full resolution): the finest whose expected time, `full` (the time of a full-resolution frame,
+/// estimated from the frames so far) divided by its pixels, fits the time of a frame at the target rate (`target`). A finer block than the `current` one must fit with
+/// 15% to spare, so a view whose time is right at a boundary does not switch back and forth every frame.
+pub fn auto_block(full: Duration, target: Duration, current: usize) -> usize {
+    let fits = |block: usize, spare: f64| full.as_secs_f64() / (block * block) as f64 <= target.as_secs_f64() * spare;
+    (1..=AUTO_COARSEST).find(|block| fits(*block, if *block < current { 0.85 } else { 1.0 })).unwrap_or(AUTO_COARSEST)
 }
 
 impl FlightRendering {
@@ -76,7 +90,7 @@ impl FlightRendering {
     pub const FULL_RESOLUTION: FlightRendering = FlightRendering::Resolution(100);
 
     /// The modes of the drop-down; any other resolution can be typed in
-    pub const ALL: [FlightRendering; 6] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::Resolution(25), FlightRendering::Resolution(50), FlightRendering::FULL_RESOLUTION, FlightRendering::SuperSampled];
+    pub const ALL: [FlightRendering; 7] = [FlightRendering::BestEffort, FlightRendering::LowRes, FlightRendering::Resolution(25), FlightRendering::Resolution(50), FlightRendering::FULL_RESOLUTION, FlightRendering::SuperSampled, FlightRendering::Auto(60)];
 
     /// The name of the mode: the drop-down shows it, with the resolution in percent next to it for `Resolution`
     pub const fn name(self) -> &'static str {
@@ -85,6 +99,7 @@ impl FlightRendering {
             FlightRendering::LowRes => "Low res",
             FlightRendering::Resolution(_) => "Resolution",
             FlightRendering::SuperSampled => "Super sampled",
+            FlightRendering::Auto(_) => "Auto",
         }
     }
 
