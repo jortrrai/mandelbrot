@@ -10,10 +10,12 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::flight::{FlightRendering, Pace};
+use super::flight::{FlightRendering, Pace, Route};
+use super::video::FRAME_RATES;
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
+use crate::mandelbrot_set::{MIN_DIVIDE, PALETTE_LENGTH};
 
 /// The settings, as the file has them (every one optional, see the module)
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -44,6 +46,18 @@ pub(super) struct Settings {
     flight_resolution: Option<u16>,
     immersion: Option<bool>,
     auto_blur: Option<bool>,
+    route: Option<String>,
+    frames_ahead: Option<usize>,
+    even_pacing: Option<bool>,
+    blend_frames: Option<bool>,
+    f32_frames: Option<bool>,
+    quality_blur: Option<bool>,
+    saved_image_blur: Option<bool>,
+    render_neighborhood: Option<bool>,
+    color_divide: Option<f64>,
+    color_offset: Option<f64>,
+    stretch_palette: Option<bool>,
+    video_fps: Option<u32>,
 }
 
 /// The auto iterations presets, to find one by its name
@@ -112,6 +126,18 @@ impl MandelbrotApp {
             flight_resolution: percent,
             immersion: Some(self.immersion),
             auto_blur: Some(self.auto_blur),
+            route: Some(self.route.name().to_string()),
+            frames_ahead: Some(self.frames_ahead),
+            even_pacing: Some(self.even_pacing),
+            blend_frames: Some(self.blend_frames),
+            f32_frames: Some(self.f32_frames),
+            quality_blur: Some(self.quality_blur),
+            saved_image_blur: Some(self.image_quality_blur),
+            render_neighborhood: Some(self.render_neighborhood),
+            color_divide: Some(self.m.palette.divide),
+            color_offset: Some(self.m.palette.offset),
+            stretch_palette: Some(self.m.palette.stretch),
+            video_fps: Some(self.video_fps),
         }
     }
 
@@ -174,6 +200,28 @@ impl MandelbrotApp {
         }
         set(settings.immersion, &mut self.immersion);
         set(settings.auto_blur, &mut self.auto_blur);
+        if let Some(route) = settings.route.as_deref().and_then(|name| Route::ALL.into_iter().find(|route| route.name() == name)) {
+            self.route = route;
+        }
+        if let Some(ahead) = settings.frames_ahead.filter(|ahead| *ahead <= 3) {
+            self.frames_ahead = ahead;
+        }
+        set(settings.even_pacing, &mut self.even_pacing);
+        set(settings.blend_frames, &mut self.blend_frames);
+        set(settings.f32_frames, &mut self.f32_frames);
+        set(settings.quality_blur, &mut self.quality_blur);
+        set(settings.saved_image_blur, &mut self.image_quality_blur);
+        set(settings.render_neighborhood, &mut self.render_neighborhood);
+        if let Some(divide) = settings.color_divide.filter(|divide| (MIN_DIVIDE..=100_000.0).contains(divide)) {
+            self.m.palette.divide = divide;
+        }
+        if let Some(offset) = settings.color_offset.filter(|offset| offset.is_finite()) {
+            self.m.palette.offset = offset.rem_euclid(PALETTE_LENGTH);
+        }
+        set(settings.stretch_palette, &mut self.m.palette.stretch);
+        if let Some(fps) = settings.video_fps.filter(|fps| FRAME_RATES.contains(fps)) {
+            self.video_fps = fps;
+        }
     }
 
     /// Keeps the settings in the file `path` from now on: the settings as they are now are the defaults (for Reset settings), and those of the file are applied.

@@ -258,6 +258,7 @@ pub struct MandelbrotApp {
 }
 
 impl MandelbrotApp {
+    #[allow(clippy::too_many_lines)] // The initial value of every field
     pub(super) fn new(config: &Config) -> MandelbrotApp {
         let c = ComplexPlane::new(config.window_width, config.window_height);
         let shown_plane = c.clone();

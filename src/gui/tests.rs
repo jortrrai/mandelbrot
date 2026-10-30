@@ -1778,6 +1778,8 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     let defaults = app.settings();
     (app.pace, app.fast_gpu, app.supersampling_amount, app.m.smooth_coloring) = (super::flight::Pace::Cinematic, false, 16, false);
     app.flight_rendering = super::flight::FlightRendering::Resolution(37);
+    (app.route, app.frames_ahead, app.even_pacing, app.blend_frames, app.quality_blur, app.video_fps) = (super::flight::Route::Spiral, 1, true, true, true, 60);
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     let now = std::time::Instant::now();
     app.keep_settings(now);
     assert!(!path.exists(), "not on every frame of a drag");
@@ -1788,6 +1790,8 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert!(next.use_settings_file(Some(path.clone())));
     assert_eq!((next.pace, next.fast_gpu, next.supersampling_amount, next.m.smooth_coloring, next.flight_rendering),
         (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
+    assert_eq!((next.route, next.frames_ahead, next.even_pacing, next.blend_frames, next.quality_blur, next.video_fps), (super::flight::Route::Spiral, 1, true, true, true, 60));
+    assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
     let mut partial = manual_app(&Config::sized(64, 48, 50, 4));

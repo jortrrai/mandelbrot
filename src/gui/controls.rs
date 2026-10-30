@@ -222,6 +222,7 @@ impl MandelbrotApp {
     }
 
     /// The maximum iterations (manual or automatic, with its presets), adaptive supersampling and the quality of the window
+    #[allow(clippy::too_many_lines)] // One control after the other
     fn render_settings_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let mut follow = self.fit.enabled;
