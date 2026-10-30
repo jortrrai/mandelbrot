@@ -110,6 +110,8 @@ pub(super) struct VideoFlight {
     /// The route of the flight, and the speed of the constant pace (see `flight::Flight::with`)
     pub(super) route: Route,
     pub(super) constant_speed: f64,
+    /// The speed factor of the other paces (see `flight::Flight::with`)
+    pub(super) speed: f64,
     pub(super) name: String,
     pub(super) limits: (u32, u32),
     /// The color cycle at the start and at the place, blended on the way like a flight's (see `points::PointFlight::palettes`)
@@ -166,7 +168,7 @@ impl MandelbrotApp {
             }
         };
         let (width, height, fps, speed, format, pngs) = (resolution.width, resolution.height, self.video_fps, self.video_speed, self.video_format, self.video_pngs);
-        let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed);
+        let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed);
         let total = frame_count(path.duration(), fps, speed);
         let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
         let slug: String = flight.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
@@ -342,7 +344,7 @@ mod tests {
     #[test]
     fn the_limit_of_a_video_frame_goes_from_the_limit_at_the_start_to_that_of_the_place() {
         let settings = crate::auto_iterations::AutoPreset::Balanced.settings();
-        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE) };
+        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE) };
         assert_eq!(limit_at(1.0, &flight, &settings), 300);
         assert_eq!(limit_at(6.4e-5, &flight, &settings), 5000);
         let middle = limit_at(8e-3, &flight, &settings);

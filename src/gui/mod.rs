@@ -161,6 +161,12 @@ pub struct MandelbrotApp {
     /// The route of flights, and the speed of the constant pace in doublings of the zoom per second, see `flight`
     route: flight::Route,
     constant_speed: f64,
+    /// The speed of the other paces, in percent of their own (see `flight::Flight::with`)
+    flight_speed: u16,
+    /// What the running flight job was started with (see `flight_job::FlightJobOptions`): a change of one of them during a flight restarts it, so it takes effect at once
+    flight_job_options: Option<flight_job::FlightJobOptions>,
+    /// Whether the image is blurred after a flight arrived (with Auto blur), until the render of the place has finished: the landing has no pixelated pop
+    landing_blur: bool,
     /// The settings file (`None`: the settings are not kept, as in tests), the defaults for Reset settings, what was saved last and since when it changed, see `settings`
     settings_path: Option<std::path::PathBuf>,
     settings_defaults: settings::Settings,
@@ -319,6 +325,9 @@ impl MandelbrotApp {
             pace: flight::Pace::Fast,
             route: flight::Route::Shortest,
             constant_speed: flight::CONSTANT_SPEED,
+            flight_speed: 100,
+            flight_job_options: None,
+            landing_blur: false,
             settings_path: None,
             settings_defaults: settings::Settings::default(),
             settings_saved: None,
@@ -496,7 +505,7 @@ impl MandelbrotApp {
         let target = transform::rect_of(self.drawn_fraction(), rect);
         //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
         self.draw_neighborhood(&ui.painter_at(rect), rect);
-        match self.blur.as_ref().filter(|_| (self.auto_blur && self.flight.is_some()) || self.quality_blur) {
+        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.landing_blur)) || self.quality_blur) {
             Some(blur) => {
                 let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
@@ -577,6 +586,11 @@ impl MandelbrotApp {
     pub(super) fn required_readiness(&self) -> Readiness {
         let flight = if self.flight.is_some() { self.flight_readiness() } else { Readiness::Any };
         flight.max(if self.immersion { Readiness::COMPLETE } else { Readiness::Any })
+    }
+
+    /// The speed factor of the paces other than Constant, see `flight_speed`
+    pub(super) fn speed_factor(&self) -> f64 {
+        f64::from(self.flight_speed) / 100.0
     }
 
     /// What the frames of a flight have to be, see `flight::FlightRendering`; immersion asks for at least a complete frame

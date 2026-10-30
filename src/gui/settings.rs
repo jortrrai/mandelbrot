@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS};
+use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, FLIGHT_SPEEDS};
 use super::video::{VideoFormat, FRAME_RATES, SPEEDS};
 use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
@@ -44,6 +44,7 @@ pub(super) struct Settings {
     pace: Option<String>,
     route: Option<String>,
     constant_speed: Option<f64>,
+    flight_speed: Option<u16>,
     flight_rendering: Option<String>,
     flight_resolution: Option<u16>,
     immersion: Option<bool>,
@@ -128,6 +129,7 @@ impl MandelbrotApp {
             pace: Some(self.pace.name().to_string()),
             route: Some(self.route.name().to_string()),
             constant_speed: Some(self.constant_speed),
+            flight_speed: Some(self.flight_speed),
             flight_rendering: Some(rendering.to_string()),
             flight_resolution: percent,
             immersion: Some(self.immersion),
@@ -208,6 +210,9 @@ impl MandelbrotApp {
         }
         if let Some(speed) = settings.constant_speed.filter(|speed| CONSTANT_SPEEDS.contains(speed)) {
             self.constant_speed = speed;
+        }
+        if let Some(speed) = settings.flight_speed.filter(|speed| FLIGHT_SPEEDS.contains(speed)) {
+            self.flight_speed = speed;
         }
         if let Some(rendering) = settings.flight_rendering.as_deref().and_then(|key| rendering_of(key, settings.flight_resolution)) {
             self.flight_rendering = rendering;
