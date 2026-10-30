@@ -354,7 +354,7 @@ fn saving_has_its_own_section_and_the_rendering_quality_stays_with_the_rendering
     wait_for_job(&mut app);
     let texts = controls_texts(&mut app);
     let position = |needle: &str| texts.iter().position(|t| t.starts_with(needle)).unwrap_or_else(|| panic!("{needle:?} is not drawn: {texts:?}"));
-    let (quality, coloring, channels) = (position("Quality (supersampling"), position("Coloring:"), position("Color channels"));
+    let (quality, coloring, channels) = (position("Quality:"), position("Coloring:"), position("Color channels"));
     let (heading, saved_quality, save) = (position("Save Image"), position("Saved image quality:"), position("Save image"));
     assert!(quality < coloring && coloring < channels, "the rendering quality is with the rendering controls");
     assert!(channels < heading && heading < saved_quality && saved_quality < save, "the saved image quality and the Save button are together in the Save Image section, after the rendering controls");
@@ -1838,4 +1838,31 @@ fn another_color_cycle_keeps_the_limit_and_shows_the_recolored_image_at_once() {
     rendering::Render::new(&app.c, &app.m, width, height, app.coloring_function).supersampling(app.supersampling_amount).adaptive(app.adaptive_supersampling.then(rendering::AdaptiveSampling::default)).run(|colors, _| fresh = colors.to_vec());
     let differ = app.p.colors.iter().zip(&fresh).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
     assert_eq!(differ, 0, "of {} pixels; log {:?}", fresh.len(), &app.log[app.log.len().saturating_sub(3)..]);
+}
+
+#[test]
+fn the_quality_presets_go_from_fastest_to_best_and_the_blur_preset_takes_one_sample() {
+    use super::blur::Quality;
+    let samples: Vec<u8> = Quality::PRESETS.iter().map(|preset| preset.samples).collect();
+    assert_eq!(samples, [1, 1, 2, 4, 8, 16, 32, 64]);
+    assert_eq!(Quality::PRESETS.iter().filter(|preset| preset.blurred).count(), 1);
+    assert_eq!(Quality::PRESETS[1].name(), "1x + blur (smooth, fast)");
+    assert_eq!(Quality { samples: 12, blurred: false }.name(), "12x", "a quality that is not a preset (from the configuration) is named too");
+}
+
+#[test]
+fn a_saved_image_of_the_blur_preset_is_blurred_like_the_screen() {
+    use crate::coloring::TrueColor;
+    let (width, height) = (9, 7);
+    //A flat image stays flat; one bright pixel spreads evenly to its neighbors and keeps its brightness on the whole
+    let flat = vec![TrueColor::new(40, 80, 120); width * height];
+    assert!(super::blur::blurred(&flat, width, height, 0.8).iter().all(|c| (c.red, c.green, c.blue) == (40, 80, 120)));
+    let mut dot = vec![TrueColor::new(0, 0, 0); width * height];
+    dot[3 * width + 4] = TrueColor::new(255, 255, 255);
+    let blurred = super::blur::blurred(&dot, width, height, 0.8);
+    let at = |x: usize, y: usize| blurred[y * width + x].red;
+    assert!(at(4, 3) < 255 && at(4, 3) > at(3, 3) && at(3, 3) > 0, "the center keeps the most");
+    assert_eq!((at(3, 3), at(4, 2)), (at(5, 3), at(4, 4)), "evenly to every side");
+    let total: u32 = blurred.iter().map(|c| u32::from(c.red)).sum();
+    assert!((240..=270).contains(&total), "the brightness is kept: {total}");
 }

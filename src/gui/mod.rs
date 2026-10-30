@@ -131,6 +131,9 @@ pub struct MandelbrotApp {
     adaptive_supersampling: bool,
     /// Edited value of the supersampling field, applied when editing ends
     supersampling_input: u8,
+    /// Whether the image is blurred (the blur quality preset: on the screen by the shader of `blur`, in a saved image by `blur::blurred`), and the same for saved images
+    quality_blur: bool,
+    image_quality_blur: bool,
     /// The points of interest of the folder, see `points_of_interest`, and the folder they were loaded from
     points: Vec<PointOfInterest>,
     points_folder: std::path::PathBuf,
@@ -278,6 +281,8 @@ impl MandelbrotApp {
             supersampling_amount: config.supersampling_amount,
             supersampling_input: config.supersampling_amount,
             image_supersampling_amount: config.supersampling_amount,
+            quality_blur: false,
+            image_quality_blur: false,
             gesture_active: false,
             drag_remainder: (0.0, 0.0),
             history: ViewHistory::default(),
@@ -467,7 +472,7 @@ impl MandelbrotApp {
         let target = transform::rect_of(self.drawn_fraction(), rect);
         //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
         self.draw_neighborhood(&ui.painter_at(rect), rect);
-        match self.blur.as_ref().filter(|_| self.auto_blur && self.flight.is_some()) {
+        match self.blur.as_ref().filter(|_| (self.auto_blur && self.flight.is_some()) || self.quality_blur) {
             Some(blur) => {
                 let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {

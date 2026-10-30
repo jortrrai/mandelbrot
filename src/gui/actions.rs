@@ -42,7 +42,7 @@ impl MandelbrotApp {
         let time_stamp = chrono::Utc::now().to_string();
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
         let (c, p, m) = (self.c.clone(), self.p.clone(), self.m.clone());
-        let (image_supersampling_amount, coloring_function) = (self.image_supersampling_amount, self.coloring_function);
+        let (image_supersampling_amount, coloring_function, blur) = (self.image_supersampling_amount, self.coloring_function, self.image_quality_blur);
         let buffer_is_complete = self.buffer_is_complete && self.progress.is_none() && !self.adaptive_supersampling; //An interrupted, cancelled or adaptively sampled buffer is not a full-quality image of the saved quality
         let sender = self.notice_sender.clone();
         let gpu = self.gpu.clone().filter(|_| self.use_gpu);
@@ -50,16 +50,23 @@ impl MandelbrotApp {
             let view = c.get_view();
             let (view_width, view_height) = (p.pixel_plane.width, p.pixel_plane.height);
             let same_size_as_view = resolution == Resolution::new(view_width, view_height); //Only then is the image in the buffer the image that is saved
-            let saved = if same_size_as_view && buffer_is_complete {
-                p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount)
+            let mut image_p = if same_size_as_view && buffer_is_complete {
+                p
             } else {
                 let mut image_p = PixelBuffer::new(PixelPlane::new(resolution.width, resolution.height));
                 let mut image_c = ComplexPlane::new(resolution.width, resolution.height);
                 image_p.color_channel_mapping = p.color_channel_mapping;
                 image_c.set_view(&view);
                 rendering::render_complex_plane_into_buffer_with_gpu(&mut image_p, &image_c, &m, image_supersampling_amount, coloring_function, gpu.as_deref());
-                image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount)
+                image_p
             };
+            if blur {
+                //The blur preset: the blur of a frame of this many samples, as on the screen (see `blur::blur_sigma`)
+                let (width, height) = (image_p.pixel_plane.width, image_p.pixel_plane.height);
+                image_p.colors = super::blur::blurred(&image_p.colors, width, height, super::blur::blur_sigma(1, image_supersampling_amount));
+                image_p.update_pixels();
+            }
+            let saved = image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount);
             let message = match saved {
                 Ok(()) => format!("Saved the image to saved/{file_name}.png"),
                 Err(err) => format!("Could not save the image to saved/{file_name}.png: {err}"),
