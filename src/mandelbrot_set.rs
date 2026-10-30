@@ -62,8 +62,11 @@ impl ColorCycle {
 /// The steps of the palette of a `ColorCycle`: with a divide of 1, the colors repeat every this many iterations
 pub const PALETTE_LENGTH: f64 = 500.0;
 
-/// The smallest iteration divide (a step of the palette for every thousandth of an iteration)
-pub const MIN_DIVIDE: f64 = 0.001;
+/// The smallest iteration divide (ten steps of the palette for every iteration: a cycle every 50 iterations; finer only looks like noise)
+pub const MIN_DIVIDE: f64 = 0.1;
+
+/// The largest iteration divide (a cycle every 500,000 iterations, more than the ceiling of auto iterations; broader only looks like one color)
+pub const MAX_DIVIDE: f64 = 1000.0;
 
 /// The amount of points `MandelbrotSet::position_lanes` iterates at the same time
 pub const LANES: usize = 4;
