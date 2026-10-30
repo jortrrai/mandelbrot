@@ -1382,7 +1382,7 @@ fn the_smooth_colors_setting_applies_to_every_render_and_the_window_keeps_it() {
 fn the_zoom_stops_where_the_fast_gpu_math_ends_with_a_warning_in_the_log() {
     let config = Config::sized(64, 48, 50, 1);
     let mut app = manual_app(&config);
-    assert!(app.fast_gpu && !app.limit_zoom, "fast GPU math on, the limit off by default");
+    assert!(app.fast_gpu && app.limit_zoom, "fast GPU math on, and the zoom limited to it by default");
     app.limit_zoom = true;
     let mut deep = app.c.clone();
     deep.set_view(&View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-11));
