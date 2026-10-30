@@ -1671,6 +1671,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     (app.route, app.constant_speed, app.dive_zoom) = (super::flight::Route::Straight, 7.5, 250.0);
     (app.frames_ahead, app.blend_frames, app.f32_frames, app.quality_blur, app.neighborhood_margin) = (1, true, false, true, 250);
     (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs, app.video_frames_at_once) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::Phones, true, 3);
+    app.video_blend = true;
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     let now = std::time::Instant::now();
     app.keep_settings(now);
@@ -1685,6 +1686,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert_eq!((next.route, next.constant_speed, next.dive_zoom), (super::flight::Route::Straight, 7.5, 250.0));
     assert_eq!((next.frames_ahead, next.blend_frames, next.f32_frames, next.quality_blur, next.neighborhood_margin), (1, true, false, true, 250));
     assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs, next.video_frames_at_once), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::Phones, true, 3));
+    assert!(next.video_blend);
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
@@ -2058,4 +2060,36 @@ fn video_render_time_with_frames_at_once() {
         println!("{at_once} at once: {:.2} s, {}", started.elapsed().as_secs_f64(), app.log.last().unwrap());
         let _ = std::fs::remove_dir_all(folder);
     }
+}
+
+#[test]
+fn a_blended_video_has_every_frame_and_blends_the_frames_after_the_first() {
+    let render = |blend: bool| {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
+        (app.pace, app.video_pngs, app.video_blend, app.video_frames_at_once) = (super::flight::Pace::Fast, true, blend, 3);
+        app.go_to_point_of_interest(0);
+        app.skip_flight();
+        app.start_video();
+        let ctx = egui::Context::default();
+        let started = std::time::Instant::now();
+        while app.video_job.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(60), "the video did not finish");
+            app.poll_video(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        wait_for_job(&mut app);
+        let written = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).find(|entry| entry.path().is_dir()).unwrap().path();
+        let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&written).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+        frames.sort();
+        let bytes: Vec<Vec<u8>> = frames.iter().map(|frame| std::fs::read(frame).unwrap()).collect();
+        let _ = std::fs::remove_dir_all(folder);
+        bytes
+    };
+    let (plain, blended) = (render(false), render(true));
+    assert_eq!(plain.len(), blended.len(), "every frame");
+    assert_eq!(plain[0], blended[0], "the first frame has nothing to blend with");
+    assert!(plain.iter().zip(&blended).skip(1).any(|(a, b)| a != b), "the frames after it are blended");
 }

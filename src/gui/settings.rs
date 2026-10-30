@@ -66,6 +66,7 @@ pub(super) struct Settings {
     video_quality: Option<String>,
     video_playback: Option<String>,
     video_pngs: Option<bool>,
+    video_blend: Option<bool>,
     video_frames_at_once: Option<usize>,
 }
 
@@ -155,6 +156,7 @@ impl MandelbrotApp {
             video_quality: Some(self.video_quality.name().to_string()),
             video_playback: Some(self.video_playback.name().to_string()),
             video_pngs: Some(self.video_pngs),
+            video_blend: Some(self.video_blend),
             video_frames_at_once: Some(self.video_frames_at_once),
         }
     }
@@ -269,6 +271,7 @@ impl MandelbrotApp {
             self.video_frames_at_once = at_once;
         }
         set(settings.video_pngs, &mut self.video_pngs);
+        set(settings.video_blend, &mut self.video_blend);
     }
 
     /// Keeps the settings in the file `path` from now on: the settings as they are now are the defaults (for Reset settings), and those of the file are applied.

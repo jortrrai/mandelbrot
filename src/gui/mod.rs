@@ -188,6 +188,8 @@ pub struct MandelbrotApp {
     video_quality: video::VideoQuality,
     video_playback: video::Playback,
     video_pngs: bool,
+    /// Whether the frames of a video are blended over time, see `video` and `temporal`
+    video_blend: bool,
     /// How many frames of a video render at once, see `video`
     video_frames_at_once: usize,
     /// Where videos are written (`saved`)
@@ -353,6 +355,7 @@ impl MandelbrotApp {
             video_quality: video::VideoQuality::VeryHigh,
             video_playback: video::Playback::Computers,
             video_pngs: false,
+            video_blend: false,
             video_frames_at_once: 2,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,

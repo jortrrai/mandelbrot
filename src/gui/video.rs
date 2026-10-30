@@ -18,6 +18,7 @@ use eframe::egui;
 
 use super::flight::{Camera, Flight, Pace, Route};
 use super::{colors_to_rgb_bytes, MandelbrotApp};
+use crate::coloring::TrueColor;
 use crate::complex_plane::ComplexPlane;
 use crate::rendering::{self, Render};
 
@@ -221,6 +222,18 @@ fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, quality: 
     command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
 }
 
+/// A rendered frame of a video, on its way to the writers: its bytes, or with *Blend frames* its colors and view, which are blended in the order of the frames
+enum RenderedFrame {
+    Rgb(Vec<u8>),
+    Colors(Vec<TrueColor>, ComplexPlane),
+}
+
+/// The colors of a frame as they are written: with the blur preset of the saved image quality, blurred as a saved image is (one sample with the blur of a
+/// full-resolution frame, see `blur::blurred`)
+fn finish(colors: Vec<TrueColor>, blur: bool, width: usize, height: usize, samples: u8) -> Vec<TrueColor> {
+    if blur { super::blur::blurred(&colors, width, height, super::blur::blur_sigma(1, samples)) } else { colors }
+}
+
 /// Writes `rgb` (`width` x `height`) as a PNG file at `path`, with fast compression (a video has many frames; ffmpeg makes the small file)
 fn write_png(path: &std::path::Path, rgb: &[u8], width: usize, height: usize) -> std::io::Result<()> {
     let file = std::fs::File::create(path)?;
@@ -251,7 +264,7 @@ impl MandelbrotApp {
         let slug: String = flight.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
         let name = format!("video-{stamp}-{slug}");
         let (m, coloring_function, mapping) = (self.m.clone(), self.coloring_function, self.p.color_channel_mapping);
-        let (samples, adaptive, blur) = (self.image_supersampling_amount, self.adaptive_supersampling.then(rendering::AdaptiveSampling::default), self.image_quality_blur);
+        let (samples, adaptive, blur, blend) = (self.image_supersampling_amount, self.adaptive_supersampling.then(rendering::AdaptiveSampling::default), self.image_quality_blur, self.video_blend);
         let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
         let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
@@ -306,7 +319,7 @@ impl MandelbrotApp {
             };
             //`at_once` renderers take the next frame as soon as they are free (each with all the CPU threads and the GPU, so one fills the gaps the other leaves:
             //the end of a layer, the GPU's batches); the frames go to the writers in their order
-            let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(0), mpsc::sync_channel::<(usize, Option<Vec<u8>>)>(at_once));
+            let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(0), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(at_once));
             let mut rendered = 0;
             std::thread::scope(|scope| {
                 for _ in 0..at_once {
@@ -326,31 +339,43 @@ impl MandelbrotApp {
                             }
                             m.palette = flight.palettes.0.blend(flight.palettes.1, path.share_of_path(time));
                             let mut colors = Vec::new();
-                            let completed = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
-                                .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel).run(|layer, _| colors = layer.to_vec());
-                            if !completed {
+                            let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
+                                .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
+                            //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
+                            let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
+                            if !render.run(|layer, _| colors = layer.to_vec()) {
                                 let _ = frames_sender.send((frame, None));
                                 return;
                             }
-                            if blur {
-                                //The blur preset of the saved image quality, as a saved image has it (one sample with the blur of a full-resolution frame, see `blur::blurred`)
-                                colors = super::blur::blurred(&colors, width, height, super::blur::blur_sigma(1, samples));
-                            }
-                            if frames_sender.send((frame, Some(colors_to_rgb_bytes(&colors, mapping)))).is_err() {
+                            let rendered = if blend {
+                                RenderedFrame::Colors(colors, plane.clone()) //Blended in order, see below
+                            } else {
+                                RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))
+                            };
+                            if frames_sender.send((frame, Some(rendered))).is_err() {
                                 return;
                             }
                         }
                     });
                 }
                 drop(frames_sender);
-                let mut waiting = std::collections::BTreeMap::new();
-                for (frame, rgb) in &frames_receiver {
-                    let Some(rgb) = rgb else {
+                let (mut waiting, mut history) = (std::collections::BTreeMap::new(), None);
+                for (frame, rendered_frame) in &frames_receiver {
+                    let Some(rendered_frame) = rendered_frame else {
                         thread_cancel.store(true, Ordering::Relaxed); //Cancelled: the frames in order so far are kept
                         continue;
                     };
-                    waiting.insert(frame, Arc::new(rgb));
-                    while let Some(rgb) = waiting.remove(&rendered) {
+                    waiting.insert(frame, rendered_frame);
+                    while let Some(rendered_frame) = waiting.remove(&rendered) {
+                        let rgb = Arc::new(match rendered_frame {
+                            RenderedFrame::Rgb(rgb) => rgb,
+                            RenderedFrame::Colors(colors, plane) => {
+                                //Blend frames: into the frames before, moved to this view (see `temporal`), then the blur preset
+                                let mut shown = Vec::new();
+                                super::temporal::blend(&mut history, &plane, &colors, width, height, &mut shown);
+                                colors_to_rgb_bytes(&finish(shown, blur, width, height, samples), mapping)
+                            }
+                        });
                         //(A full queue makes the renderers wait for the writers; a writer that stopped makes the send fail, and the cancel flag says why)
                         if (pngs && png_sender.send((rendered, Arc::clone(&rgb))).is_err()) || (encoding && ffmpeg_sender.send(rgb).is_err()) {
                             thread_cancel.store(true, Ordering::Relaxed);
@@ -425,6 +450,7 @@ impl MandelbrotApp {
         ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
             ui.add(egui::DragValue::new(&mut self.video_frames_at_once).range(FRAMES_AT_ONCE).suffix(" at once")).on_hover_text("How many frames are rendered at the same time (1 to 4), each with all the CPU threads and the GPU: one fills the gaps another leaves, so the CPU and the GPU stay busy; more takes more memory");
+            ui.checkbox(&mut self.video_blend, "Blend frames").on_hover_text("Every frame is blended into the frames before it, moved to its view, as Blend frames does in flights: with the 1x qualities every frame takes another sample, so the video gathers samples over time and moves smoothly for the cost of one sample a frame (fine with 1x + blur). With more samples it smooths the motion");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
         });
         ui.horizontal(|ui| {
