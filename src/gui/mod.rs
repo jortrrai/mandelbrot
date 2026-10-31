@@ -17,6 +17,7 @@ mod blur;
 mod chunks;
 mod controls;
 mod cycle;
+mod depth;
 mod fit;
 mod flight;
 mod flight_files;
@@ -218,6 +219,11 @@ pub struct MandelbrotApp {
     unfinished_videos: Option<Vec<(String, usize, usize)>>,
     /// The text of the field to paste a view into (see `sharing`)
     shared_view_input: String,
+    /// Whether the depth slider is being dragged, and whether the mouse keeps the center of the view (see `depth`)
+    depth_dragging: bool,
+    lock_center: bool,
+    /// The center the depth control keeps, exactly (see `depth::exact_center`)
+    depth_center: Option<crate::complex::Complex>,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
@@ -399,6 +405,9 @@ impl MandelbrotApp {
             video_chunk_frames: None,
             unfinished_videos: None,
             shared_view_input: String::new(),
+            depth_dragging: false,
+            lock_center: false,
+            depth_center: None,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,

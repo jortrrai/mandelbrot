@@ -922,6 +922,7 @@ fn a_wheel_zoom_renders_quickly_with_a_steady_limit_and_the_full_quality_follows
     wait_for_job(&mut app);
     assert_eq!(app.m.max_iterations, limit, "no auto iterations probes during the gesture");
     assert!(!app.buffer_is_complete, "the image of a gesture does not have the full quality");
+    app.settle.as_mut().unwrap().1 = std::time::Instant::now(); //The wheel just turned (the wait above can take longer than the pause on a busy machine)
     app.settle_gesture(&ctx);
     assert!(!app.is_busy(), "the full-quality render waits while the gesture goes on");
 
@@ -2172,6 +2173,35 @@ fn every_png_frame_of_a_video_has_its_view() {
     let (first, last) = (crate::image_metadata::view_of_png(&frames[0]).unwrap(), crate::image_metadata::view_of_png(frames.last().unwrap()).unwrap());
     assert_eq!((first.location.real, first.location.scale), (flight.from.x, flight.from.scale), "{}", first.description);
     assert!((last.location.scale / flight.to.scale - 1.0).abs() < 1e-9 && first.description.starts_with("Frame 1 of "), "{} / {}", last.location.scale, first.description);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn the_depth_control_changes_only_the_zoom_and_renders_like_a_gesture_while_dragged() {
+    //Issue #193
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_point_of_interest(0);
+    wait_for_job(&mut app);
+    let center = app.c.center();
+    for zoom in [0.5, 1e3, 4.2e7, 1.0, 3.3, 77.0, 1e5] {
+        assert!(app.set_depth(zoom));
+        let kept = app.current_point(String::new(), String::new()).location;
+        assert_eq!((kept.real.to_bits(), kept.imaginary.to_bits()), (center.x.to_bits(), center.y.to_bits()), "the center never moves (zoom {zoom})");
+        assert!((app.c.center().x - center.x).abs() < 1e-15 && (app.c.center().y - center.y).abs() < 1e-15, "and the plane is there");
+        assert!((app.c.get_scale() * zoom - 1.0).abs() < 1e-12);
+    }
+    assert!(app.set_depth(1.0));
+    assert!(!app.set_depth(1e15), "deeper than the 64-bit floats can show: refused");
+    assert!((app.c.get_scale() - 1.0).abs() < 1e-12, "and the view stays");
+    //Dragged: frames of a gesture (one sample per pixel); released: the full quality
+    (app.depth_dragging, app.gesture_active) = (true, true);
+    assert!(app.set_depth(1e4));
+    app.render("Depth");
+    assert_eq!(app.progress.as_ref().map(|progress| progress.total), Some(1), "a frame of a gesture");
+    (app.depth_dragging, app.gesture_active) = (false, false);
+    app.settle_gesture(&egui::Context::default());
+    assert_eq!(app.progress.as_ref().map(|progress| progress.total), Some(app.supersampling_amount), "the full quality when it stops");
     let _ = std::fs::remove_dir_all(folder);
 }
 

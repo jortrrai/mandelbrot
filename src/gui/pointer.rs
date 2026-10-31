@@ -45,7 +45,7 @@ impl MandelbrotApp {
         };
         let dragging = response.dragged_by(egui::PointerButton::Primary);
         let scroll = if response.hovered() { ui.input(|input| input.smooth_scroll_delta.y) } else { 0.0 };
-        self.gesture_active = dragging || scroll.abs() >= 1.0;
+        self.gesture_active = dragging || scroll.abs() >= 1.0 || self.depth_dragging;
 
         if let Some(position) = response.interact_pointer_pos() {
             let (x, y) = to_buffer(position);
@@ -55,7 +55,7 @@ impl MandelbrotApp {
                 self.handle_image_click(x, y, true);
             }
         }
-        if dragging {
+        if dragging && !self.lock_center {
             let drag = response.drag_delta();
             let points_per_pixel = size.x / width;
             let columns = whole_pixels(-drag.x, &mut self.drag_remainder.0, points_per_pixel);
@@ -73,7 +73,8 @@ impl MandelbrotApp {
             if !(zooming_in && self.c.precision() == Precision::Exhausted) {
                 if let Some(position) = ui.input(|input| input.pointer.hover_pos()) {
                     let (x, y) = to_buffer(position);
-                    let anchor = self.displayed_plane().complex_from_pixel_plane(f64::from(x), f64::from(y)); //The point under the mouse on the screen
+                    //The point under the mouse on the screen, or with Lock center the center (see `depth`)
+                    let anchor = if self.lock_center { self.c.center() } else { self.displayed_plane().complex_from_pixel_plane(f64::from(x), f64::from(y)) };
                     let mut zoomed = self.c.clone();
                     zoom_around(&mut zoomed, &anchor, factor);
                     if !(zooming_in && self.zoom_refused(&zoomed)) {

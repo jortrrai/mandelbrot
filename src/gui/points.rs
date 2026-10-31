@@ -334,7 +334,7 @@ impl MandelbrotApp {
     /// The current view as a point of interest called `name`: the view, the iterations of its render, and the appearance as it is now (for a new place file,
     /// the metadata of a saved image, and the text of *Copy view*)
     pub(super) fn current_point(&self, name: String, description: String) -> PointOfInterest {
-        let center = self.c.center();
+        let center = self.exact_center(); //(Exactly the center the depth control keeps: keyframes of a dive share it bit for bit)
         let coloring = if self.coloring_index == 0 { Coloring::Hsv } else { Coloring::Bernstein }; //See COLORING_FUNCTIONS
         PointOfInterest {
             name,
