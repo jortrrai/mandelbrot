@@ -122,11 +122,20 @@ impl MandelbrotApp {
             return;
         }
         let mut spec = self.video_queue.remove(0);
+        if let Some(video) = self.finished_video(&spec) {
+            //Finished already (paused while its chunks were joined, or resumed by hand): not rendered again
+            self.log(format!("{} is finished already: {}", spec.flight.name, video.display()));
+            self.save_queue();
+            return;
+        }
         //Named before it starts, so after a restart it resumes its own chunks (see `chunks`)
         spec.output = spec.output.or_else(|| Some(super::video::video_name(&spec.flight, &self.video_folder)));
         self.queue_current = Some(spec.clone());
         self.save_queue();
-        self.start_video_of(spec);
+        if !self.start_video_of(spec) {
+            //It could not start (its music cannot be read, say): back to the front, and the queue stops
+            self.queue_video_ended(false);
+        }
     }
 
     /// A video has ended (`finished`: with all its frames): a video of the queue is done, or goes back to the front of the queue, which stops
