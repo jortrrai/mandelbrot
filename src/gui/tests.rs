@@ -2342,6 +2342,17 @@ fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
     let distinct: std::collections::BTreeSet<(u8, u8, u8)> = app.p.colors.iter().map(|color| (color.red, color.green, color.blue)).collect();
     assert!(distinct.len() > 10, "the deep view has structure: {} colors", distinct.len());
     assert!(app.log.last().unwrap().contains("deep zoom"), "{:?}", app.log.last());
+    //Zooming out (still deep) and in again: exactly the same point (the center keeps its digits; a step of a pixel gives it digits that deep)
+    app.pan_deep(1, 1);
+    let before = app.deep_shown().map(|deep| deep.real.to_decimal()).unwrap();
+    for _ in 0..20 {
+        app.zoom_deep(2.0, (32.0, 24.0));
+    }
+    assert!(app.deep_view().is_some(), "still deep");
+    for _ in 0..20 {
+        app.zoom_deep(0.5, (32.0, 24.0));
+    }
+    assert_eq!(app.deep_shown().map(|deep| deep.real.to_decimal()), Some(before));
     //Panning there and back: exactly the same center
     let center = app.deep_shown().map(|deep| (deep.real.clone(), deep.imaginary.clone())).unwrap();
     app.pan_deep(5, -3);

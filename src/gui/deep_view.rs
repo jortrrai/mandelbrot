@@ -57,7 +57,8 @@ impl MandelbrotApp {
             plane_scale *= 2.0;
         }
         self.c.set_view(&View::new(center.0, center.1, plane_scale));
-        let bits = deep::bits_for(scale, self.p.pixel_plane.width);
+        //The bits the scale needs, and never fewer than the center has: zooming out and in again comes back to exactly the same point
+        let bits = deep::bits_for(scale, self.p.pixel_plane.width).max(real.bits()).max(imaginary.bits());
         self.deep = Some(DeepView { real: real.with_bits(bits), imaginary: imaginary.with_bits(bits), scale, plane: format!("{:?}", self.c.get_view()) });
     }
 
