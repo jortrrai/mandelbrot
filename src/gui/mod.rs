@@ -185,6 +185,9 @@ pub struct MandelbrotApp {
     video_fps: u32,
     /// The speed of a video in percent of the flight's, its file format, and whether its frames are also written as PNG files, see `video`
     video_speed: u16,
+    /// Whether the speed of a video is set by a length instead (*Fit to length*), and that length as typed in the hours, minutes and seconds boxes (#179)
+    video_fit_length: bool,
+    video_length: [String; 3],
     video_quality: video::VideoQuality,
     video_playback: video::Playback,
     video_pngs: bool,
@@ -356,6 +359,8 @@ impl MandelbrotApp {
             video_job: None,
             video_fps: 30,
             video_speed: 100,
+            video_fit_length: false,
+            video_length: [String::new(), String::from("3"), String::from("20")],
             video_quality: video::VideoQuality::VeryHigh,
             video_playback: video::Playback::Maximum,
             video_pngs: false,

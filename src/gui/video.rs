@@ -289,7 +289,7 @@ fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32) -
 }
 
 /// The estimate of a video shown next to its controls: its frames, its length, and the size it takes at most on busy views (see `bits_per_pixel`)
-pub(super) fn estimate(duration: Duration, fps: u32, speed: u16, (width, height): (usize, usize), quality: VideoQuality, playback: Playback) -> (usize, Duration, f64) {
+pub(super) fn estimate(duration: Duration, fps: u32, speed: f64, (width, height): (usize, usize), quality: VideoQuality, playback: Playback) -> (usize, Duration, f64) {
     let frames = frame_count(duration, fps, speed);
     let bytes = frames as f64 * (width * height) as f64 * quality.bits_per_pixel(playback) / 8.0;
     (frames, Duration::from_secs_f64(frames as f64 / f64::from(fps)), bytes)
@@ -308,13 +308,26 @@ fn nvenc_works() -> bool {
 }
 
 /// The time along the flight of frame `frame` of a video at `fps` and `speed` percent of the flight's speed
-fn frame_time(frame: usize, fps: u32, speed: u16) -> Duration {
-    Duration::from_secs_f64(frame as f64 / f64::from(fps) * f64::from(speed.max(1)) / 100.0)
+fn frame_time(frame: usize, fps: u32, speed: f64) -> Duration {
+    Duration::from_secs_f64(frame as f64 / f64::from(fps) * speed.max(1.0) / 100.0)
 }
 
-/// The frames of a video of a flight of `duration` at `fps` and `speed` percent: from the start to the place, both included
-fn frame_count(duration: Duration, fps: u32, speed: u16) -> usize {
-    (duration.as_secs_f64() * 100.0 / f64::from(speed.max(1)) * f64::from(fps)).ceil() as usize + 1
+/// The frames of a video of a flight of `duration` at `fps` and `speed` percent: from the start to the place, both included (a video that fits a length exactly
+/// is not one frame longer because of the rounding of the speed)
+fn frame_count(duration: Duration, fps: u32, speed: f64) -> usize {
+    (duration.as_secs_f64() * 100.0 / speed.max(1.0) * f64::from(fps) - 1e-6).ceil().max(0.0) as usize + 1
+}
+
+/// A speed in percent as the video controls and the log show it: whole percents without decimals
+pub(super) fn speed_text(speed: f64) -> String {
+    if (speed - speed.round()).abs() < 0.05 { format!("{speed:.0}%") } else { format!("{speed:.1}%") }
+}
+
+/// A length as hours, minutes and seconds (`1:02:03`, or `2:03` under an hour)
+fn length_text(length: Duration) -> String {
+    let seconds = length.as_secs_f64().round() as u64;
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 { format!("{hours}:{minutes:02}:{seconds:02}") } else { format!("{minutes}:{seconds:02}") }
 }
 
 /// The flight a video is made of: from where to where, at which pace, and the iteration limits at both ends
@@ -399,11 +412,18 @@ impl MandelbrotApp {
                 return;
             }
         };
-        let (width, height, fps, speed, quality, playback, pngs) = (resolution.width, resolution.height, self.video_fps, self.video_speed, self.video_quality, self.video_playback, self.video_pngs);
+        let (width, height, fps, quality, playback, pngs) = (resolution.width, resolution.height, self.video_fps, self.video_quality, self.video_playback, self.video_pngs);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
         let thread_scheduler = Arc::clone(&scheduler);
         let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
+        let speed = match self.video_speed_for(path.duration()) {
+            Ok(speed) => speed,
+            Err(reason) => {
+                self.log(format!("Could not render the video: {reason}"));
+                return;
+            }
+        };
         let total = frame_count(path.duration(), fps, speed);
         let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
         let slug: String = flight.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
@@ -590,9 +610,9 @@ impl MandelbrotApp {
             let encoded = ffmpeg.and_then(|mut child| child.wait().ok().filter(std::process::ExitStatus::success)).is_some();
             let complete = if frames == total { "" } else { " (stopped: incomplete)" };
             let (written, file) = (if pngs { format!(" in {}", folder.display()) } else { String::new() }, if encoded { format!(" as {video}") } else if pngs { String::from(" (ffmpeg was not found or failed, so there is no video file; the frames can be encoded with it later)") } else { String::from(" (ffmpeg was not found or failed, and PNG frames are off: nothing was written)") });
-            let _ = sender.send(format!("Video of the flight: {frames} of {total} frames at {fps} FPS, {speed}% speed{complete}{written}{file}"));
+            let _ = sender.send(format!("Video of the flight: {frames} of {total} frames at {fps} FPS, {} speed{complete}{written}{file}", speed_text(speed)));
         });
-        self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {speed}% speed, {}, {}", quality.name(), playback.name()));
+        self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {} speed, {}, {}", speed_text(speed), quality.name(), playback.name()));
         self.video_job = Some(VideoJob { done, scheduler, total, cancel, started: Instant::now(), result });
     }
 
@@ -622,6 +642,33 @@ impl MandelbrotApp {
         });
     }
 
+    /// The length typed in the hours, minutes and seconds boxes of *Fit to length* (issue #179): empty boxes count as 0, and a length needs more than 0 seconds
+    pub(super) fn target_length(&self) -> Option<Duration> {
+        let mut seconds = 0.0;
+        for (input, unit) in self.video_length.iter().zip([3600.0, 60.0, 1.0]) {
+            let input = input.trim();
+            let value = if input.is_empty() { 0.0 } else { input.replace(',', ".").parse::<f64>().ok().filter(|value| value.is_finite() && *value >= 0.0)? };
+            seconds += value * unit;
+        }
+        (seconds > 0.0).then(|| Duration::from_secs_f64(seconds))
+    }
+
+    /// The speed of the video of a flight of `duration`, in percent of the flight's: the speed control's, or with *Fit to length* the speed that makes the video
+    /// exactly as long as the typed length; an error says why there is none (no length, or a speed outside `SPEEDS`)
+    pub(super) fn video_speed_for(&self, duration: Duration) -> Result<f64, String> {
+        if !self.video_fit_length {
+            return Ok(f64::from(self.video_speed));
+        }
+        let length = self.target_length().ok_or_else(|| String::from("Type the length of the video in hours, minutes and seconds"))?;
+        let speed = duration.as_secs_f64() * 100.0 / length.as_secs_f64();
+        let (slowest, fastest) = (f64::from(*SPEEDS.start()), f64::from(*SPEEDS.end()));
+        if (slowest..=fastest).contains(&speed) {
+            Ok(speed)
+        } else {
+            Err(format!("{} needs {} speed, outside {slowest:.0}% to {fastest:.0}%: the flight takes {:.1} s at 100%", length_text(length), speed_text(speed), duration.as_secs_f64()))
+        }
+    }
+
     /// The video controls: the button, the frame rate, the speed, the format and the PNG frames (the progress of a video under way is at the top, see
     /// `video_progress_ui`)
     pub(super) fn video_ui(&mut self, ui: &mut egui::Ui) {
@@ -642,9 +689,18 @@ impl MandelbrotApp {
             });
         });
         ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
+            ui.add_enabled(!self.video_fit_length, egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
             ui.checkbox(&mut self.video_blend, "Blend frames").on_hover_text("Every frame is blended into the frames before it, moved to its view, as Blend frames does in flights: with the 1x qualities every frame takes another sample, so the video gathers samples over time and moves smoothly for the cost of one sample a frame (fine with 1x + blur). With more samples it smooths the motion");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.video_fit_length, "Fit to length:").on_hover_text("Sets the speed so the video of the last flight lasts exactly this long (hours, minutes, seconds), instead of the speed in percent");
+            ui.add_enabled_ui(self.video_fit_length, |ui| {
+                for (input, unit) in self.video_length.iter_mut().zip(["h", "m", "s"]) {
+                    ui.add(egui::TextEdit::singleline(input).desired_width(28.0).hint_text(unit));
+                    ui.label(unit);
+                }
+            });
         });
         ui.horizontal(|ui| {
             ui.label("Quality:");
@@ -676,10 +732,18 @@ impl MandelbrotApp {
         if let Some(flight) = &self.last_flight {
             let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
             let size = self.save_size.resolve(self.default_save_resolution(), self.view_resolution()).map_or((0, 0), |resolution| (resolution.width, resolution.height));
-            let (frames, length, bytes) = estimate(path.duration(), self.video_fps, self.video_speed, size, self.video_quality, self.video_playback);
-            let png = if self.video_pngs { format!(" + PNG frames about {}", megabytes(frames as f64 * (size.0 * size.1) as f64 * 3.0 / 2.0)) } else { String::new() };
-            ui.label(format!("{:.1} s, {frames} frames of {} x {}, up to about {}{png}", length.as_secs_f64(), size.0, size.1, megabytes(bytes)))
-                .on_hover_text("The length and the frames of the video, and the size of its file at most (measured on a busy, detailed view; calm views take far less)");
+            match self.video_speed_for(path.duration()) {
+                Ok(speed) => {
+                    let (frames, length, bytes) = estimate(path.duration(), self.video_fps, speed, size, self.video_quality, self.video_playback);
+                    let png = if self.video_pngs { format!(" + PNG frames about {}", megabytes(frames as f64 * (size.0 * size.1) as f64 * 3.0 / 2.0)) } else { String::new() };
+                    let fitted = if self.video_fit_length { format!(" at {} speed", speed_text(speed)) } else { String::new() };
+                    ui.label(format!("{} ({:.1} s){fitted}, {frames} frames of {} x {}, up to about {}{png}", length_text(length), length.as_secs_f64(), size.0, size.1, megabytes(bytes)))
+                        .on_hover_text("The length and the frames of the video, and the size of its file at most (measured on a busy, detailed view; calm views take far less)");
+                }
+                Err(reason) => {
+                    ui.colored_label(egui::Color32::from_rgb(255, 165, 0), reason);
+                }
+            }
         }
     }
 }
@@ -706,12 +770,12 @@ mod tests {
     #[test]
     fn a_slower_video_has_more_frames_of_the_same_flight() {
         let second = Duration::from_secs(1);
-        assert_eq!(frame_count(second * 2, 30, 100), 61, "2 s at 30 FPS: the start, then 60 more frames");
-        assert_eq!(frame_count(second * 2, 30, 10), 601, "10%: ten times the frames");
-        assert_eq!(frame_count(second * 2, 240, 400), 121);
-        assert_eq!(frame_time(30, 30, 100), second);
-        assert_eq!(frame_time(300, 30, 10), second, "at 10% frame 300 (10 s of video) is 1 s into the flight");
-        assert_eq!(frame_time(60, 120, 50), Duration::from_millis(250));
+        assert_eq!(frame_count(second * 2, 30, 100.0), 61, "2 s at 30 FPS: the start, then 60 more frames");
+        assert_eq!(frame_count(second * 2, 30, 10.0), 601, "10%: ten times the frames");
+        assert_eq!(frame_count(second * 2, 240, 400.0), 121);
+        assert_eq!(frame_time(30, 30, 100.0), second);
+        assert_eq!(frame_time(300, 30, 10.0), second, "at 10% frame 300 (10 s of video) is 1 s into the flight");
+        assert_eq!(frame_time(60, 120, 50.0), Duration::from_millis(250));
         assert!(FRAME_RATES.starts_with(&[24, 30, 60]) && FRAME_RATES.ends_with(&[90, 120, 144, 240]));
     }
 
@@ -730,6 +794,16 @@ mod tests {
         assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60), &["-g", "30", "+faststart"]));
         assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
         assert_eq!((extension(VideoQuality::Lossless), extension(VideoQuality::NearLossless)), ("mkv", "mp4"));
+    }
+
+    #[test]
+    fn a_video_that_fits_a_length_has_exactly_its_frames() {
+        //200 s at 60 FPS: 12,000 frame intervals, and the frames at both ends
+        let flight = Duration::from_secs_f64(37.3);
+        let speed = flight.as_secs_f64() * 100.0 / 200.0;
+        assert_eq!(frame_count(flight, 60, speed), 12_001);
+        assert_eq!(frame_count(Duration::from_secs(13), 60, 50.0), 1561, "a whole speed as before");
+        assert_eq!((speed_text(18.65), speed_text(50.0), length_text(Duration::from_secs(200)), length_text(Duration::from_secs(3723))), (String::from("18.6%"), String::from("50%"), String::from("3:20"), String::from("1:02:03")));
     }
 
     #[test]
@@ -780,9 +854,9 @@ mod tests {
 
     #[test]
     fn the_estimate_has_the_exact_frames_and_length_and_a_size_that_grows_with_the_tier() {
-        let (frames, length, high) = estimate(Duration::from_secs(13), 60, 50, (1920, 1080), VideoQuality::High, Playback::Maximum);
+        let (frames, length, high) = estimate(Duration::from_secs(13), 60, 50.0, (1920, 1080), VideoQuality::High, Playback::Maximum);
         assert_eq!((frames, length.as_secs()), (1561, 26), "13 s at half speed: 26 s, at 60 FPS");
-        let sizes: Vec<f64> = VideoQuality::ALL.iter().map(|quality| estimate(Duration::from_secs(13), 60, 50, (1920, 1080), *quality, Playback::Maximum).2).collect();
+        let sizes: Vec<f64> = VideoQuality::ALL.iter().map(|quality| estimate(Duration::from_secs(13), 60, 50.0, (1920, 1080), *quality, Playback::Maximum).2).collect();
         assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]) && (sizes[0] - high).abs() < 1.0);
         //Lossless: about 3.2 GB, as Jort measured (3 GB for 26 s)
         assert!((2.5e9..4e9).contains(&sizes[4]), "{}", sizes[4]);

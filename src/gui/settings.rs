@@ -63,6 +63,8 @@ pub(super) struct Settings {
     stretch_palette: Option<bool>,
     video_fps: Option<u32>,
     video_speed: Option<u16>,
+    video_fit_length: Option<bool>,
+    video_length: Option<[String; 3]>,
     video_quality: Option<String>,
     video_playback: Option<String>,
     video_pngs: Option<bool>,
@@ -152,6 +154,8 @@ impl MandelbrotApp {
             stretch_palette: Some(self.m.palette.stretch),
             video_fps: Some(self.video_fps),
             video_speed: Some(self.video_speed),
+            video_fit_length: Some(self.video_fit_length),
+            video_length: Some(self.video_length.clone()),
             video_quality: Some(self.video_quality.name().to_string()),
             video_playback: Some(self.video_playback.name().to_string()),
             video_pngs: Some(self.video_pngs),
@@ -258,6 +262,12 @@ impl MandelbrotApp {
         }
         if let Some(speed) = settings.video_speed.filter(|speed| SPEEDS.contains(speed)) {
             self.video_speed = speed;
+        }
+        if let Some(fit) = settings.video_fit_length {
+            self.video_fit_length = fit;
+        }
+        if let Some(length) = settings.video_length.clone() {
+            self.video_length = length;
         }
         if let Some(quality) = settings.video_quality.as_deref().and_then(|name| VideoQuality::ALL.into_iter().find(|quality| quality.name() == name)) {
             self.video_quality = quality;

@@ -1672,6 +1672,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     (app.frames_ahead, app.blend_frames, app.f32_frames, app.quality_blur, app.neighborhood_margin) = (1, true, false, true, 250);
     (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true);
     app.video_blend = true;
+    (app.video_fit_length, app.video_length) = (true, [String::from("1"), String::new(), String::from("7.5")]);
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     let now = std::time::Instant::now();
     app.keep_settings(now);
@@ -1687,6 +1688,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert_eq!((next.frames_ahead, next.blend_frames, next.f32_frames, next.quality_blur, next.neighborhood_margin), (1, true, false, true, 250));
     assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true));
     assert!(next.video_blend);
+    assert_eq!((next.video_fit_length, next.target_length()), (true, Some(Duration::from_secs_f64(3607.5))));
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
@@ -1924,6 +1926,38 @@ fn the_color_channels_have_a_drop_down_per_screen_channel_that_shows_its_source(
     let at = texts.iter().position(|text| text == "R:").expect("the drop-down of the red channel");
     assert_eq!(texts[at..at + 6], ["R:", "Blue", "G:", "Green", "B:", "Green"], "{:?}", &texts[at..]);
 }
+#[test]
+fn a_video_that_fits_a_length_lasts_exactly_that_long() {
+    //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
+    (app.video_quality, app.video_pngs, app.pace) = (super::video::VideoQuality::Lossless, false, super::flight::Pace::Fast);
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
+    app.video_fit_length = true;
+    app.video_length = [String::new(), String::new(), String::new()];
+    assert!(app.video_speed_for(duration).is_err(), "no length typed");
+    app.video_length = [String::from("2"), String::new(), String::new()];
+    assert!(app.video_speed_for(duration).unwrap_err().contains("outside"), "two hours would need less than 1% speed");
+    app.video_length = [String::from("0"), String::from("0"), String::from("3")];
+    let speed = app.video_speed_for(duration).unwrap();
+    assert!((speed - duration.as_secs_f64() * 100.0 / 3.0).abs() < 1e-9);
+    app.start_video();
+    let ctx = egui::Context::default();
+    let started = std::time::Instant::now();
+    while app.video_job.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(60), "the video did not finish");
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let message = app.log.iter().rev().find(|line| line.starts_with("Video of the flight")).unwrap();
+    assert!(message.starts_with(&format!("Video of the flight: 73 of 73 frames at 24 FPS, {} speed", super::video::speed_text(speed))), "{message}");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
 #[test]
 fn a_half_speed_lossless_video_without_png_frames_has_twice_the_frames_in_one_file() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
