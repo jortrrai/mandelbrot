@@ -5,6 +5,7 @@
 use std::time::{Duration, Instant};
 
 use mandelbrot::coloring::{ColorChannelMapping, TrueColor};
+use mandelbrot::complex::Complex;
 use mandelbrot::complex_plane::{ComplexPlane, View};
 use mandelbrot::mandelbrot_set::MandelbrotSet;
 use mandelbrot::pixel_buffer::PixelBuffer;
@@ -61,7 +62,7 @@ fn checksum(colors: &[TrueColor]) -> u64 {
     })
 }
 
-fn render(workload: &Workload, coloring_function: fn(u32, u32) -> TrueColor) -> Vec<TrueColor> {
+fn render(workload: &Workload, coloring_function: fn(f64, f64) -> TrueColor) -> Vec<TrueColor> {
     let mut c = ComplexPlane::new(WIDTH, HEIGHT);
     c.set_view(&workload.view);
     let m = MandelbrotSet::new(workload.max_iterations, 2.0);
@@ -83,7 +84,7 @@ fn main() {
     println!("The checksums identify the rendered image, they should not change between versions that render the same image.\n");
 
     for workload in workloads().iter().filter(|w| filter.as_ref().is_none_or(|f| w.name.contains(f.as_str()))) {
-        for (coloring_name, coloring_function) in [("bernstein", TrueColor::new_from_bernstein_polynomials as fn(u32, u32) -> TrueColor), ("hsv", TrueColor::new_from_hsv_colors)] {
+        for (coloring_name, coloring_function) in [("bernstein", TrueColor::new_from_bernstein_polynomials as fn(f64, f64) -> TrueColor), ("hsv", TrueColor::new_from_hsv_colors)] {
             let label = format!("render {} ({coloring_name}, {} it, {}x)", workload.name, workload.max_iterations, workload.supersampling_amount);
             let checksum = checksum(&render(workload, coloring_function));
             let times = time_runs(runs, || {
@@ -117,6 +118,148 @@ fn main() {
                 sent.0 = std::hint::black_box(colors.to_vec());
             });
         }));
+    }
+
+    //Previews before the first layer (`Render::preview`, with the threshold of the window): how soon the first image is there, and what the previews cost in total,
+    //with the settings of the window (32x adaptive supersampling) on a slow and a fast view
+    if filter.as_ref().is_none_or(|f| "previews".contains(f.as_str())) {
+        for workload in [&workloads()[2], &workloads()[0]] {
+            let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+            c.set_view(&workload.view);
+            let m = MandelbrotSet::new(workload.max_iterations, 2.0);
+            for (name, preview) in [("without previews", None), ("with previews", Some(Duration::from_millis(16)))] {
+                let mut first = Vec::new();
+                let totals = time_runs(runs, || {
+                    let started = Instant::now();
+                    let mut first_image = None;
+                    Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(32).adaptive(Some(rendering::AdaptiveSampling::default())).preview(preview).run( |colors, _| {
+                        first_image.get_or_insert_with(|| started.elapsed());
+                        std::hint::black_box(colors.to_vec());
+                    });
+                    first.push(first_image.unwrap_or_default());
+                });
+                summarize(&format!("{} 32x adaptive {name}, first image", workload.name), first);
+                summarize(&format!("{} 32x adaptive {name}, whole render", workload.name), totals);
+            }
+        }
+    }
+
+    //What the window does: one sample state that every render continues (`Render::resume`), next to the plain render and the old strip render of a move
+    if filter.as_ref().is_none_or(|f| "window-state".contains(f.as_str())) {
+        let m = MandelbrotSet::new(1000, 2.0);
+        let coloring = TrueColor::new_from_bernstein_polynomials as fn(f64, f64) -> TrueColor;
+        let views = [View::new(-0.75, 0.0, 1.0), View::new(-0.75, 0.0, 0.9)].map(|view| {
+            let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+            c.set_view(&view);
+            c
+        });
+        //A zoom: the state starts over, in the memory of the last render
+        let mut zoom = 0;
+        summarize("window zoom (1x): plain render", time_runs(runs, || {
+            zoom += 1;
+            Render::new(&views[zoom % 2], &m, WIDTH, HEIGHT, coloring).run(|colors, _| { std::hint::black_box(colors.to_vec()); });
+        }));
+        let mut state = rendering::SampleState::new();
+        summarize("window zoom (1x): render with a sample state", time_runs(runs, || {
+            zoom += 1;
+            Render::new(&views[zoom % 2], &m, WIDTH, HEIGHT, coloring).resume(&mut state).run(|colors, _| { std::hint::black_box(colors.to_vec()); });
+        }));
+        //Moves of 10 rows, up and down in turn, after a complete render
+        let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(WIDTH, HEIGHT));
+        Render::new(&views[0], &m, WIDTH, HEIGHT, coloring).supersampling(4).run(|colors, _| buffer.colors.copy_from_slice(colors));
+        let mut plane = views[0].clone();
+        let mut up = false;
+        summarize("window move 10 rows (4x): old strip render", time_runs(runs, || {
+            up = !up;
+            let rows: i16 = if up { 10 } else { -10 };
+            rendering::move_complex_plane_by_pixels(&mut plane, i64::from(rows), 0);
+            buffer.translate_buffer(i128::from(rows), 0);
+            let region = rendering::ExposedRegion::from_shift(WIDTH, HEIGHT, i128::from(rows), 0).unwrap();
+            let base = buffer.colors.clone();
+            Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).only(&region, &base).run(|colors, _| { buffer.colors.copy_from_slice(colors); std::hint::black_box(colors.to_vec()); });
+        }));
+        let mut plane = views[0].clone();
+        Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).resume(&mut state).run(|_, _| {});
+        summarize("window move 10 rows (4x): continued samples", time_runs(runs, || {
+            up = !up;
+            rendering::move_complex_plane_by_pixels(&mut plane, if up { 10 } else { -10 }, 0);
+            Render::new(&plane, &m, WIDTH, HEIGHT, coloring).supersampling(4).resume(&mut state).run(|colors, _| { std::hint::black_box(colors.to_vec()); });
+        }));
+    }
+
+    //The GPU (`rendering::gpu`) against the CPU's lockstep loop on all render threads: the positions of one sample of every pixel, bit for bit the same
+    if filter.as_ref().is_none_or(|f| "gpu".contains(f.as_str())) {
+        match rendering::gpu::GpuIterator::new() {
+            Err(reason) => println!("gpu: not available ({reason})"),
+            Ok(gpu) => {
+                println!("gpu: {}", gpu.name());
+                for (name, view, max_iterations) in [("default view", View::new(-0.75, 0.0, 1.0), 1000), ("seahorse", View::new(-0.7498100000000001, -0.020300000000000054, 0.000064), 5000), ("deep", View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-10), 20000)] {
+                    let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+                    c.set_view(&view);
+                    let m = MandelbrotSet::new(max_iterations, 2.0);
+                    let points: Vec<Complex> = (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| (x, y))).map(|(x, y)| c.complex_from_pixel_plane(x as f64 + 0.5, y as f64 + 0.5)).collect();
+                    let cpu = |points: &[Complex]| {
+                        let mut out = vec![0.0; points.len()];
+                        let rows = std::sync::Mutex::new(out.chunks_mut(WIDTH).zip(points.chunks(WIDTH)));
+                        std::thread::scope(|scope| for _ in 0..rendering::render_thread_count() { scope.spawn(|| loop {
+                            let next = rows.lock().unwrap().next();
+                            let Some((row, row_points)) = next else { return };
+                            let (groups, rest) = row_points.as_chunks::<4>();
+                            for (index, group) in groups.iter().enumerate() { row[index * 4..index * 4 + 4].copy_from_slice(&m.position_lanes(group)); }
+                            for (offset, point) in rest.iter().enumerate() { row[groups.len() * 4 + offset] = m.position(point); }
+                        }); });
+                        out
+                    };
+                    let (on_cpu, on_gpu) = (cpu(&points), gpu.positions(&m, &points).expect("the GPU"));
+                    let same = on_cpu.iter().zip(&on_gpu).all(|(a, b)| a.to_bits() == b.to_bits());
+                    summarize(&format!("{name} ({max_iterations} it), CPU all threads"), time_runs(runs, || { std::hint::black_box(cpu(&points)); }));
+                    summarize(&format!("{name} ({max_iterations} it), GPU"), time_runs(runs, || { std::hint::black_box(gpu.positions(&m, &points).expect("the GPU")); }));
+                    println!("{:<44} the same positions bit for bit: {same}", "");
+                    //The fast loop gets the pixels and computes their points itself (sample 0, at its jitter): its iteration counts are checked in `gpu`'s tests
+                    let pixels: Vec<u32> = (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| rendering::gpu::packed_pixel(x, y))).collect();
+                    summarize(&format!("{name} ({max_iterations} it), fast GPU"), time_runs(runs, || { std::hint::black_box(gpu.fast_positions(&m, &c, 0, (0, 0), &pixels).expect("the GPU")); }));
+                }
+                //Whole renders: the CPU threads alone, and with the GPU joining the first pass after 3 ms, like the window (`GPU_JOIN_AFTER`)
+                let join = Some((&gpu, Duration::from_millis(3)));
+                for (name, view, max_iterations, samples, adaptive) in [
+                    ("default view 1x", View::new(-0.75, 0.0, 1.0), 1000, 1, false),
+                    ("seahorse 1x", View::new(-0.7498100000000001, -0.020300000000000054, 0.000064), 5000, 1, false),
+                    ("deep 1x", View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-10), 20000, 1, false),
+                    ("default view 32x adaptive", View::new(-0.75, 0.0, 1.0), 1000, 32, true),
+                    ("seahorse 32x adaptive", View::new(-0.7498100000000001, -0.020300000000000054, 0.000064), 5000, 32, true),
+                ] {
+                    let mut c = ComplexPlane::new(WIDTH, HEIGHT);
+                    c.set_view(&view);
+                    let m = MandelbrotSet::new(max_iterations, 2.0);
+                    let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
+                    let render = |gpu: Option<(&rendering::gpu::GpuIterator, Duration)>, fast: bool| {
+                        let mut last = Vec::new();
+                        Render::new(&c, &m, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).gpu(gpu).fast_gpu(fast).run(|colors, _| last = colors.to_vec());
+                        last
+                    };
+                    let on_cpu = render(None, false);
+                    let same = on_cpu.iter().zip(&render(join, false)).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue));
+                    summarize(&format!("render {name}, CPU"), time_runs(runs, || { std::hint::black_box(render(None, false)); }));
+                    summarize(&format!("render {name}, CPU + GPU"), time_runs(runs, || { std::hint::black_box(render(join, false)); }));
+                    println!("{:<44} the same image: {same}", "");
+                    let differ = on_cpu.iter().zip(&render(join, true)).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+                    summarize(&format!("render {name}, CPU + fast GPU"), time_runs(runs, || { std::hint::black_box(render(join, true)); }));
+                    println!("{:<44} other colors: {:.3}% of the pixels", "", differ as f64 * 100.0 / on_cpu.len() as f64);
+                }
+                //Saving an image of 1920 x 1080 at 4x (the save path, with the GPU from the start of every pass)
+                let mut c = ComplexPlane::new(1920, 1080);
+                c.set_view(&View::new(-0.7498100000000001, -0.020300000000000054, 0.000064));
+                let m = MandelbrotSet::new(5000, 2.0);
+                let mut buffer = PixelBuffer::new(mandelbrot::pixel_buffer::pixel_plane::PixelPlane::new(1920, 1080));
+                let mut with_gpu = buffer.clone();
+                rendering::render_complex_plane_into_buffer(&mut buffer, &c, &m, 4, TrueColor::new_from_bernstein_polynomials);
+                rendering::render_complex_plane_into_buffer_with_gpu(&mut with_gpu, &c, &m, 4, TrueColor::new_from_bernstein_polynomials, Some(&gpu));
+                let same = buffer.pixels == with_gpu.pixels;
+                summarize("save seahorse 1920x1080 4x, CPU", time_runs(runs, || rendering::render_complex_plane_into_buffer(&mut buffer, &c, &m, 4, TrueColor::new_from_bernstein_polynomials)));
+                summarize("save seahorse 1920x1080 4x, CPU + GPU", time_runs(runs, || rendering::render_complex_plane_into_buffer_with_gpu(&mut with_gpu, &c, &m, 4, TrueColor::new_from_bernstein_polynomials, Some(&gpu))));
+                println!("{:<44} the same image: {same}", "");
+            }
+        }
     }
 
     //Saving at another size than the window renders the whole image into a buffer in one go

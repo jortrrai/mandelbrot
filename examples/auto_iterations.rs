@@ -6,7 +6,7 @@ use std::time::Instant;
 use mandelbrot::auto_iterations::{choose_limit, AutoIterationSettings};
 use mandelbrot::complex::Complex;
 use mandelbrot::complex_plane::{ComplexPlane, View};
-use mandelbrot::mandelbrot_set::{MandelbrotSet, LANES};
+use mandelbrot::mandelbrot_set::MandelbrotSet;
 
 fn views() -> Vec<(&'static str, View)> {
     vec![
@@ -25,19 +25,18 @@ fn views() -> Vec<(&'static str, View)> {
 
 fn render(c: &ComplexPlane, m: &MandelbrotSet, w: usize, h: usize, threads: usize) -> Vec<u32> {
     let points: Vec<Complex> = (0..w * h).map(|i| c.complex_from_pixel_plane((i % w) as f64 + 0.5, (i / w) as f64 + 0.5)).collect();
-    let mut out = vec![0u32; w * h];
-    let chunk = (points.len() / threads / LANES + 1) * LANES;
+    //Integer coloring: the position of a point is its iteration count
+    let mut integer = m.clone();
+    integer.smooth_coloring = false;
+    let mut out = vec![0.0; w * h];
+    let chunk = points.len() / threads + 1;
     std::thread::scope(|s| {
         for (o, p) in out.chunks_mut(chunk).zip(points.chunks(chunk)) {
-            s.spawn(move || {
-                let (groups, remainder) = p.as_chunks::<LANES>();
-                let mut i = 0;
-                for g in groups { o[i..i + LANES].copy_from_slice(&m.iterate_lanes(&std::array::from_fn(|k| Complex::new(g[k].x, g[k].y)))); i += LANES; }
-                for r in remainder { o[i] = m.iterate(r); i += 1; }
-            });
+            let integer = &integer;
+            s.spawn(move || integer.positions(p, o, None));
         }
     });
-    out
+    out.iter().map(|position| *position as u32).collect()
 }
 
 fn main() {

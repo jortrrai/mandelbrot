@@ -1,4 +1,4 @@
-//! The size of the saved image: the choice in the window (the command line size, the size of the view, a preset or a custom size) and the custom presets that the user keeps.
+//! The size of the saved image: the choice in the window (the default size, the size of the view, a preset or a custom size) and the custom presets that the user keeps.
 
 use std::path::PathBuf;
 
@@ -7,8 +7,8 @@ use crate::resolution::{self, Resolution, ResolutionPreset};
 /// What the "Saved image size" list has selected
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SaveSizeChoice {
-    /// The image size of the command line (the window size unless the window is scaled)
-    CommandLine,
+    /// The default size of a saved image (1200 x 800)
+    Standard,
     /// The size of the view that is shown in the window
     View,
     /// A built-in or custom preset, by name
@@ -35,11 +35,11 @@ pub(super) struct SaveSize {
 }
 
 impl SaveSize {
-    /// The starting state: the command line size selected, and the custom presets loaded from `presets_path`.
+    /// The starting state: the default size selected, and the custom presets loaded from `presets_path`.
     /// Returns the messages about presets that could not be used.
-    pub fn new(command_line: Resolution, presets_path: Option<PathBuf>) -> (SaveSize, Vec<String>) {
+    pub fn new(default_size: Resolution, presets_path: Option<PathBuf>) -> (SaveSize, Vec<String>) {
         let (custom_presets, warnings) = presets_path.as_deref().map_or((Vec::new(), Vec::new()), resolution::load_custom_presets);
-        let size = SaveSize { choice: SaveSizeChoice::CommandLine, custom_width: command_line.width, custom_height: command_line.height, preset_name: String::new(), custom_presets, presets_path };
+        let size = SaveSize { choice: SaveSizeChoice::Standard, custom_width: default_size.width, custom_height: default_size.height, preset_name: String::new(), custom_presets, presets_path };
         (size, warnings)
     }
 
@@ -55,12 +55,12 @@ impl SaveSize {
         self.custom_presets.iter().any(|preset| preset.name == name)
     }
 
-    /// The resolution that the choice stands for, given the command line size and the size of the view. A preset that has disappeared, or a size that is not allowed, is an error.
+    /// The resolution that the choice stands for, given the default size and the size of the view. A preset that has disappeared, or a size that is not allowed, is an error.
     /// # Errors
     /// The reason, as a sentence for the status log
-    pub fn resolve(&self, command_line: Resolution, view: Resolution) -> Result<Resolution, String> {
+    pub fn resolve(&self, default_size: Resolution, view: Resolution) -> Result<Resolution, String> {
         let resolution = match &self.choice {
-            SaveSizeChoice::CommandLine => command_line,
+            SaveSizeChoice::Standard => default_size,
             SaveSizeChoice::View => view,
             SaveSizeChoice::Preset(name) => self.all_presets().into_iter().find(|preset| &preset.name == name).map(|preset| preset.resolution).ok_or_else(|| format!("The resolution preset \"{name}\" does not exist"))?,
             SaveSizeChoice::Custom => Resolution::new(self.custom_width, self.custom_height),
@@ -69,9 +69,9 @@ impl SaveSize {
     }
 
     /// The text of the closed list: what is selected, with its size
-    pub fn selected_text(&self, command_line: Resolution, view: Resolution) -> String {
+    pub fn selected_text(&self, default_size: Resolution, view: Resolution) -> String {
         match &self.choice {
-            SaveSizeChoice::CommandLine => format!("Command line ({command_line})"),
+            SaveSizeChoice::Standard => format!("Default ({default_size})"),
             SaveSizeChoice::View => format!("Same as the view ({view})"),
             SaveSizeChoice::Preset(name) => self.all_presets().iter().find(|preset| &preset.name == name).map_or_else(|| format!("{name} (missing)"), ResolutionPreset::label),
             SaveSizeChoice::Custom => format!("Custom ({})", Resolution::new(self.custom_width, self.custom_height)),
@@ -91,7 +91,7 @@ impl SaveSize {
         Ok(format!("Saved the resolution preset \"{name}\" ({} x {}){stored}", self.custom_width, self.custom_height))
     }
 
-    /// Removes the custom preset `name` and keeps the presets in the file; if it was selected, the command line size is selected again.
+    /// Removes the custom preset `name` and keeps the presets in the file; if it was selected, the default size is selected again.
     /// Returns the message for the status log.
     /// # Errors
     /// The reason, if there is no such custom preset or the file could not be written
@@ -102,7 +102,7 @@ impl SaveSize {
             return Err(format!("There is no custom resolution preset \"{name}\""));
         }
         if self.choice == SaveSizeChoice::Preset(name.to_string()) {
-            self.choice = SaveSizeChoice::CommandLine;
+            self.choice = SaveSizeChoice::Standard;
         }
         let stored = self.persist()?;
         Ok(format!("Deleted the resolution preset \"{name}\"{stored}"))
@@ -121,7 +121,7 @@ impl SaveSize {
 mod tests {
     use super::*;
 
-    const COMMAND_LINE: Resolution = Resolution::new(1200, 800);
+    const DEFAULT_SIZE: Resolution = Resolution::new(1200, 800);
     const VIEW: Resolution = Resolution::new(900, 600);
 
     fn temporary_path(name: &str) -> PathBuf {
@@ -130,60 +130,60 @@ mod tests {
 
     #[test]
     fn the_choice_stands_for_a_resolution() {
-        let (mut size, warnings) = SaveSize::new(COMMAND_LINE, None);
+        let (mut size, warnings) = SaveSize::new(DEFAULT_SIZE, None);
         assert_eq!(warnings, Vec::<String>::new());
-        assert_eq!(size.resolve(COMMAND_LINE, VIEW), Ok(COMMAND_LINE), "the command line size is selected at the start");
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(DEFAULT_SIZE), "the default size is selected at the start");
         size.choice = SaveSizeChoice::View;
-        assert_eq!(size.resolve(COMMAND_LINE, VIEW), Ok(VIEW));
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(VIEW));
         size.choice = SaveSizeChoice::Preset(String::from("4K UHD"));
-        assert_eq!(size.resolve(COMMAND_LINE, VIEW), Ok(Resolution::new(3840, 2160)));
-        assert_eq!(size.selected_text(COMMAND_LINE, VIEW), "4K UHD (3840 x 2160)");
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(3840, 2160)));
+        assert_eq!(size.selected_text(DEFAULT_SIZE, VIEW), "4K UHD (3840 x 2160)");
         size.choice = SaveSizeChoice::Preset(String::from("Gone"));
-        assert!(size.resolve(COMMAND_LINE, VIEW).unwrap_err().contains("does not exist"));
+        assert!(size.resolve(DEFAULT_SIZE, VIEW).unwrap_err().contains("does not exist"));
         size.choice = SaveSizeChoice::Custom;
         (size.custom_width, size.custom_height) = (3000, 2000);
-        assert_eq!(size.resolve(COMMAND_LINE, VIEW), Ok(Resolution::new(3000, 2000)));
-        assert_eq!(size.selected_text(COMMAND_LINE, VIEW), "Custom (3000 x 2000)");
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(3000, 2000)));
+        assert_eq!(size.selected_text(DEFAULT_SIZE, VIEW), "Custom (3000 x 2000)");
         size.custom_width = 5;
-        assert!(size.resolve(COMMAND_LINE, VIEW).is_err(), "a typed-in size that is not allowed is refused");
+        assert!(size.resolve(DEFAULT_SIZE, VIEW).is_err(), "a typed-in size that is not allowed is refused");
     }
 
     #[test]
     fn a_custom_preset_is_added_selected_kept_in_the_file_and_loaded_by_the_next_run() {
         let path = temporary_path("add");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
-        let (mut size, _) = SaveSize::new(COMMAND_LINE, Some(path.clone()));
+        let (mut size, _) = SaveSize::new(DEFAULT_SIZE, Some(path.clone()));
         (size.custom_width, size.custom_height, size.preset_name) = (6000, 4000, String::from("  Poster "));
         let message = size.add_preset().unwrap();
         assert!(message.starts_with("Saved the resolution preset \"Poster\" (6000 x 4000) in "), "{message}");
         assert_eq!(size.choice, SaveSizeChoice::Preset(String::from("Poster")));
         assert!(size.preset_name.is_empty() && size.is_custom_preset("Poster") && !size.is_custom_preset("4K UHD"));
         assert_eq!(size.all_presets().len(), 11);
-        let (next_run, warnings) = SaveSize::new(COMMAND_LINE, Some(path.clone()));
+        let (next_run, warnings) = SaveSize::new(DEFAULT_SIZE, Some(path.clone()));
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(next_run.custom_presets, size.custom_presets);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
-    fn a_preset_that_is_refused_changes_nothing_and_a_deleted_one_goes_back_to_the_command_line_size() {
+    fn a_preset_that_is_refused_changes_nothing_and_a_deleted_one_goes_back_to_the_default_size() {
         let path = temporary_path("delete");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
-        let (mut size, _) = SaveSize::new(COMMAND_LINE, Some(path.clone()));
+        let (mut size, _) = SaveSize::new(DEFAULT_SIZE, Some(path.clone()));
         size.preset_name = String::from("4k uhd");
         assert!(size.add_preset().unwrap_err().contains("built-in"));
         size.preset_name = String::from("Poster");
         size.add_preset().unwrap();
         assert!(size.delete_preset("Nothing").is_err());
         assert!(size.delete_preset("Poster").unwrap().starts_with("Deleted the resolution preset \"Poster\""));
-        assert_eq!((size.choice.clone(), size.custom_presets.len()), (SaveSizeChoice::CommandLine, 0));
-        assert!(SaveSize::new(COMMAND_LINE, Some(path.clone())).0.custom_presets.is_empty(), "the file no longer has it");
+        assert_eq!((size.choice.clone(), size.custom_presets.len()), (SaveSizeChoice::Standard, 0));
+        assert!(SaveSize::new(DEFAULT_SIZE, Some(path.clone())).0.custom_presets.is_empty(), "the file no longer has it");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn without_a_known_configuration_folder_presets_last_until_the_program_ends() {
-        let (mut size, _) = SaveSize::new(COMMAND_LINE, None);
+        let (mut size, _) = SaveSize::new(DEFAULT_SIZE, None);
         size.preset_name = String::from("Session");
         assert!(size.add_preset().unwrap().ends_with("(only until the program ends: the configuration folder is not known)"));
         assert!(size.is_custom_preset("Session"));
@@ -195,7 +195,7 @@ mod tests {
         std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
         std::fs::write(blocker.parent().unwrap().join("not-a-folder"), "x").unwrap();
         let path = blocker.parent().unwrap().join("not-a-folder").join(resolution::FILE_NAME);
-        let (mut size, _) = SaveSize::new(COMMAND_LINE, Some(path));
+        let (mut size, _) = SaveSize::new(DEFAULT_SIZE, Some(path));
         size.preset_name = String::from("Stuck");
         let reason = size.add_preset().unwrap_err();
         assert!(reason.contains("could not be written") && reason.contains("stay until the program ends"), "{reason}");

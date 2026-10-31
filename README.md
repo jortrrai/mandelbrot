@@ -11,16 +11,15 @@
  / _ \/ // / / // / _ \/ __/ __/     '-v-'    Claude Code, beep boop
 /_.__/\_, /  \___/\___/_/  \__/       /|_|\
      /___/
-                                 v0.2.0
+                                 v0.3.0
 ```
 
-A Mandelbrot set viewer written in Rust, with a graphical window: explore the set, zoom, jump to named places, and save images. The same view and settings always render exactly the same image.
+A Mandelbrot set viewer written in Rust, with a graphical window: explore the set, fly to named places, and save images and videos. The same view and settings always render exactly the same image.
 
-- **Fast**: all CPU threads but one, four points iterated at a time with the CPU's vector instructions, shortcuts for points that are certainly inside the set, and a progressive render that shows every supersampling layer as soon as it is done (and can be cancelled).
-- **Smooth**: continuous (smooth) coloring, supersampling up to 64 samples per pixel, and optional adaptive supersampling that only spends the extra samples where the picture shows detail.
-- **Automatic iterations**: a maximum iterations that follows your zoom (with Performance, Balanced and High Detail presets), or set it yourself.
-- **Named places** with thumbnails, loaded from JSON files you can add to yourself.
-- **Saves PNG images** with the view and the settings stored in the metadata.
+- **Fast**: every CPU thread but one with the CPU's vector instructions, and the GPU next to them; a progressive render that shows every layer as soon as it is done.
+- **Smooth**: smooth coloring, supersampling up to 64 samples per pixel (adaptive, where the picture has detail), and a color cycle as in Kalles Fraktaler.
+- **Flights** to named places, with frame rates up to the screen's, and **videos** of them, rendered offline.
+- **Automatic iterations** that follow the zoom, or your own limit.
 
 ---
 - [Running](#running)
@@ -41,48 +40,22 @@ Then, in the root of the repository:
 ```
 cargo run --release
 ```
-The window can be given a size and some settings; use `-` for the default of an argument:
-```
-cargo run --release -- <width> <height> <max_iterations> <supersampling_amount> <window_scale>
-```
-| Argument | Default | Meaning |
-|---|---|---|
-| `width`, `height` | 1200, 800 | the size of the image in pixels, and the size of a saved image. Without them (or `window_scale`) the image follows the size of the window, see *Match the window size* below |
-| `max_iterations` | 1000 | the most iterations of a point |
-| `supersampling_amount` | 32 | samples per pixel (1 to 64) |
-| `window_scale` | 1.0 | the scale of the window relative to the image, e.g. `0.5` shows a 1920x1080 image in a 960x540 window |
-
-For example `cargo run --release -- 1920 1080 2000 4 0.5`. The terminal is only for developers: everything you need is in the window.
+There are no command-line arguments: everything is in the window. Videos need [`ffmpeg`](https://ffmpeg.org) on the path (without it you can still save their frames as PNG files).
 
 ## The window
-The fractal is on the left. On the right, from top to bottom, are the controls, the current view and the status.
+The fractal is on the left; on the right are the controls, the current view and the status log. The controls are in sections that open and close with a click on their title. Hover over a control to see what it does.
 
-**Controls**
-- **Move**: the arrow buttons move the view by the *Move step* in pixels; only the newly exposed strip is rendered.
-- **Zoom in / Zoom out / Reset view**, and the *Zoom speed*. **Zoom in** is disabled when the 64-bit numbers of the renderer run out of precision (see the warning under *Current view*). **< Back / Forward >** walk through the views you visited (the last 200), like the history of a browser.
-- **Points of interest**: a list of named places with thumbnails (see below); *Reload* reads the folder again; *Restore the saved appearance* also applies the coloring and the color channels of a place.
-- **Go to view**: type the `x`, `y` and `scale` of a view.
-- **Max. iterations**: the most iterations of a point. **Auto iterations** chooses it for the zoom of every render (on by default); its drop-down offers the presets *Performance*, *Balanced* (the default) and *High Detail*, and the fields below it are the settings of the preset. It is a heuristic on a sparse grid, not a proof: very narrow detail can be missed.
-- **Adaptive supersampling** (on by default): the first two samples of every pixel, the rest only where the picture shows detail (a heuristic; the same render can differ slightly from full supersampling).
-- **Match the window size**: the image is rendered with one pixel for every pixel of the area it is shown in, and rendered again (after the window has stayed the same size for a moment) when the window is resized. The view keeps its center and its zoom: a wider window shows the same part of the real axis, a taller one shows more of the imaginary axis. It is on by default, and off when the command line gives a `width`, `height` or `window_scale`.
-- **Quality (supersampling)**: samples per pixel, from 1x to 64x (32x by default).
-- **Coloring** (Bernstein polynomials or HSV) and **Color channels** (any of the 27 mappings such as `RGB` or `BGR`).
-- **Save Image** with its own *Saved image quality* and *Saved image size*: the command line size (the default), the size of the view, one of ten presets (HD 720p to 8K UHD, squares, portrait), a preset of your own, or *Custom size...* (16 to 16,384 pixels per side, at most 100 megapixels). Give a custom size a name and *Save as preset* to keep it in `resolution_presets.json` in your configuration folder (`~/.config/mandelbrot` on Linux). The PNG goes to the `saved` folder, with the view, the settings and the application in its metadata.
-- Click the fractal to see the coordinates of a point in the status; right-click to center the view on it. **Scroll** over it to zoom in and out around the cursor (a notch is about 10%; zooming in stops at the precision limit), and **drag** it with the left button to move the view.
-
-**Current view**: the center (real and imaginary, with all digits) and the zoom (the magnification relative to the starting view). *Copy* puts the center and the scale on the clipboard.
-
-**Status**: the messages, a *Cancel* button and a progress bar while a render runs, with the time of every supersampling layer. Any control you use interrupts the render that is running.
+- **Mouse**: drag the fractal to move, scroll to zoom around the cursor, click to see the coordinates of a point, right-click to center on it.
+- **Settings** are remembered in `mandelbrot/settings.json` in your configuration folder (`~/.config` on Linux, `%APPDATA%` on Windows); *Reset settings* puts them back. The view, the history and the places are not settings.
+- **Files**: saved images (PNG, with the view and the settings in their metadata) and videos go to `saved/`, benchmark runs to `benchmarks/`, your own image sizes to `resolution_presets.json` in the configuration folder.
 
 ## Points of interest
-The places in the *Points of interest* list of the window are the `.json` files of the [`points_of_interest`](points_of_interest) folder (the one in the current directory, or else the one next to the sources). Add your own file to the folder and press *Reload*; nothing in the code lists the files. The list is in alphabetical order of the file names, so start a file name with a digit to choose its place: the bundled files are `0-frost-on-the-shoreline.json` to `9-sunlit-reef.json`, numbered from 0 in the order of the views they replaced (`VIEW_0`, the tenth, is `9-sunlit-reef.json`).
-A file has a **location** (center, `scale`, `max_iterations`) and an optional **appearance** (`coloring`, `color_channels`). The `scale` is the scale of the renderer: the view is `2.5 * scale` wide, so a smaller scale is a deeper zoom. Going to a place always applies the location; its saved appearance is only applied when *Restore the saved appearance* is ticked, and the supersampling is never part of a place. The list shows a thumbnail of every place. Thumbnails are rendered on demand, only for the rows that are visible, one at a time and never while the main view renders (see `src/thumbnails.rs`); at most 64 are kept in memory. A file that cannot be used is skipped with a message in the status box. See the documentation of `src/points_of_interest.rs` for the format.
+The places in the list are the `.json` files of the [`points_of_interest`](points_of_interest) folder (in the current directory, or else next to the sources): add your own and press *Reload*, or use *Save this view...*. The list is sorted by zoom. A file has a **location** (center, `scale`, `max_iterations`) and an optional **appearance** (coloring, color channels, iteration divide and offset); the view is `2.5 * scale` wide. A file that cannot be used is skipped with a message in the status log. See the documentation of `src/points_of_interest.rs` for the format.
 
 ## How an image is made
-- Every pixel is the average of its supersampling samples. A sample is taken at a pseudo-random offset inside the pixel, which is a hash of the pixel and the sample number, never random: the same settings always give the same image, whatever the number of threads.
-- A point `c` is iterated with `z = z^2 + c` until `|z|` leaves the orbit radius 2 or the maximum iterations is reached. Points of the main cardioid and the period-two bulb, and orbits that repeat exactly, are recognized early as inside the set.
-- The color comes from a smooth iteration count (the normalized iteration count, so neighboring iteration counts blend instead of forming bands) and a palette.
-- The render is progressive, one supersampling layer at a time, on all CPU threads but one; the window shows each layer when it is ready.
+- Every pixel is the average of its samples, each at a pseudo-random offset inside the pixel that is a hash of the pixel and the sample number, never random: the same settings always give the same image, whatever the number of threads.
+- A point `c` is iterated with `z = z^2 + c` until `|z|` leaves the orbit radius or the maximum iterations is reached; points certainly inside the set are recognized early.
+- The color comes from a smooth iteration count and a palette that repeats along the iterations.
 
 See the documentation of the code (`cargo doc --open`) for the details, and [SOURCES.md](SOURCES.md) for the sources.
 

@@ -6,7 +6,7 @@
 //! cargo run --release --example image_baseline | grep '^BASELINE' > after.txt    # on the new code
 //! diff before.txt after.txt                                                      # no output: nothing changed
 //! ```
-//! It covers the ten places of the `points_of_interest` folder and the default view, with the real palettes (Bernstein, HSV), smooth and integer coloring, the palette of automatic iterations,
+//! It covers the places of the `points_of_interest` folder (the reset view and ten more) and the default view, with the real palettes (Bernstein, HSV), smooth and integer coloring, the palette of automatic iterations,
 //! uniform and adaptive supersampling, the channel mappings, moves that render only the exposed strip, the old non-progressive render path used for saving, a saved PNG file (read back),
 //! thumbnails, and the choices of the automatic iteration limit.
 //!
@@ -46,7 +46,7 @@ fn plane(view: &View, width: usize, height: usize) -> ComplexPlane {
 }
 
 /// Renders with every layer and returns the final colors
-fn render(plane: &ComplexPlane, set: &MandelbrotSet, samples: u8, adaptive: Option<&AdaptiveSampling>, coloring: fn(u32, u32) -> TrueColor) -> Vec<TrueColor> {
+fn render(plane: &ComplexPlane, set: &MandelbrotSet, samples: u8, adaptive: Option<&AdaptiveSampling>, coloring: fn(f64, f64) -> TrueColor) -> Vec<TrueColor> {
     let _base = vec![TrueColor::new(0, 0, 0); WIDTH * HEIGHT];
     let mut last = Vec::new();
     Render::new(plane, set, WIDTH, HEIGHT, coloring).supersampling(samples).adaptive(adaptive.copied()).run( |colors, _| {
@@ -68,11 +68,11 @@ fn main() {
         let mut integer = smooth.clone();
         integer.smooth_coloring = false;
         let mut scaled = smooth.clone();
-        scaled.palette_scale = Some((max_iterations / 4).max(1));
+        scaled.palette = mandelbrot::mandelbrot_set::ColorCycle { divide: f64::from((max_iterations / 2000).max(1)), offset: 0.0, stretch: false };
         report(&format!("{name} bernstein smooth 1x"), colors_checksum(&render(&plane, &smooth, 1, None, TrueColor::new_from_bernstein_polynomials)));
         report(&format!("{name} hsv smooth 2x"), colors_checksum(&render(&plane, &smooth, 2, None, TrueColor::new_from_hsv_colors)));
         report(&format!("{name} bernstein integer 1x"), colors_checksum(&render(&plane, &integer, 1, None, TrueColor::new_from_bernstein_polynomials)));
-        report(&format!("{name} bernstein smooth palette-scale 1x"), colors_checksum(&render(&plane, &scaled, 1, None, TrueColor::new_from_bernstein_polynomials)));
+        report(&format!("{name} bernstein smooth color-cycle 1x"), colors_checksum(&render(&plane, &scaled, 1, None, TrueColor::new_from_bernstein_polynomials)));
         report(&format!("{name} bernstein smooth adaptive 4x"), colors_checksum(&render(&plane, &smooth, 4, Some(&AdaptiveSampling::default()), TrueColor::new_from_bernstein_polynomials)));
         report(&format!("{name} bernstein smooth uniform 4x"), colors_checksum(&render(&plane, &smooth, 4, None, TrueColor::new_from_bernstein_polynomials)));
     }
@@ -94,7 +94,7 @@ fn main() {
         let mut buffer = PixelBuffer::new(PixelPlane::new(WIDTH, HEIGHT));
         buffer.colors.copy_from_slice(&full);
         buffer.translate_buffer(rows_up, columns_right);
-        rendering::translate_complex_plane_by_pixels(&mut plane, rows_up as i16, -(columns_right as i16));
+        rendering::move_complex_plane_by_pixels(&mut plane, rows_up as i64, -(columns_right as i64));
         let region = ExposedRegion::from_shift(WIDTH, HEIGHT, rows_up, columns_right).expect("a small shift");
         let mut last = Vec::new();
         Render::new(&plane, &set, WIDTH, HEIGHT, TrueColor::new_from_bernstein_polynomials).supersampling(2).only(&region, &buffer.colors).run( |colors, _| {
@@ -104,11 +104,6 @@ fn main() {
         report(&format!("move {name}"), colors_checksum(&last));
     }
 
-    //Centering the view on a point
-    let mut centered = plane(seahorse, WIDTH, HEIGHT);
-    let shift = rendering::center_complex_plane_on(&mut centered, &mandelbrot::complex::Complex::new(-0.7498, -0.0204));
-    report("center_complex_plane_on shift", fnv(shift.0.to_le_bytes().into_iter().chain(shift.1.to_le_bytes())));
-    report("center_complex_plane_on view", fnv(format!("{:?}", centered.get_view()).bytes()));
 
     //The old non-progressive render path (used when saving at another scale), with its progress printed to the terminal
     let mut old_buffer = PixelBuffer::new(PixelPlane::new(64, 48));
@@ -136,7 +131,7 @@ fn main() {
 
     //Thumbnails of the places, as the window renders them
     for point in &report_of_folder.points {
-        let request = ThumbnailRequest { location: point.location.clone(), coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, width: thumbnails::THUMBNAIL_WIDTH, height: thumbnails::thumbnail_height(1200, 800) };
+        let request = ThumbnailRequest { location: point.location.clone(), coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, palette: mandelbrot::mandelbrot_set::ColorCycle::CYCLE, width: thumbnails::THUMBNAIL_WIDTH, height: thumbnails::thumbnail_height(1200, 800) };
         let colors = thumbnails::render_thumbnail(&request, 2.0, &AtomicBool::new(false)).expect("not cancelled");
         report(&format!("thumbnail {}", point.file_name.trim_end_matches(".json")), colors_checksum(&colors));
         report(&format!("thumbnail key {}", point.file_name.trim_end_matches(".json")), request.key());

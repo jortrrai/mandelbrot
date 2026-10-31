@@ -241,25 +241,25 @@ fn smooth_rendering_is_deterministic_and_progressive_passes_are_all_reported() {
 }
 
 #[test]
-fn centering_and_moving_by_pixels_agree_with_the_shift_of_the_buffer() {
+fn moving_by_pixels_agrees_with_the_shift_of_the_buffer_at_any_distance() {
     let mut plane = ComplexPlane::new(120, 80);
     let start = plane.center();
     //Moving up by 10 rows and right by 7 columns moves the center up (a larger imaginary part) and right
-    translate_complex_plane_by_pixels(&mut plane, 10, 0);
+    move_complex_plane_by_pixels(&mut plane, 10, 0);
     assert!((plane.center().y - (start.y + 10.0 * plane.increment_y)).abs() < 1e-12 && (plane.center().x - start.x).abs() < 1e-12);
-    translate_complex_plane_by_pixels(&mut plane, 0, 7);
+    move_complex_plane_by_pixels(&mut plane, 0, 7);
     assert!((plane.center().x - (start.x + 7.0 * plane.increment_x)).abs() < 1e-12);
-    translate_complex_plane_by_pixels(&mut plane, -10, 0);
-    translate_complex_plane_by_pixels(&mut plane, 0, -7);
+    move_complex_plane_by_pixels(&mut plane, -10, 0);
+    move_complex_plane_by_pixels(&mut plane, 0, -7);
     assert!((plane.center().x - start.x).abs() < 1e-12 && (plane.center().y - start.y).abs() < 1e-12, "the moves are undone");
 
-    //Centering on the point under pixel (90, 25) returns the shift of the buffer: the content moves left and down. The pixel counts are truncated, not rounded, so a distance of
-    //30 pixels that is 29.999... in floating point shifts by 29 (an existing imprecision of one pixel, which is kept because the moves of the window depend on it)
-    let mut plane = ComplexPlane::new(120, 80);
-    let target = plane.complex_from_pixel_plane(90.0, 25.0);
-    let shift = center_complex_plane_on(&mut plane, &target);
-    assert_eq!(shift, (14, -29), "(rows_up, columns_right) of the content");
-    assert!((plane.center().x - target.x).abs() < 1e-12 && (plane.center().y - target.y).abs() < 1e-12);
+    //Any distance: the old helper took it modulo 256 pixels, so 300 moved by 44
+    for (rows_up, columns_right) in [(300, -1000), (-256, 256), (3, 255)] {
+        let start = ComplexPlane::new(1200, 800);
+        let mut moved = start.clone();
+        move_complex_plane_by_pixels(&mut moved, rows_up, columns_right);
+        assert_eq!(pixel_shift(&start, &moved), Some((i128::from(rows_up), -i128::from(columns_right))), "the content moves the other way");
+    }
 }
 
 #[test]
@@ -283,5 +283,512 @@ fn the_jitter_of_a_sample_never_changes() {
     for ((x, y, sample), (jitter_x, jitter_y)) in expected {
         let (actual_x, actual_y) = sample_jitter(x, y, sample);
         assert_eq!((actual_x.to_bits(), actual_y.to_bits()), (jitter_x, jitter_y), "pixel ({x}, {y}), sample {sample}: {actual_x:?}, {actual_y:?}");
+    }
+}
+
+/// Every image that a render reported, with its pass number
+type Reports = Vec<(u8, Vec<(u8, u8, u8)>)>;
+
+/// Renders with or without previews; returns every reported image with its pass number, and whether the render completed
+#[allow(clippy::too_many_arguments)] // A test helper: the arguments are the settings of one render, like `adaptive_render`
+fn preview_render(c: &ComplexPlane, m: &MandelbrotSet, w: usize, h: usize, region: &ExposedRegion, base: &[TrueColor], samples: u8, preview: Option<std::time::Duration>, cancel: &AtomicBool) -> (Reports, bool) {
+    let mut reports = Vec::new();
+    let adaptive = Some(AdaptiveSampling::default());
+    let done = Render::new(c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).only(region, base).preview(preview).cancel_with(cancel).run(|colors, pass| reports.push((pass, colors.iter().map(|c| (c.red, c.green, c.blue)).collect())));
+    (reports, done)
+}
+
+#[test]
+fn previews_do_not_change_the_layers_and_come_coarse_to_fine_before_them() {
+    let (w, h) = (61, 37); //Not a multiple of the block sizes
+    let (c, m) = boundary_plane(w, h);
+    let never = AtomicBool::new(false);
+    let base = vec![TrueColor::new(9, 9, 9); w * h];
+    for region in [ExposedRegion::full(w, h), ExposedRegion::from_shift(w, h, 5, -11).unwrap()] {
+        let (plain, done) = preview_render(&c, &m, w, h, &region, &base, 4, None, &never);
+        assert!(done);
+        //A zero threshold reports every level
+        let (with_previews, done) = preview_render(&c, &m, w, h, &region, &base, 4, Some(std::time::Duration::ZERO), &never);
+        assert!(done);
+        let passes: Vec<u8> = with_previews.iter().map(|(pass, _)| *pass).collect();
+        assert_eq!(passes, [0, 0, 0, 1, 2, 3, 4]);
+        assert_eq!(with_previews[3..], plain[..], "the layers are identical with and without previews");
+
+        //In a preview, a block shows the first sample of its top-left pixel: exactly the color of that pixel in the first layer. Pixels outside the region keep the base
+        let first_layer = &plain[0].1;
+        for (level, block) in [8, 4, 2].into_iter().enumerate() {
+            let preview = &with_previews[level].1;
+            for y in 0..h {
+                for x in 0..w {
+                    let (ox, oy) = (x - x % block, y - y % block);
+                    let expected = if !region.contains(x, y) { (9, 9, 9) } else if region.contains(ox, oy) { first_layer[oy * w + ox] } else { preview[y * w + x] };
+                    assert_eq!(preview[y * w + x], expected, "block {block}, pixel ({x}, {y})");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_fast_render_skips_the_previews_and_a_cancelled_preview_cancels_the_render() {
+    let (w, h) = (64, 48);
+    let (c, m) = boundary_plane(w, h);
+    let base = vec![TrueColor::new(0, 0, 0); w * h];
+    let region = ExposedRegion::full(w, h);
+    //A tiny image is much faster than an hour: no previews, the same layers
+    let (reports, done) = preview_render(&c, &m, w, h, &region, &base, 2, Some(std::time::Duration::from_secs(3600)), &AtomicBool::new(false));
+    assert!(done);
+    assert_eq!(reports.iter().map(|(pass, _)| *pass).collect::<Vec<u8>>(), [1, 2]);
+    assert_eq!(reports, preview_render(&c, &m, w, h, &region, &base, 2, None, &AtomicBool::new(false)).0);
+    let (reports, done) = preview_render(&c, &m, w, h, &region, &base, 2, Some(std::time::Duration::ZERO), &AtomicBool::new(true));
+    assert!(!done && reports.is_empty());
+}
+
+/// Renders `samples` samples of plane `c` into `state`; cancels after `cancel_after_pass` passes, or in the middle of a pass once `cancel_after_pixels` pixels of it are done.
+/// Returns the colors of the last reported pass and whether the render completed.
+fn resumed(state: &mut SampleState, c: &ComplexPlane, m: &MandelbrotSet, samples: u8, adaptive: Option<AdaptiveSampling>, cancel_after_pass: Option<u8>, cancel_after_pixels: Option<usize>) -> (Vec<(u8, u8, u8)>, bool) {
+    let (w, h) = (state_width(c), state_height(c));
+    let cancel = AtomicBool::new(false);
+    let done = AtomicUsize::new(0);
+    let mut last = Vec::new();
+    let completed = std::thread::scope(|scope| {
+        if let Some(pixels) = cancel_after_pixels {
+            //Watches the progress of the pass and cancels in the middle of it
+            let (cancel, done) = (&cancel, &done);
+            scope.spawn(move || while !cancel.load(Ordering::Relaxed) {
+                if done.load(Ordering::Relaxed) >= pixels {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                std::hint::spin_loop();
+            });
+        }
+        let completed = Render::new(c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).resume(state).cancel_with(&cancel).count_pixels_in(&done).run(|colors, pass| {
+            last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect();
+            if cancel_after_pass == Some(pass) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        cancel.store(true, Ordering::Relaxed); //Stops the watcher
+        completed
+    });
+    (last, completed)
+}
+
+fn state_width(c: &ComplexPlane) -> usize {
+    (c.length_x / c.increment_x).round() as usize
+}
+
+fn state_height(c: &ComplexPlane) -> usize {
+    (c.length_y / c.increment_y).round() as usize
+}
+
+#[test]
+fn a_resumed_render_from_nothing_is_the_plain_render() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        let plain = adaptive_render(&c, &m, w, h, &ExposedRegion::full(w, h), &vec![TrueColor::new(0, 0, 0); w * h], 5, adaptive.as_ref(), &AtomicBool::new(false)).0;
+        let (colors, completed) = resumed(&mut SampleState::new(), &c, &m, 5, adaptive, None, None);
+        assert!(completed);
+        assert_eq!(colors, plain, "adaptive: {adaptive:?}");
+    }
+}
+
+#[test]
+fn an_interrupted_render_continues_where_it_stopped_and_gives_the_same_image() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        let (expected, _) = resumed(&mut SampleState::new(), &c, &m, 6, adaptive, None, None);
+        //Between passes, and in the middle of a pass (the watcher stops it after some pixels; where exactly does not matter)
+        for (after_pass, after_pixels) in [(Some(1), None), (Some(3), None), (None, Some(200)), (None, Some(1500))] {
+            let mut state = SampleState::new();
+            let (_, completed) = resumed(&mut state, &c, &m, 6, adaptive, after_pass, after_pixels);
+            assert!(!completed);
+            let partial: usize = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| usize::from(state.samples(x, y))).sum();
+            assert!(partial > 0, "the interrupted render kept its samples");
+            let (colors, completed) = resumed(&mut state, &c, &m, 6, adaptive, None, None);
+            assert!(completed);
+            assert_eq!(colors, expected, "adaptive {adaptive:?}, interrupted after pass {after_pass:?} / {after_pixels:?} pixels");
+        }
+    }
+}
+
+/// The colors after rendering `c` into a new state, interrupted after `interrupted_after` passes (or complete), then moving the view `rows_up` and `columns_right`
+/// and continuing to `samples` samples; and the moved plane with the state
+#[allow(clippy::too_many_arguments)] // A test helper: the settings of the two renders
+fn moved_render(c: &ComplexPlane, m: &MandelbrotSet, samples: u8, adaptive: Option<AdaptiveSampling>, interrupted_after: Option<u8>, rows_up: i16, columns_right: i16) -> (Vec<(u8, u8, u8)>, ComplexPlane, SampleState) {
+    let mut state = SampleState::new();
+    let _ = resumed(&mut state, c, m, samples, adaptive, interrupted_after, None);
+    let mut moved = c.clone();
+    move_complex_plane_by_pixels(&mut moved, i64::from(rows_up), i64::from(columns_right));
+    let (colors, completed) = resumed(&mut state, &moved, m, samples, adaptive, None, None);
+    assert!(completed);
+    (colors, moved, state)
+}
+
+#[test]
+fn a_moved_view_keeps_the_samples_of_the_pixels_that_stay_visible() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let (complete, _) = resumed(&mut SampleState::new(), &c, &m, 4, None, None, None);
+    for interrupted_after in [None, Some(1), Some(2)] {
+        let mut state = SampleState::new();
+        let _ = resumed(&mut state, &c, &m, 4, None, interrupted_after, None);
+        let before = state.samples(10, 10);
+        //Move the view 5 columns to the right and 3 rows up: the content moves 5 columns left and 3 rows down
+        let mut moved = c.clone();
+        move_complex_plane_by_pixels(&mut moved, 3, 5);
+        //A render that is cancelled before it starts only shifts the state: the pixels that stay visible keep their samples, the exposed ones have none
+        let cancelled = AtomicBool::new(true);
+        let _ = Render::new(&moved, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).resume(&mut state).cancel_with(&cancelled).run(|_, _| {});
+        assert_eq!(state.samples(10 - 5, 10 + 3), before);
+        let empty = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| state.samples(*x, *y) == 0).count();
+        assert_eq!(empty, 5 * h + 3 * w - 5 * 3, "only the exposed strips are empty");
+
+        //Continuing gives exactly the original complete image where the view overlaps, and exactly what a move after a complete render gives everywhere
+        let (colors, completed) = resumed(&mut state, &moved, &m, 4, None, None, None);
+        assert!(completed);
+        for y in 3..h {
+            for x in 0..w - 5 {
+                assert_eq!(colors[y * w + x], complete[(y - 3) * w + x + 5], "({x}, {y}), interrupted after {interrupted_after:?}");
+            }
+        }
+        assert_eq!(colors, moved_render(&c, &m, 4, None, None, 3, 5).0, "interrupted after {interrupted_after:?}");
+    }
+}
+
+#[test]
+fn with_adaptive_supersampling_an_interrupted_and_moved_render_matches_away_from_the_edges() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let adaptive = Some(AdaptiveSampling::default());
+    let (expected, _, expected_state) = moved_render(&c, &m, 8, adaptive, None, -4, -6);
+    let (colors, _, state) = moved_render(&c, &m, 8, adaptive, Some(4), -4, -6);
+    for y in 0..h {
+        for x in 0..w {
+            //The mask of a pixel at the edge can depend on a neighbor that moved out of the view (or was not there before the move); elsewhere the image is the same
+            if x >= 2 && y >= 2 && x + 2 < w && y + 2 < h {
+                assert_eq!(colors[y * w + x], expected[y * w + x], "({x}, {y})");
+                assert_eq!(state.samples(x, y), expected_state.samples(x, y), "({x}, {y})");
+            }
+        }
+    }
+}
+
+#[test]
+fn other_settings_or_a_zoom_start_over() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let mut state = SampleState::new();
+    let _ = resumed(&mut state, &c, &m, 3, None, None, None);
+    let other_limit = MandelbrotSet::new(301, 2.0);
+    let (colors, _) = resumed(&mut state, &c, &other_limit, 3, None, None, None);
+    assert_eq!(colors, resumed(&mut SampleState::new(), &c, &other_limit, 3, None, None, None).0, "another limit renders everything again");
+    let mut zoomed = c.clone();
+    zoomed.scale(0.5);
+    let (colors, _) = resumed(&mut state, &zoomed, &other_limit, 3, None, None, None);
+    assert_eq!(colors, resumed(&mut SampleState::new(), &zoomed, &other_limit, 3, None, None, None).0, "so does a zoom");
+}
+
+#[test]
+fn any_sequence_of_moves_and_interruptions_ends_in_the_complete_image() {
+    //Random sequences of moves (by up to 20 pixels each way) and interruptions (after a random pass, in the middle of a pass after a random amount of pixels, or none),
+    //ended by one render that completes. The result is compared with a render of the last view from nothing, with the same placement of the samples:
+    //every pixel has at least its samples, and a pixel with the same amount of samples has exactly the same color
+    let (w, h) = (48, 32);
+    let (c, m) = boundary_plane(w, h);
+    let mut random = 0x5EED_u64;
+    let mut next = |below: u64| {
+        random = splitmix64(random);
+        random % below
+    };
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        for sequence in 0..12 {
+            let mut state = SampleState::new();
+            let mut plane = c.clone();
+            for _ in 0..=next(5) {
+                let (after_pass, after_pixels) = match next(3) {
+                    0 => (Some(1 + next(5) as u8), None),
+                    1 => (None, Some(1 + next(1500) as usize)),
+                    _ => (None, None),
+                };
+                let _ = resumed(&mut state, &plane, &m, 6, adaptive, after_pass, after_pixels);
+                move_complex_plane_by_pixels(&mut plane, next(41).cast_signed() - 20, next(41).cast_signed() - 20);
+            }
+            let (colors, completed) = resumed(&mut state, &plane, &m, 6, adaptive, None, None);
+            assert!(completed);
+            let mut fresh = state.emptied();
+            let (expected, _) = resumed(&mut fresh, &plane, &m, 6, adaptive, None, None);
+            let mut same = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let (has, needs) = (state.samples(x, y), fresh.samples(x, y));
+                    assert!(has >= needs, "sequence {sequence}, adaptive {adaptive:?}: ({x}, {y}) has {has} of its {needs} samples");
+                    if has == needs {
+                        assert_eq!(colors[y * w + x], expected[y * w + x], "sequence {sequence}, adaptive {adaptive:?}, ({x}, {y})");
+                        same += 1;
+                    }
+                }
+            }
+            if adaptive.is_none() {
+                assert_eq!(same, w * h, "without adaptive supersampling every pixel has exactly its samples");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_preview_of_the_strip_a_move_exposed_has_no_gaps() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let mut state = SampleState::new();
+    let _ = resumed(&mut state, &c, &m, 2, None, None, None);
+    //Moves that expose strips at every edge, some not aligned to the 8 x 8 blocks of the coarsest preview
+    for (rows_up, columns_right) in [(0, 5), (0, -5), (3, 0), (-3, 0), (2, -7)] {
+        let mut moved = state.plane().unwrap().clone();
+        move_complex_plane_by_pixels(&mut moved, i64::from(rows_up), i64::from(columns_right));
+        let mut previews = Vec::new();
+        let completed = Render::new(&moved, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(2).resume(&mut state).preview(Some(std::time::Duration::ZERO)).run(|colors, pass| {
+            if pass == 0 {
+                previews.push(colors.to_vec());
+            }
+        });
+        assert!(completed && !previews.is_empty(), "{rows_up}, {columns_right}");
+        //Every exposed pixel of a coarse preview shows the first sample of a pixel of its block, never the black of a gap (the pixels that kept their samples show their own colors)
+        let exposed = ExposedRegion::from_shift(w, h, i128::from(rows_up), -i128::from(columns_right)).unwrap();
+        for (level, preview) in previews.iter().enumerate() {
+            let block = PREVIEW_BLOCKS[level];
+            let firsts: Vec<(u8, u8, u8)> = (0..w * h).map(|index| (state.first[index].red, state.first[index].green, state.first[index].blue)).collect();
+            for y in 0..h {
+                for x in (0..w).filter(|x| exposed.contains(*x, y)) {
+                    let color = (preview[y * w + x].red, preview[y * w + x].green, preview[y * w + x].blue);
+                    let (left, top) = (x - x % block, y - y % block);
+                    let in_block = (top..(top + block).min(h)).any(|by| (left..(left + block).min(w)).any(|bx| firsts[by * w + bx] == color));
+                    assert!(in_block, "move ({rows_up}, {columns_right}), block {block}: ({x}, {y}) shows {color:?}, not a first sample of its block");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_color_table_built_on_all_threads_is_the_table_of_one_thread() {
+    for coloring in [TrueColor::new_from_bernstein_polynomials as fn(f64, f64) -> TrueColor, TrueColor::new_from_hsv_colors] {
+        let cycle = crate::mandelbrot_set::ColorCycle { divide: 3.7, offset: 120.0, stretch: false };
+        for (limit, palette) in [(100, crate::mandelbrot_set::ColorCycle::STRETCHED), (40_000, cycle), (65_376, cycle), (200_000, crate::mandelbrot_set::ColorCycle::STRETCHED)] {
+            let mut m = MandelbrotSet::new(limit, 2.0);
+            m.palette = palette;
+            let table = super::progressive::color_table(&m, coloring);
+            assert_eq!(table.len(), limit as usize + 1);
+            assert!(table.iter().enumerate().all(|(iterations, color)| {
+                let expected = m.color(coloring, iterations as u32);
+                (color.red, color.green, color.blue) == (expected.red, expected.green, expected.blue)
+            }), "limit {limit}");
+        }
+    }
+}
+
+#[test]
+fn a_render_with_the_gpu_is_bit_for_bit_the_render_without_it() {
+    //Runs where there is a GPU with f64 shaders. The GPU computes every sample (no CPU threads), so the whole render by the GPU is compared with the CPU's,
+    //and once with both together (the share of the GPU then depends on the timing of the threads, so it is not checked)
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let joined = Some((&gpu, std::time::Duration::ZERO));
+    let gpu_samples = AtomicUsize::new(0);
+    let (w, h) = (160, 120);
+    let (c, m) = boundary_plane(w, h);
+    let render = |gpu: Option<(&super::gpu::GpuIterator, std::time::Duration)>, only_gpu: bool, adaptive: Option<AdaptiveSampling>, state: Option<&mut SampleState>, plane: &ComplexPlane| {
+        let mut last = Vec::new();
+        let render = Render::new(plane, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(6).adaptive(adaptive).gpu(gpu).count_gpu_samples_in(&gpu_samples);
+        let render = if only_gpu { render.on_the_gpu_only() } else { render };
+        let render = match state { Some(state) => render.resume(state), None => render };
+        let completed = render.run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>());
+        assert!(completed);
+        last
+    };
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        let cpu = render(None, false, adaptive, None, &c);
+        let before = gpu_samples.load(Ordering::Relaxed);
+        assert_eq!(render(joined, true, adaptive, None, &c), cpu, "a render from nothing by the GPU, adaptive {adaptive:?}");
+        assert!(gpu_samples.load(Ordering::Relaxed) - before >= w * h * 2, "the GPU computed every sample (at least the 2 uniform ones of every pixel)");
+        assert_eq!(render(joined, false, adaptive, None, &c), cpu, "with the CPU threads, adaptive {adaptive:?}");
+        //A render that continues a state after a move
+        let (mut with, mut without) = (SampleState::new(), SampleState::new());
+        let _ = render(joined, true, adaptive, Some(&mut with), &c);
+        let _ = render(None, false, adaptive, Some(&mut without), &c);
+        let mut moved = c.clone();
+        move_complex_plane_by_pixels(&mut moved, 7, -11);
+        assert_eq!(render(joined, true, adaptive, Some(&mut with), &moved), render(None, false, adaptive, Some(&mut without), &moved), "a moved view, adaptive {adaptive:?}");
+        assert!((0..h).all(|y| (0..w).all(|x| with.samples(x, y) == without.samples(x, y))), "the same samples");
+    }
+}
+
+#[test]
+fn previews_computed_with_the_gpu_are_bit_for_bit_the_previews_of_the_cpu() {
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let (w, h) = (160, 120);
+    let (c, m) = boundary_plane(w, h);
+    let gpu_samples = AtomicUsize::new(0);
+    //Every frame the render reports, previews (pass 0) included; a preview threshold of zero reports every level
+    let frames = |gpu: Option<(&super::gpu::GpuIterator, std::time::Duration)>, only_gpu: bool| {
+        let mut frames = Vec::new();
+        let render = Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(2).preview(Some(std::time::Duration::ZERO)).gpu(gpu).count_gpu_samples_in(&gpu_samples);
+        let render = if only_gpu { render.on_the_gpu_only() } else { render };
+        assert!(render.run(|colors, pass| frames.push((pass, colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()))));
+        frames
+    };
+    let cpu = frames(None, false);
+    assert!(cpu.iter().filter(|(pass, _)| *pass == 0).count() >= 2, "the previews are reported");
+    let before = gpu_samples.load(Ordering::Relaxed);
+    //Without CPU threads every level is sampled like a pass, by the GPU (with them only the levels with many samples are)
+    assert!(frames(Some((&gpu, std::time::Duration::ZERO)), true) == cpu, "every preview and layer of the GPU is the CPU's");
+    assert!(gpu_samples.load(Ordering::Relaxed) > before, "the GPU computed the samples");
+}
+
+#[test]
+fn a_render_with_the_fast_gpu_keeps_almost_every_pixel_and_deep_views_exact() {
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let (w, h) = (160, 120);
+    let render = |c: &ComplexPlane, m: &MandelbrotSet, fast: Option<bool>| {
+        let mut last = Vec::new();
+        let render = Render::new(c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(2);
+        let render = match fast { Some(fast) => render.gpu(Some((&gpu, std::time::Duration::ZERO))).fast_gpu(fast).on_the_gpu_only(), None => render };
+        assert!(render.run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()));
+        last
+    };
+    //A boundary view: the fast loop gives almost every pixel its exact color
+    let (c, m) = boundary_plane(w, h);
+    let (exact, fast) = (render(&c, &m, None), render(&c, &m, Some(true)));
+    let differ = exact.iter().zip(&fast).filter(|(a, b)| a != b).count();
+    assert!(differ * 100 < w * h * 2, "{differ} of {} pixels differ", w * h);
+    //Too deep for its precision (`FAST_GPU_STEPS`): the exact loop, bit for bit
+    let mut deep = ComplexPlane::new(w, h);
+    deep.set_view(&crate::complex_plane::View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, 1e-11));
+    assert!(deep.precision_steps() < super::progressive::FAST_GPU_STEPS);
+    let m = MandelbrotSet::new(3000, 2.0);
+    assert_eq!(render(&deep, &m, Some(true)), render(&deep, &m, None));
+}
+
+#[test]
+fn an_image_saved_with_the_gpu_has_the_pixels_of_one_saved_without_it() {
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let (c, m) = boundary_plane(200, 150);
+    let (mut without, mut with) = (PixelBuffer::new(PixelPlane::new(200, 150)), PixelBuffer::new(PixelPlane::new(200, 150)));
+    render_complex_plane_into_buffer(&mut without, &c, &m, 3, TrueColor::new_from_bernstein_polynomials);
+    render_complex_plane_into_buffer_with_gpu(&mut with, &c, &m, 3, TrueColor::new_from_bernstein_polynomials, Some(&gpu));
+    assert_eq!(with.pixels, without.pixels);
+}
+
+#[test]
+fn a_render_of_only_colors_is_the_first_layer_and_leaves_the_samples_of_its_state_alone() {
+    let (w, h) = (61, 37);
+    let (c, m) = boundary_plane(w, h);
+    let colors_only = |state: Option<&mut SampleState>, gpu: Option<&super::gpu::GpuIterator>| {
+        let mut reports = Vec::new();
+        let render = Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).colors_only();
+        let render = match gpu { Some(gpu) => render.gpu(Some((gpu, std::time::Duration::ZERO))).on_the_gpu_only(), None => render };
+        let render = match state { Some(state) => render.resume(state), None => render };
+        assert!(render.run(|colors, pass| reports.push((pass, colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()))));
+        reports
+    };
+    let (first_layer, _) = resumed(&mut SampleState::new(), &c, &m, 1, None, None, None);
+    assert_eq!(colors_only(None, None), [(1, first_layer.clone())], "one pass: the first layer, whatever the supersampling");
+    //A state with 3 samples of every pixel keeps them, and a render that resumes it has nothing left to do
+    let mut state = SampleState::new();
+    let (three, _) = resumed(&mut state, &c, &m, 3, None, None, None);
+    assert_eq!(colors_only(Some(&mut state), None), [(1, first_layer.clone())]);
+    assert!((0..h).all(|y| (0..w).all(|x| state.samples(x, y) == 3)), "the samples are the state's");
+    assert_eq!(resumed(&mut state, &c, &m, 3, None, None, None).0, three);
+    //By the GPU (the exact loop): the same colors
+    if let Ok(gpu) = super::gpu::GpuIterator::new() {
+        assert_eq!(colors_only(None, Some(&gpu)), [(1, first_layer)]);
+    }
+}
+
+/// The division of the running average by a multiplication is exactly the integer division for every sum of up to 65 samples
+#[test]
+fn the_divider_divides_exactly() {
+    for divisor in 1..=65_u32 {
+        let divide = super::progressive::divider(divisor);
+        for sum in 0..=255 * divisor {
+            assert_eq!(divide(sum), sum / divisor, "{sum} / {divisor}");
+        }
+    }
+}
+
+#[test]
+fn the_f32_loop_keeps_most_pixels_of_a_shallow_view_and_is_not_used_deeper() {
+    let Ok(gpu) = super::gpu::GpuIterator::new() else { return };
+    let (w, h) = (480, 320);
+    let render = |view: &crate::complex_plane::View, max: u32, single: bool| {
+        let mut c = ComplexPlane::new(w, h);
+        c.set_view(view);
+        let m = MandelbrotSet::new(max, 2.0);
+        let mut last = Vec::new();
+        assert!(Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).gpu(Some((&gpu, std::time::Duration::ZERO))).fast_gpu(true).f32_gpu(single).on_the_gpu_only()
+            .run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()));
+        last
+    };
+    for (name, view, max) in [("the whole set", crate::complex_plane::View::new(-0.75, 0.0, 1.0), 500), ("Frost", crate::complex_plane::View::new(-0.6604166666666667, 0.4437500000000001, 0.1), 1000)] {
+        let (double, single) = (render(&view, max, false), render(&view, max, true));
+        let differ = double.iter().zip(&single).filter(|(a, b)| a != b).count();
+        println!("{name}: {:.2}% of the pixels differ from the double-float loop", differ as f64 * 100.0 / (w * h) as f64);
+        assert!(differ * 10 < w * h, "{name}: {differ} of {} pixels", w * h);
+    }
+    //Too deep for f32 (Seahorse at 6.4e-5): the double-float loop, the same pixels
+    let seahorse = crate::complex_plane::View::new(-0.7498100000000001, -0.020300000000000054, 0.000064);
+    assert_eq!(render(&seahorse, 2000, true), render(&seahorse, 2000, false));
+}
+
+#[test]
+fn another_palette_recolors_the_first_samples_at_once_and_ends_in_the_image_of_a_new_render() {
+    use crate::mandelbrot_set::ColorCycle;
+    let (w, h) = (61, 37);
+    let (c, mut m) = boundary_plane(w, h);
+    m.palette = ColorCycle::CYCLE;
+    let render = |state: &mut SampleState, m: &MandelbrotSet, samples: u8, adaptive: Option<AdaptiveSampling>| {
+        let mut reports = Vec::new();
+        assert!(Render::new(&c, m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(adaptive).resume(state)
+            .run(|colors, pass| reports.push((pass, colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()))));
+        reports
+    };
+    for adaptive in [None, Some(AdaptiveSampling::default())] {
+        let mut state = SampleState::new();
+        let _ = render(&mut state, &m, 4, adaptive);
+        let mut recolored = m.clone();
+        recolored.palette = ColorCycle { divide: 3.5, offset: 77.0, stretch: false };
+        let reports = render(&mut state, &recolored, 4, adaptive);
+        let fresh = render(&mut SampleState::new(), &recolored, 4, adaptive);
+        assert_eq!(reports[0], fresh[0], "the first layer is there at once, recolored exactly (adaptive {adaptive:?})");
+        assert_eq!(reports.last(), fresh.last(), "and the finished image is the image of a new render (adaptive {adaptive:?})");
+        //Another limit changes the positions: no recolor, the render starts over (the same image as a new render, which the first assertion of a recolor would also give)
+        let mut deeper = recolored.clone();
+        deeper.max_iterations += 100;
+        assert_eq!(render(&mut state, &deeper, 2, adaptive).last(), render(&mut SampleState::new(), &deeper, 2, adaptive).last());
     }
 }

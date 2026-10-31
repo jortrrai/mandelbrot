@@ -14,16 +14,20 @@
 //!     "scale": 0.1,
 //!     "max_iterations": 1000
 //!   },
-//!   "appearance": { "coloring": "bernstein", "color_channels": "RGB" }
+//!   "appearance": { "coloring": "bernstein", "color_channels": "RGB", "iteration_divide": 4, "color_offset": 120 }
 //! }
 //! ```
 //! * `scale` is the scale of the renderer (`ComplexPlane::get_scale`): the view is `2.5 * scale` wide on the real axis, so a smaller scale is a deeper zoom, and the magnification is `1 / scale`.
 //!   Numbers are `f64` and are read exactly: the shortest decimal text of an `f64` reads back to the same number (`serde_json` needs its `float_roundtrip` feature for that; without it
 //!   `-0.46395833333333325` was read one bit off, which a test of the shipped files caught).
 //! * `max_iterations` is a whole number from 1 to 1,000,000, the range of the control in the window.
-//! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. Both are optional.
-//! * The points are listed in alphabetical order of their **file names** (ignoring case), not of their display names: start a file name with a digit to choose its place in the list (with more than ten files, use leading zeros so that `10-` does not sort before `2-`).
-//!   The bundled files are named `0-frost-on-the-shoreline.json` to `9-sunlit-reef.json`: the number of the view they replaced, counting from 0 (`VIEW_1` is 0, `VIEW_9` is 8 and `VIEW_0` is 9), a `-`, and the slugified name.
+//! * `coloring` is `"hsv"` or `"bernstein"`; `color_channels` is a mapping such as `"RGB"` or `"BGR"`. `iteration_divide` (0.1 to 1000; a positive number outside that range is moved to the nearest end) and `color_offset` (0 to 500)
+//!   are the color cycle of the place (`mandelbrot_set::ColorCycle`), and `stretch_palette` (`true` or `false`) whether the palette is stretched over the limit instead.
+//!   All are optional.
+//! * The points are listed by **zoom**, the shallowest first (the largest `scale` at the top), so the deeper places are further down. Places with the same zoom are listed in
+//!   alphabetical order of their file names (ignoring case), not of their display names.
+//!   The bundled files are named `00-reset-view.json` (the reset view, the shallowest, so first in the list), then `01-frost-on-the-shoreline.json` to `10-sunlit-reef.json`: the number of
+//!   the view they replaced, counting from 1 with two digits (`VIEW_1` is 01, `VIEW_9` is 09 and `VIEW_0` is 10), a `-`, and the slugified name.
 //!   Fields that are not known are ignored, so newer files still load.
 //!
 //! A file that cannot be used is skipped with a message that names the file; the others still load. See `load_folder`.
@@ -33,6 +37,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::coloring::ColorChannelMapping;
+use crate::mandelbrot_set::{ColorCycle, MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 
 /// The name of the folder with the point of interest files
 pub const FOLDER_NAME: &str = "points_of_interest";
@@ -83,12 +88,25 @@ pub struct Location {
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Appearance {
     /// The coloring, if the file gives one
     pub coloring: Option<Coloring>,
     /// The color channel mapping, if the file gives one
     pub color_channels: Option<ColorChannelMapping>,
+    /// The iteration divide of the color cycle, if the file gives one, see `ColorCycle`
+    pub iteration_divide: Option<f64>,
+    /// The color offset of the color cycle, if the file gives one
+    pub color_offset: Option<f64>,
+    /// Whether the palette is stretched over the limit, if the file says so
+    pub stretch_palette: Option<bool>,
+}
+
+impl Appearance {
+    /// `palette` with the parts of the color cycle that this appearance gives
+    pub fn palette_over(&self, palette: ColorCycle) -> ColorCycle {
+        ColorCycle { divide: self.iteration_divide.unwrap_or(palette.divide), offset: self.color_offset.unwrap_or(palette.offset), stretch: self.stretch_palette.unwrap_or(palette.stretch) }
+    }
 }
 
 /// A named place: where to look, and optionally how it should look
@@ -125,6 +143,12 @@ struct RawAppearance {
     coloring: Option<String>,
     #[serde(default)]
     color_channels: Option<String>,
+    #[serde(default)]
+    iteration_divide: Option<f64>,
+    #[serde(default)]
+    color_offset: Option<f64>,
+    #[serde(default)]
+    stretch_palette: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +202,19 @@ pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String
                 Err(_) => warnings.push(format!("{file_name}: the color channels {channels:?} are not a mapping like \"RGB\", they are ignored")),
             }
         }
+        match raw.iteration_divide {
+            Some(divide) if (MIN_DIVIDE..=MAX_DIVIDE).contains(&divide) => appearance.iteration_divide = Some(divide),
+            //(Outside the range of the slider: the nearest end, as the slider would show it)
+            Some(divide) if divide > 0.0 => appearance.iteration_divide = Some(divide.clamp(MIN_DIVIDE, MAX_DIVIDE)),
+            Some(divide) => warnings.push(format!("{file_name}: the iteration divide {divide} should be more than 0, it is ignored")),
+            None => {}
+        }
+        match raw.color_offset {
+            Some(offset) if offset.is_finite() => appearance.color_offset = Some(offset.rem_euclid(PALETTE_LENGTH)),
+            Some(offset) => warnings.push(format!("{file_name}: the color offset {offset} should be a number, it is ignored")),
+            None => {}
+        }
+        appearance.stretch_palette = raw.stretch_palette;
         appearance
     });
     let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations };
@@ -220,7 +257,10 @@ pub fn load_folder(folder: &Path) -> LoadReport {
             Err(error) => report.problems.push(format!("{file_name}: cannot be read: {error}")),
         }
     }
-    report.points.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()).then_with(|| a.file_name.cmp(&b.file_name)));
+    report.points.sort_by(|a, b| {
+        //Zoom ascending is scale descending: the shallowest place first
+        b.location.scale.total_cmp(&a.location.scale).then_with(|| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())).then_with(|| a.file_name.cmp(&b.file_name))
+    });
     report
 }
 
@@ -237,6 +277,72 @@ pub fn find_folder() -> PathBuf {
     } else {
         in_current_directory
     }
+}
+
+/// The text of a point of interest file for `point`, in the format that `parse` reads (the description and the appearance are left out when there are none)
+///
+/// # Panics
+/// Never in practice: a point of interest is plain text and numbers, which always serialize
+pub fn to_json(point: &PointOfInterest) -> String {
+    let location = &point.location;
+    let mut file = serde_json::json!({
+        "format_version": 1,
+        "name": point.name,
+        "location": {
+            "center": { "real": location.real, "imaginary": location.imaginary },
+            "scale": location.scale,
+            "max_iterations": location.max_iterations,
+        },
+    });
+    if !point.description.is_empty() {
+        file["description"] = serde_json::Value::from(point.description.clone());
+    }
+    if let Some(appearance) = &point.appearance {
+        let mut fields = serde_json::Map::new();
+        if let Some(coloring) = appearance.coloring {
+            fields.insert(String::from("coloring"), serde_json::Value::from(coloring.key()));
+        }
+        if let Some(mapping) = appearance.color_channels {
+            fields.insert(String::from("color_channels"), serde_json::Value::from(format!("{mapping:?}")));
+        }
+        for (key, value) in [("iteration_divide", appearance.iteration_divide), ("color_offset", appearance.color_offset)] {
+            if let Some(value) = value {
+                fields.insert(String::from(key), serde_json::Value::from(value));
+            }
+        }
+        if let Some(stretch) = appearance.stretch_palette {
+            fields.insert(String::from("stretch_palette"), serde_json::Value::from(stretch));
+        }
+        file["appearance"] = serde_json::Value::Object(fields);
+    }
+    serde_json::to_string_pretty(&file).expect("a point of interest is plain text and numbers, which always serialize") + "\n"
+}
+
+/// The file name for a new point of interest called `name` in a folder with the files `existing`.
+///
+/// It is the next number (two digits, after the highest number in the folder, so it is listed last), a `-` and the slugified name, made unique if needed.
+///
+/// # Panics
+/// Never: of the candidates, one more than there are existing files, one is always free
+pub fn new_file_name(existing: &[String], name: &str) -> String {
+    let number = existing.iter().filter_map(|file| file.split('-').next()?.parse::<u32>().ok()).max().map_or(0, |highest| highest + 1);
+    let slug = Some(slugify(name)).filter(|slug| !slug.is_empty()).unwrap_or_else(|| String::from("place"));
+    let base = format!("{number:02}-{slug}");
+    //One more candidate than there are files, so one of them is free
+    (1..=existing.len() + 1).map(|copy| if copy == 1 { format!("{base}.json") } else { format!("{base}-{copy}.json") }).find(|file| !existing.iter().any(|other| other.eq_ignore_ascii_case(file))).expect("a free name")
+}
+
+/// Saves `point` as a new file in `folder` (created if needed), see `new_file_name`; returns the name of the file
+///
+/// # Errors
+/// The folder cannot be read or created, or the file cannot be written
+pub fn save_new(folder: &Path, point: &PointOfInterest) -> std::io::Result<String> {
+    std::fs::create_dir_all(folder)?;
+    let existing: Vec<String> = std::fs::read_dir(folder)?.filter_map(|entry| entry.ok()?.file_name().into_string().ok()).collect();
+    let file_name = new_file_name(&existing, &point.name);
+    //create_new never overwrites a file that appeared in the meantime
+    std::io::Write::write_all(&mut std::fs::OpenOptions::new().write(true).create_new(true).open(folder.join(&file_name))?, to_json(point).as_bytes())?;
+    Ok(file_name)
 }
 
 /// The file name (without extension and without its number) for a name: lowercase letters and digits, other characters become a single `-`, apostrophes disappear.
@@ -338,17 +444,21 @@ mod tests {
     #[test]
     fn a_folder_loads_the_good_files_sorts_them_and_reports_the_bad_ones() {
         let folder = temp_folder("mixed");
+        let deep = |name: &str| VALID.replace("Test Place", name).replace("\"scale\": 0.5", "\"scale\": 0.001");
+        let shallow = |name: &str| VALID.replace("Test Place", name).replace("\"scale\": 0.5", "\"scale\": 2.0");
         std::fs::write(folder.join("2-ant.json"), VALID.replace("Test Place", "Ant")).unwrap();
         std::fs::write(folder.join("1-zebra.json"), VALID.replace("Test Place", "Zebra")).unwrap();
         std::fs::write(folder.join("0-Yak.JSON"), VALID.replace("Test Place", "Yak")).unwrap();
         std::fs::write(folder.join("b-cat.json"), VALID.replace("Test Place", "Cat")).unwrap();
         std::fs::write(folder.join("A-bee.json"), VALID.replace("Test Place", "Bee")).unwrap();
+        std::fs::write(folder.join("0-deep.json"), deep("Deep")).unwrap();
+        std::fs::write(folder.join("z-shallow.json"), shallow("Shallow")).unwrap();
         std::fs::write(folder.join("broken.json"), "{ nope").unwrap();
         std::fs::write(folder.join("notes.txt"), "not a point").unwrap();
         std::fs::create_dir(folder.join("sub.json")).unwrap();
         let report = load_folder(&folder);
         let names: Vec<&str> = report.points.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Yak", "Zebra", "Ant", "Bee", "Cat"], "alphabetical order of the file names (0-, 1-, 2-, A-bee, b-cat, ignoring case), not of the display names");
+        assert_eq!(names, ["Shallow", "Yak", "Zebra", "Ant", "Bee", "Cat", "Deep"], "by zoom, the shallowest first whatever the file name; the same zoom in alphabetical order of the file names (0-, 1-, 2-, A-bee, b-cat, ignoring case), not of the display names");
         assert_eq!(report.problems.len(), 1);
         assert!(report.problems[0].starts_with("broken.json"));
         let _ = std::fs::remove_dir_all(&folder);
@@ -367,40 +477,101 @@ mod tests {
         assert_eq!(slugify("  The  Narrow--Pass! "), "the-narrow-pass");
     }
 
-    /// The numbers of the ten views that were hard-coded in `lib.rs` (`VIEW_1` to `VIEW_9`, then `VIEW_0`), by the name of the file that holds them now, in their original order; the file names count from 0
+    /// The numbers of the ten views that were hard-coded in `lib.rs` (`VIEW_1` to `VIEW_9`, then `VIEW_0`), by the name of the file that holds them now, in their original order; the file names count from 01
     const FORMER_VIEWS: [(&str, &str, f64, f64, f64); 10] = [
-        ("0-frost-on-the-shoreline", "Frost on the Shoreline", -0.6604166666666667, 0.4437500000000001, 0.1),
-        ("1-frozen-constellation", "Frozen Constellation", -1.0591666666666668, 0.2629166666666668, 0.01),
-        ("2-harbor-of-moons", "Harbor of Moons", -0.4624999999999999, 0.55, 0.1),
-        ("3-the-narrow-pass", "The Narrow Pass", -0.46395833333333325, 0.5531250000000001, 0.03),
-        ("4-coral-atoll", "Coral Atoll", -0.4375218333333333, 0.5632133750000003, 0.00002000000000000002),
-        ("5-seahorse-embers", "Seahorse Embers", -0.7498100000000001, -0.020300000000000054, 0.00006400000000000002),
-        ("6-lone-comet", "Lone Comet", -1.7862712000000047, 0.000052399999999991516, 0.00001677721600000001),
-        ("7-comets-crown", "Comet's Crown", -1.7862581627050718, 0.00005198056959995248, 0.000006039797760000003),
-        ("8-the-whirlpool", "The Whirlpool", -0.4687339999999999, 0.5425518958333333, 0.000010000000000000003),
-        ("9-sunlit-reef", "Sunlit Reef", -0.437520465811966, 0.5632133750000006, 0.000004000000000000004),
+        ("01-frost-on-the-shoreline", "Frost on the Shoreline", -0.6604166666666667, 0.4437500000000001, 0.1),
+        ("02-frozen-constellation", "Frozen Constellation", -1.0591666666666668, 0.2629166666666668, 0.01),
+        ("03-harbor-of-moons", "Harbor of Moons", -0.4624999999999999, 0.55, 0.1),
+        ("04-the-narrow-pass", "The Narrow Pass", -0.46395833333333325, 0.5531250000000001, 0.03),
+        ("05-coral-atoll", "Coral Atoll", -0.4375218333333333, 0.5632133750000003, 0.00002000000000000002),
+        ("06-seahorse-embers", "Seahorse Embers", -0.7498100000000001, -0.020300000000000054, 0.00006400000000000002),
+        ("07-lone-comet", "Lone Comet", -1.7862712000000047, 0.000052399999999991516, 0.00001677721600000001),
+        ("08-comets-crown", "Comet's Crown", -1.7862581627050718, 0.00005198056959995248, 0.000006039797760000003),
+        ("09-the-whirlpool", "The Whirlpool", -0.4687339999999999, 0.5425518958333333, 0.000010000000000000003),
+        ("10-sunlit-reef", "Sunlit Reef", -0.437520465811966, 0.5632133750000006, 0.000004000000000000004),
     ];
 
     #[test]
-    fn the_shipped_folder_has_the_ten_former_views_in_their_original_order_with_exactly_their_numbers() {
+    fn the_shipped_folder_has_the_reset_view_first_then_the_ten_former_views_by_zoom_with_exactly_their_numbers() {
         let report = load_folder(&find_folder());
         assert!(report.problems.is_empty(), "{:?}", report.problems);
-        assert_eq!(report.points.len(), 10);
-        //The file names sort as View 1 to View 10 (VIEW_0 last), numbered 0 to 9, and that is the order of the list
-        for (index, (point, (file, name, real, imaginary, scale))) in report.points.iter().zip(FORMER_VIEWS).enumerate() {
-            assert_eq!(point.file_name, format!("{file}.json"), "position {}", index + 1);
-            assert!(file.starts_with(&format!("{index}-")), "the number of the file is its place, counting from 0");
+        assert_eq!(report.points.len(), 11);
+        //The reset view first, the shallowest: exactly the view of `ComplexPlane::new`
+        let reset = &report.points[0];
+        let plane = crate::complex_plane::ComplexPlane::new(1200, 800);
+        assert_eq!((reset.file_name.as_str(), reset.name.as_str()), ("00-reset-view.json", "Reset View"));
+        assert_eq!((reset.location.real, reset.location.imaginary, reset.location.scale), (plane.center().x, plane.center().y, plane.get_scale()));
+        //The former View 1 to View 10 (VIEW_0 last) are numbered 01 to 10
+        for (index, (file, name, real, imaginary, scale)) in FORMER_VIEWS.into_iter().enumerate() {
+            let number = format!("{:02}", index + 1);
+            let point = report.points.iter().find(|p| p.file_name == format!("{file}.json")).unwrap_or_else(|| panic!("{file} is shipped"));
+            assert!(file.starts_with(&format!("{number}-")), "the number of the file is the number of the view it replaced");
             assert_eq!(point.name, name);
-            assert_eq!(format!("{index}-{}", slugify(&point.name)), file, "the file is named after its number and the display name");
+            assert_eq!(format!("{number}-{}", slugify(&point.name)), file, "the file is named after its number and the display name");
             assert_ne!(point.description, "");
             assert_eq!((point.location.real.to_bits(), point.location.imaginary.to_bits(), point.location.scale.to_bits()), (real.to_bits(), imaginary.to_bits(), scale.to_bits()), "{file}");
             assert!(MAX_ITERATIONS_RANGE.contains(&point.location.max_iterations));
             let appearance = point.appearance.as_ref().expect("the default appearance is written out");
             assert_eq!((appearance.coloring, format!("{:?}", appearance.color_channels.unwrap())), (Some(Coloring::Bernstein), String::from("RGB")), "the default appearance of the application");
         }
-        assert_eq!(report.points[9].file_name, "9-sunlit-reef.json", "VIEW_0, the tenth view, is number 9");
-        let mut sorted: Vec<String> = report.points.iter().map(|p| p.file_name.to_lowercase()).collect();
-        sorted.sort();
-        assert_eq!(sorted, report.points.iter().map(|p| p.file_name.to_lowercase()).collect::<Vec<_>>(), "listed in alphabetical order of the file names");
+        //Listed by zoom, the shallowest first; Frost on the Shoreline and Harbor of Moons have the same zoom, so they keep the order of their file names
+        let files: Vec<&str> = report.points.iter().map(|p| p.file_name.trim_end_matches(".json")).collect();
+        assert_eq!(
+            files,
+            [
+                "00-reset-view",
+                "01-frost-on-the-shoreline",
+                "03-harbor-of-moons",
+                "04-the-narrow-pass",
+                "02-frozen-constellation",
+                "06-seahorse-embers",
+                "05-coral-atoll",
+                "07-lone-comet",
+                "09-the-whirlpool",
+                "08-comets-crown",
+                "10-sunlit-reef",
+            ]
+        );
+        assert!(report.points.windows(2).all(|pair| pair[0].location.scale >= pair[1].location.scale), "zoom ascending");
+    }
+
+    #[test]
+    fn a_saved_point_reads_back_exactly() {
+        for (description, appearance) in [("", None), ("A spiral with a long arm.", Some(Appearance { coloring: Some(Coloring::Hsv), color_channels: Some(ColorChannelMapping::new("BGR").unwrap()), iteration_divide: Some(4.5), color_offset: Some(120.0), stretch_palette: Some(false) }))] {
+            let point = PointOfInterest {
+                name: String::from("Comet's Crown"),
+                description: String::from(description),
+                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376 },
+                appearance,
+                file_name: String::new(),
+            };
+            let (read, warnings) = parse(&to_json(&point), "test.json").unwrap();
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!((read.location.real.to_bits(), read.location.imaginary.to_bits(), read.location.scale.to_bits()), (point.location.real.to_bits(), point.location.imaginary.to_bits(), point.location.scale.to_bits()), "the view, bit for bit");
+            assert_eq!((read.name, read.description, read.location.max_iterations, read.appearance), (point.name.clone(), point.description.clone(), 65_376, point.appearance.clone()));
+        }
+    }
+
+    #[test]
+    fn a_new_file_gets_the_next_number_and_never_the_name_of_an_existing_file() {
+        let existing = [String::from("00-reset-view.json"), String::from("10-sunlit-reef.json"), String::from("notes.txt")];
+        assert_eq!(new_file_name(&existing, "My Place"), "11-my-place.json");
+        assert_eq!(new_file_name(&[], "My Place"), "00-my-place.json");
+        assert_eq!(new_file_name(&[String::from("00-my-place.json")], "My Place"), "01-my-place.json");
+        assert_eq!(new_file_name(&[String::from("x-my-place.json"), String::from("00-my-place.json")], "My Place"), "01-my-place.json");
+        assert_eq!(new_file_name(&existing, "!!!"), "11-place.json", "a name without letters or digits");
+        let taken = [String::from("Notes"), String::from("00-a.json")];
+        assert_eq!(new_file_name(&taken, "A"), "01-a.json");
+    }
+
+    #[test]
+    fn an_iteration_divide_outside_the_slider_is_moved_to_its_nearest_end_and_a_negative_one_is_ignored() {
+        let with = |divide: &str| parse(&VALID.replace("\"color_channels\": \"bgr\"", &format!("\"color_channels\": \"bgr\", \"iteration_divide\": {divide}")), "test.json").unwrap();
+        assert_eq!(with("0.001").0.appearance.unwrap().iteration_divide, Some(0.1));
+        assert_eq!(with("100000").0.appearance.unwrap().iteration_divide, Some(1000.0));
+        assert_eq!(with("4.5").0.appearance.unwrap().iteration_divide, Some(4.5));
+        let (point, warnings) = with("-2");
+        assert_eq!(point.appearance.unwrap().iteration_divide, None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 }

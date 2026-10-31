@@ -12,8 +12,6 @@ use super::MandelbrotApp;
 
 /// The zoom of the wheel for every point that is scrolled: a notch of the wheel is about 50 points, which zooms by 10%
 const WHEEL_ZOOM_PER_POINT: f64 = 0.998;
-/// The most pixels that a view is moved by in one frame of dragging (the move is limited to 255 pixels per axis, see `rendering::translate_complex_plane_by_pixels`)
-const MAX_DRAG_PIXELS: f32 = 255.0;
 
 /// The factor to scale the plane by after the wheel scrolled `scroll` points (up is positive): less than 1 zooms in, more than 1 zooms out
 pub(super) fn wheel_zoom_factor(scroll: f32) -> f64 {
@@ -30,11 +28,11 @@ pub(super) fn zoom_around(plane: &mut ComplexPlane, anchor: &Complex, factor: f6
 
 /// The whole pixels to move by for a drag of `delta_points`, when a pixel of the image is `points_per_pixel` points wide on the screen.
 /// What is left of a fraction of a pixel is kept in `remainder` for the next frame, so a slow drag still moves.
-pub(super) fn whole_pixels(delta_points: f32, remainder: &mut f32, points_per_pixel: f32) -> i16 {
+pub(super) fn whole_pixels(delta_points: f32, remainder: &mut f32, points_per_pixel: f32) -> i64 {
     let total = *remainder + delta_points / points_per_pixel.max(f32::EPSILON);
-    let whole = total.trunc().clamp(-MAX_DRAG_PIXELS, MAX_DRAG_PIXELS);
+    let whole = total.trunc();
     *remainder = total - whole;
-    whole as i16
+    whole as i64
 }
 
 impl MandelbrotApp {
@@ -63,8 +61,8 @@ impl MandelbrotApp {
             let columns = whole_pixels(-drag.x, &mut self.drag_remainder.0, points_per_pixel);
             let rows_up = whole_pixels(drag.y, &mut self.drag_remainder.1, points_per_pixel);
             if columns != 0 || rows_up != 0 {
-                rendering::translate_complex_plane_by_pixels(&mut self.c, rows_up, columns);
-                self.render_moved("Moved by dragging", (i128::from(rows_up), -i128::from(columns)));
+                rendering::move_complex_plane_by_pixels(&mut self.c, rows_up, columns);
+                self.render_moved("Moved by dragging");
             }
         } else {
             self.drag_remainder = (0.0, 0.0);
@@ -75,9 +73,13 @@ impl MandelbrotApp {
             if !(zooming_in && self.c.precision() == Precision::Exhausted) {
                 if let Some(position) = ui.input(|input| input.pointer.hover_pos()) {
                     let (x, y) = to_buffer(position);
-                    let anchor = self.c.complex_from_pixel_plane(f64::from(x), f64::from(y));
-                    zoom_around(&mut self.c, &anchor, factor);
-                    self.render(if zooming_in { "Zoomed in with the wheel" } else { "Zoomed out with the wheel" });
+                    let anchor = self.displayed_plane().complex_from_pixel_plane(f64::from(x), f64::from(y)); //The point under the mouse on the screen
+                    let mut zoomed = self.c.clone();
+                    zoom_around(&mut zoomed, &anchor, factor);
+                    if !(zooming_in && self.zoom_refused(&zoomed)) {
+                        self.c = zoomed;
+                        self.render(if zooming_in { "Zoomed in with the wheel" } else { "Zoomed out with the wheel" });
+                    }
                 }
             }
         }
@@ -122,8 +124,9 @@ mod tests {
         assert!(remainder.abs() < 1e-6);
         assert_eq!(whole_pixels(-0.5, &mut remainder, 2.0), 0, "a slow drag moves nothing yet");
         let mut slow = 0.0;
-        let moved: i32 = (0..8).map(|_| i32::from(whole_pixels(0.5, &mut slow, 1.0))).sum();
+        let moved: i64 = (0..8).map(|_| whole_pixels(0.5, &mut slow, 1.0)).sum();
         assert_eq!(moved, 4, "eight slow frames add up to four pixels");
-        assert_eq!(whole_pixels(10_000.0, &mut remainder, 1.0), 255, "a huge jump is limited");
+        let mut fresh = 0.0;
+        assert_eq!(whole_pixels(10_000.0, &mut fresh, 1.0), 10_000, "a huge jump moves all the way (there is no limit per frame)");
     }
 }

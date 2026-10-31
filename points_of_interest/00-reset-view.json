@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "name": "Reset View",
+  "description": "The starting view: the whole Mandelbrot set, as Reset view shows it.",
+  "location": {
+    "center": { "real": -0.75, "imaginary": 0.0 },
+    "scale": 1.0,
+    "max_iterations": 1000
+  },
+  "appearance": {
+    "coloring": "bernstein",
+    "color_channels": "RGB"
+  }
+}

@@ -15,3 +15,6 @@ target/
 
 #VS Code workspaces
 **/*.code-workspace
+
+# The runs of the benchmark tour (see src/gui/benchmark.rs)
+benchmarks/

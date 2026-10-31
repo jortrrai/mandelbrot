@@ -1,17 +1,14 @@
-//! The application: reads the command line and runs the window of the `mandelbrot` library.
+//! The application: runs the window of the `mandelbrot` library with the default settings.
 
-use std::env;
 use std::process;
 
 use mandelbrot::{Config, self};
 
 fn main() {
-    let config = Config::build(env::args()).unwrap_or_else(|err| {
-        eprintln!("Problem parsing arguments: {}", err);
-        process::exit(1);
-    });
-
-    if let Err(err) = mandelbrot::run(&config) {
+    if std::env::args().len() > 1 {
+        eprintln!("The command-line arguments are no longer used: the window has controls for the size, the iterations and the quality. Starting with the defaults.");
+    }
+    if let Err(err) = mandelbrot::run(&Config::default()) {
         eprintln!("Application error: {}", err);
         process::exit(1);
     }

@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 
 use crate::coloring::{ColorChannelMapping, TrueColor};
 use crate::complex_plane::{ComplexPlane, View};
-use crate::mandelbrot_set::MandelbrotSet;
+use crate::mandelbrot_set::{ColorCycle, MandelbrotSet};
 use crate::points_of_interest::{Coloring, Location};
 use crate::rendering::Render;
 
@@ -49,6 +49,8 @@ pub struct ThumbnailRequest {
     pub coloring: Coloring,
     /// The color channel mapping of the thumbnail
     pub color_channels: ColorChannelMapping,
+    /// The color cycle of the thumbnail, see `ColorCycle`
+    pub palette: ColorCycle,
     /// The width in pixels
     pub width: usize,
     /// The height in pixels
@@ -70,6 +72,9 @@ impl ThumbnailRequest {
         feed(&self.location.max_iterations.min(MAX_THUMBNAIL_ITERATIONS).to_le_bytes());
         feed(self.coloring.key().as_bytes());
         feed(format!("{:?}", self.color_channels).as_bytes());
+        feed(&self.palette.divide.to_bits().to_le_bytes());
+        feed(&self.palette.offset.to_bits().to_le_bytes());
+        feed(&[u8::from(self.palette.stretch)]);
         feed(&(self.width as u64).to_le_bytes());
         feed(&(self.height as u64).to_le_bytes());
         feed(&RENDER_REVISION.to_le_bytes());
@@ -82,7 +87,8 @@ impl ThumbnailRequest {
 pub fn render_thumbnail(request: &ThumbnailRequest, orbit_radius: f64, cancel: &AtomicBool) -> Option<Vec<TrueColor>> {
     let mut plane = ComplexPlane::new(request.width, request.height);
     plane.set_view(&View::new(request.location.real, request.location.imaginary, request.location.scale));
-    let set = MandelbrotSet::new(request.location.max_iterations.min(MAX_THUMBNAIL_ITERATIONS), orbit_radius);
+    let mut set = MandelbrotSet::new(request.location.max_iterations.min(MAX_THUMBNAIL_ITERATIONS), orbit_radius);
+    set.palette = request.palette;
     let coloring_function = match request.coloring {
         Coloring::Hsv => TrueColor::new_from_hsv_colors,
         Coloring::Bernstein => TrueColor::new_from_bernstein_polynomials,
@@ -157,7 +163,7 @@ mod tests {
     use super::*;
 
     fn request() -> ThumbnailRequest {
-        ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.02, max_iterations: 300 }, coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, width: 36, height: 24 }
+        ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.02, max_iterations: 300 }, coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, palette: ColorCycle::CYCLE, width: 36, height: 24 }
     }
 
     #[test]

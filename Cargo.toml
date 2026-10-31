@@ -1,6 +1,6 @@
 [package]
 name = "mandelbrot"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 repository = "https://github.com/jortrr/mandelbrot"
 readme = "README.md"
@@ -21,6 +21,10 @@ png = "0.17.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 prisma = "0.1.1"
+wgpu = "30"
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
 
 [profile.release]
 lto = "fat"
