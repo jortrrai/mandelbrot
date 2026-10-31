@@ -18,10 +18,13 @@ cargo run --release --example perf            # timings of the renderer, with a 
 cargo run --release --example image_baseline  # a checksum of 115 representative renders (see below)
 ```
 
+## Release builds
+`.github/workflows/release.yml` builds the program for Linux, Windows and macOS. A pushed tag starting with `v` attaches the packages (the program, the places, the README and the license) to the GitHub release of that tag.
+
 ## Checksums and regression tests
 - `examples/image_baseline.rs` is for refactoring: run it before and after a change and compare the lines starting with `BASELINE`; the output must not change. The checksums are reproducible on one machine and build, not across different CPUs or math libraries.
 - `tests/render_regression.rs` pins what can be pinned on every platform (iteration counts and renders with an integer palette) and compares the rest with a tolerance.
 - `examples/perf.rs`, `adaptive.rs`, `auto_iterations.rs` and `thumbnails.rs` measure the renderer, adaptive supersampling, the automatic iteration limit and the thumbnails.
 
 ## Where things are
-The modules of `src/`: `complex`, `complex_plane` (the part of the plane an image shows), `mandelbrot_set` (the iteration), `coloring`, `pixel_buffer`, `rendering` (the progressive renderer), `auto_iterations`, `thumbnails`, `points_of_interest`, `gui`, `config`.
+The modules of `src/`: `complex`, `complex_plane` (the part of the plane an image shows), `mandelbrot_set` (the iteration), `coloring`, `pixel_buffer`, `rendering` (the progressive renderer), `auto_iterations`, `thumbnails`, `points_of_interest`, `image_metadata` (the view of a saved image, read back), `gui`, `config`.

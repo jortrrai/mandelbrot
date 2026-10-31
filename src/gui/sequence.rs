@@ -125,6 +125,33 @@ impl MandelbrotApp {
         self.fly_video_flight(&flight);
     }
 
+    /// Times the transitions so the keyframes land on the swells of the music of *Follow the music* (issue #185): the first keyframe at its start, the last at its
+    /// end, the ones between on its most prominent swells (see `music::swells_of_levels`; the longest gaps are split evenly when it has fewer). Videos then
+    /// follow the track at an even speed per transition (strength 0), so the keyframes stay on their swells; the times can be changed afterwards
+    pub(super) fn fit_sequence_to_music(&mut self) {
+        let path = self.music_path.trim().to_string();
+        if self.sequence_keyframes.len() < 2 || path.is_empty() {
+            self.log("Fitting a sequence to music needs two keyframes or more, and an audio file in Follow the music");
+            return;
+        }
+        let between = self.sequence_keyframes.len() - 2;
+        match super::music::swells_of_track(std::path::Path::new(&path), between) {
+            Ok((swells, length)) => {
+                let mut times: Vec<f64> = std::iter::once(0.0).chain(swells).chain(std::iter::once(length)).collect();
+                while times.len() < between + 2 {
+                    //Fewer swells than keyframes between: the longest gap is split
+                    let longest = (0..times.len() - 1).max_by(|a, b| (times[a + 1] - times[*a]).total_cmp(&(times[b + 1] - times[*b]))).unwrap_or(0);
+                    times.insert(longest + 1, f64::midpoint(times[longest], times[longest + 1]));
+                }
+                self.sequence_seconds = times.windows(2).map(|pair| format!("{:.2}", (pair[1] - pair[0]).max(0.01))).collect();
+                (self.follow_music, self.music_strength) = (true, 0.0);
+                let at: Vec<String> = times.iter().skip(1).take(between).map(|seconds| format!("{}:{:04.1}", (*seconds / 60.0).floor(), seconds % 60.0)).collect();
+                self.log(format!("The keyframes land on the swells of the music at {} (the last at its end, {length:.1} s); videos follow the track at an even speed per transition", if at.is_empty() { String::from("its start and end") } else { at.join(", ") }));
+            }
+            Err(reason) => self.log(reason),
+        }
+    }
+
     /// The keyframes with their times, and the buttons to add, show, move and remove them and to fly the sequence
     pub(super) fn sequence_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -134,6 +161,9 @@ impl MandelbrotApp {
             }
             if ui.add_enabled(self.sequence_keyframes.len() >= 2, egui::Button::new("Fly the sequence")).on_hover_text("Flies through the keyframes in order, the colors changing from one keyframe's to the next, and makes it the last flight: Render video, Add to queue and Save flight take it").clicked() {
                 self.fly_sequence();
+            }
+            if ui.add_enabled(self.sequence_keyframes.len() >= 2 && !self.music_path.trim().is_empty(), egui::Button::new("Fit to the music")).on_hover_text("Times the transitions so the keyframes land on the biggest swells of the track of Follow the music, the last one at its end (the times can be changed afterwards)").clicked() {
+                self.fit_sequence_to_music();
             }
             if ui.add_enabled(!self.sequence_keyframes.is_empty(), egui::Button::new("Clear")).clicked() {
                 (self.sequence_keyframes, self.sequence_seconds) = (Vec::new(), Vec::new());

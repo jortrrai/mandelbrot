@@ -2419,6 +2419,41 @@ fn a_dive_video_into_a_place_deeper_than_64_bit_floats_renders_its_deep_frames_d
 }
 
 #[test]
+fn a_sequence_fitted_to_music_lands_its_keyframes_on_the_swells_and_its_video_lasts_as_long_as_the_track() {
+    //Issue #185: a 12 s track, quiet with a loud burst from 5 to 7 s, and a sequence of 3 keyframes
+    if !ffmpeg_available() {
+        return;
+    }
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    std::fs::create_dir_all(&folder).unwrap();
+    let track = folder.join("swell.wav");
+    let made = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=12", "-af", "volume='if(between(t,5,7),1,0.03)':eval=frame"]).arg(&track).status().unwrap();
+    assert!(made.success());
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_point_of_interest(0);
+    for zoom in [1.0, 100.0, 1.0 / 6.4e-5] {
+        assert!(app.set_depth(zoom));
+        app.add_keyframe();
+    }
+    app.music_path = track.display().to_string();
+    app.fit_sequence_to_music();
+    let seconds: Vec<f64> = app.sequence().seconds;
+    assert!((seconds[0] - 6.0).abs() < 1.0, "the middle keyframe lands on the swell around 6 s: {seconds:?}");
+    assert!((seconds.iter().sum::<f64>() - 12.0).abs() < 0.2, "the last at the end of the track: {seconds:?}");
+    assert!(app.follow_music && app.music_strength == 0.0);
+    //Its video: as long as the track, with its sound
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 10);
+    app.fly_sequence();
+    app.skip_flight();
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight: 121 of 121 frames") && message.contains("with the music"), "12 s at 10 FPS: {message}");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_video_that_fits_a_length_lasts_exactly_that_long() {
     //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
