@@ -4,7 +4,7 @@
 //! A background job puts the camera at `n / fps × speed` along the flight path for frame `n` (*Video speed*: 100% is the speed of the flight, 10% a ten times
 //! slower video), renders it at the saved image size and quality (the GPU helps as in the window), and hands it on: one thread writes it as `frame-00001.png`, ...
 //! to a folder of `saved/` (with *PNG frames*, off by default), another pipes it to `ffmpeg`, when it is installed, which encodes the video in the chosen
-//! `VideoQuality` for the chosen `Playback`. Several frames render at once (`FRAMES_AT_ONCE`), and the renderers go on while the writers write the last
+//! `VideoQuality` for the chosen `Playback`. Several frames render at once, as many as keep the CPU busy (`FrameScheduler`), and the renderers go on while the writers write the last
 //! ones (at most `FRAMES_WAITING` frames wait), so neither the CPU threads nor the GPU wait for the encoder or for the end of a layer. The iteration limit follows the zoom like a flight with auto iterations: from the limit at the start to the limit of
 //! the place. Frames are sharp (no motion blur). An interrupted video keeps the frames written.
 
@@ -31,8 +31,138 @@ pub(super) const SPEEDS: std::ops::RangeInclusive<u16> = 1..=400;
 /// How many rendered frames may wait for the writers of the video (the PNG frames and ffmpeg) before the renderers wait for them
 const FRAMES_WAITING: usize = 2;
 
-/// The range of the frames a video renders at once, see `MandelbrotApp::video_frames_at_once`
-pub(super) const FRAMES_AT_ONCE: std::ops::RangeInclusive<usize> = 1..=4;
+/// The most frames a video renders at once: each takes all the CPU threads and the GPU, and the job adds frames while the CPU is not yet busy (see `FrameScheduler`)
+const MAX_AT_ONCE: usize = 8;
+
+/// How much faster a video must render with one more frame at once to keep it (1.03: 3% more frames per second); measured differences below that are noise
+const WORTH_ONE_MORE: f64 = 1.03;
+
+/// How many measurements the job keeps the number of frames at once after one more did not pay, before it tries again (the frames get dearer along a zoom,
+/// which can change what pays)
+const HOLD_WINDOWS: u32 = 8;
+
+/// The shortest measurement of the frame rate (and at least twice as many frames as are under way, so every renderer finishes some)
+const MIN_WINDOW: Duration = Duration::from_secs(2);
+
+/// The memory of a frame under way, per pixel: its samples (`rendering::SampleState`, about 30 bytes) and its colors on the way to the file, with room to spare
+const BYTES_PER_PIXEL_UNDER_WAY: u64 = 48;
+
+/// How many frames of `pixels` the job may render at once: at most `MAX_AT_ONCE`, and together at most a third of the memory that is available (on systems
+/// where that is not known, 4)
+fn frames_memory_allows(pixels: usize) -> usize {
+    let per_frame = (pixels as u64 * BYTES_PER_PIXEL_UNDER_WAY).max(1);
+    let allowed = available_memory().map_or(4, |bytes| usize::try_from(bytes / 3 / per_frame).unwrap_or(MAX_AT_ONCE));
+    allowed.clamp(1, MAX_AT_ONCE)
+}
+
+/// The memory that is available for new work, in bytes (`MemAvailable` of `/proc/meminfo`), where the system says it
+fn available_memory() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|line| line.starts_with("MemAvailable:"))?;
+    line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kilobytes| kilobytes * 1024)
+}
+
+/// How many frames of a video render at the same time, chosen by the job itself (issue #174), and the frames finished so far, which it measures that by. Every
+/// frame under way takes all the CPU threads and hands rows to the GPU, so one fills the gaps another leaves (the end of a layer, the small passes of adaptive
+/// supersampling, the GPU's batches). More is not always faster: frames that share the threads also slow each other down, so the job keeps what is measured
+/// to be fastest (see `Climber`)
+pub(super) struct FrameScheduler {
+    /// The frames that may be under way, and those that are
+    allowed: AtomicUsize,
+    under_way: std::sync::Mutex<usize>,
+    free: std::sync::Condvar,
+    /// The frames finished by the renderers
+    finished: AtomicUsize,
+    /// The CPU use of the render threads in the last measurement, in percent, for the progress line
+    pub(super) cpu_percent: AtomicUsize,
+}
+
+impl FrameScheduler {
+    fn new(start: usize) -> FrameScheduler {
+        FrameScheduler { allowed: AtomicUsize::new(start), under_way: std::sync::Mutex::new(0), free: std::sync::Condvar::new(), finished: AtomicUsize::new(0), cpu_percent: AtomicUsize::new(0) }
+    }
+
+    /// The frames that may be under way now
+    pub(super) fn allowed(&self) -> usize {
+        self.allowed.load(Ordering::Relaxed)
+    }
+
+    fn set_allowed(&self, allowed: usize) {
+        self.allowed.store(allowed.max(1), Ordering::Relaxed);
+        self.free.notify_all();
+    }
+
+    /// Waits until another frame may start (or `cancel` is set: then false)
+    fn start_frame(&self, cancel: &AtomicBool) -> bool {
+        let mut under_way = self.under_way.lock().unwrap();
+        while *under_way >= self.allowed() {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            under_way = self.free.wait_timeout(under_way, Duration::from_millis(50)).unwrap().0;
+        }
+        *under_way += 1;
+        true
+    }
+
+    /// The renderer of a frame stops (`rendered`: with the frame finished): another frame may start
+    fn finish_frame(&self, rendered: bool) {
+        if rendered {
+            self.finished.fetch_add(1, Ordering::Relaxed);
+        }
+        *self.under_way.lock().unwrap() -= 1;
+        self.free.notify_all();
+    }
+}
+
+/// Finds the number of frames at once that renders fastest, by trying one more and keeping it when the frame rate rises by `WORTH_ONE_MORE` (hill climbing).
+/// After one more did not pay it waits `HOLD_WINDOWS` measurements, measures again where it is, and tries again
+struct Climber {
+    current: usize,
+    most: usize,
+    /// The frame rate at `current`, the number being tried, and the measurements left before the next try
+    rate: Option<f64>,
+    trying: Option<usize>,
+    hold: u32,
+}
+
+impl Climber {
+    fn new(start: usize, most: usize) -> Climber {
+        Climber { current: start.clamp(1, most.max(1)), most: most.max(1), rate: None, trying: None, hold: 0 }
+    }
+
+    /// Takes the frame rate measured with the number this returned last (`current` at first), and returns the number of frames at once for the next measurement
+    fn measured(&mut self, rate: f64) -> usize {
+        match self.trying.take() {
+            Some(more) if rate > self.rate.unwrap_or(0.0) * WORTH_ONE_MORE => {
+                (self.current, self.rate) = (more, Some(rate)); //It pays: keep it, and try one more at once
+                self.try_one_more()
+            }
+            Some(_) => {
+                self.hold = HOLD_WINDOWS; //It does not: back to where it was, for a while
+                self.rate = None;
+                self.current
+            }
+            None if self.hold > 0 => {
+                self.hold -= 1;
+                self.current
+            }
+            None => {
+                self.rate = Some(rate);
+                self.try_one_more()
+            }
+        }
+    }
+
+    fn try_one_more(&mut self) -> usize {
+        if self.current < self.most {
+            self.trying = Some(self.current + 1);
+            self.current + 1
+        } else {
+            self.current
+        }
+    }
+}
 
 /// The quality of the video file: how much of the rendered detail the encoder keeps. The tiers keep a fixed quality (the encoder's quantizer), so a busy view
 /// gets the bits it needs and a calm one stays small. Measured on 60 frames of a detailed 1080p zoom at 60 FPS (the mean error of a color channel, in levels of
@@ -208,6 +338,8 @@ pub(super) struct VideoFlight {
 /// A video job: its progress (frames written of all) and cancel flag, and the receiver of its final message
 pub(super) struct VideoJob {
     done: Arc<AtomicUsize>,
+    /// How many frames render at once, and the CPU use (see `FrameScheduler`)
+    pub(super) scheduler: Arc<FrameScheduler>,
     total: usize,
     cancel: Arc<AtomicBool>,
     started: Instant,
@@ -268,7 +400,9 @@ impl MandelbrotApp {
             }
         };
         let (width, height, fps, speed, quality, playback, pngs) = (resolution.width, resolution.height, self.video_fps, self.video_speed, self.video_quality, self.video_playback, self.video_pngs);
-        let at_once = self.video_frames_at_once.clamp(1, *FRAMES_AT_ONCE.end());
+        let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
+        let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
+        let thread_scheduler = Arc::clone(&scheduler);
         let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
         let total = frame_count(path.duration(), fps, speed);
         let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
@@ -278,6 +412,8 @@ impl MandelbrotApp {
         let (samples, adaptive, blur, blend) = (self.image_supersampling_amount, self.adaptive_supersampling.then(rendering::AdaptiveSampling::default), self.image_quality_blur, self.video_blend);
         let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
         let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
+        //With a GPU, one more renderer renders whole frames on the GPU alone (see the renderers below)
+        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer;
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
         let (sender, result) = mpsc::channel();
@@ -328,18 +464,56 @@ impl MandelbrotApp {
                 let video = if encoding { encoded.load(Ordering::Relaxed) } else { rendered };
                 png.min(video)
             };
-            //`at_once` renderers take the next frame as soon as they are free (each with all the CPU threads and the GPU, so one fills the gaps the other leaves:
+            //Renderers take the next frame as soon as the scheduler lets them (each with all the CPU threads and the GPU, so one fills the gaps the other leaves:
             //the end of a layer, the GPU's batches); the frames go to the writers in their order
-            let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(0), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(at_once));
+            let scheduler = &thread_scheduler;
+            let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(0), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(most_at_once));
             let mut rendered = 0;
             std::thread::scope(|scope| {
-                for _ in 0..at_once {
+                //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
+                let (next_ref, steering_cancel) = (&next, &thread_cancel);
+                scope.spawn(move || {
+                    let threads = rendering::render_thread_count().max(1) as f64;
+                    let mut climber = Climber::new(scheduler.allowed(), most_at_once);
+                    let running = || next_ref.load(Ordering::Relaxed) < total && !steering_cancel.load(Ordering::Relaxed);
+                    while running() {
+                        //A new number of frames at once first fills up: the measurement starts after as many frames as are under way
+                        let at_once = scheduler.allowed();
+                        let settled = scheduler.finished.load(Ordering::Relaxed) + at_once;
+                        while running() && scheduler.finished.load(Ordering::Relaxed) < settled {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        let (started, first, cpu_before) = (Instant::now(), scheduler.finished.load(Ordering::Relaxed), cpu_time::ProcessTime::try_now().ok());
+                        while running() && (started.elapsed() < MIN_WINDOW || scheduler.finished.load(Ordering::Relaxed) < first + 2 * at_once) {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        if !running() {
+                            return;
+                        }
+                        let seconds = started.elapsed().as_secs_f64();
+                        if let Some(cpu) = cpu_before.and_then(|before| cpu_time::ProcessTime::try_now().ok().map(|now| now.duration_since(before).as_secs_f64())) {
+                            scheduler.cpu_percent.store((100.0 * cpu / (seconds * threads)).round() as usize, Ordering::Relaxed);
+                        }
+                        let rate = (scheduler.finished.load(Ordering::Relaxed) - first) as f64 / seconds;
+                        scheduler.set_allowed(climber.measured(rate));
+                    }
+                });
+                //The renderers that the scheduler lets start frames (with all the CPU threads, handing rows to the GPU), and with a GPU one more that renders whole
+                //frames on the GPU alone: the CPU threads take most rows of a frame they share with the GPU, so the GPU would otherwise be idle much of the time
+                for renderer in 0..most_at_once + usize::from(gpu_renderer) {
+                    let on_the_gpu = renderer == most_at_once;
                     let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu);
                     scope.spawn(move || {
                         let (mut plane, mut m) = (ComplexPlane::new(width, height), m);
                         loop {
+                            if !on_the_gpu && !scheduler.start_frame(thread_cancel) {
+                                return;
+                            }
                             let frame = next.fetch_add(1, Ordering::SeqCst);
                             if frame >= total || thread_cancel.load(Ordering::Relaxed) {
+                                if !on_the_gpu {
+                                    scheduler.finish_frame(false);
+                                }
                                 return;
                             }
                             let time = frame_time(frame, fps, speed);
@@ -354,7 +528,14 @@ impl MandelbrotApp {
                                 .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
                             //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
                             let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
-                            if !render.run(|layer, _| colors = layer.to_vec()) {
+                            let render = if on_the_gpu { render.on_the_gpu_only() } else { render };
+                            let completed = render.run(|layer, _| colors = layer.to_vec());
+                            if on_the_gpu {
+                                scheduler.finished.fetch_add(usize::from(completed), Ordering::Relaxed);
+                            } else {
+                                scheduler.finish_frame(completed);
+                            }
+                            if !completed {
                                 let _ = frames_sender.send((frame, None));
                                 return;
                             }
@@ -412,7 +593,7 @@ impl MandelbrotApp {
             let _ = sender.send(format!("Video of the flight: {frames} of {total} frames at {fps} FPS, {speed}% speed{complete}{written}{file}"));
         });
         self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {speed}% speed, {}, {}", quality.name(), playback.name()));
-        self.video_job = Some(VideoJob { done, total, cancel, started: Instant::now(), result });
+        self.video_job = Some(VideoJob { done, scheduler, total, cancel, started: Instant::now(), result });
     }
 
     /// Takes the final message of the video job
@@ -435,7 +616,9 @@ impl MandelbrotApp {
             if ui.button("Cancel video").clicked() {
                 job.cancel.store(true, Ordering::Relaxed);
             }
-            ui.add(egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!("Video: {done} of {} frames, {left:.0} s left", job.total)));
+            let (at_once, cpu) = (job.scheduler.allowed(), job.scheduler.cpu_percent.load(Ordering::Relaxed));
+            ui.add(egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!("Video: {done} of {} frames, {left:.0} s left ({at_once} at once, CPU {cpu}%)", job.total)))
+                .on_hover_text("The job renders as many frames at once as renders fastest: it tries one more while the video runs and keeps it when the frame rate rises (up to what the memory allows)");
         });
     }
 
@@ -460,7 +643,6 @@ impl MandelbrotApp {
         });
         ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
-            ui.add(egui::DragValue::new(&mut self.video_frames_at_once).range(FRAMES_AT_ONCE).suffix(" at once")).on_hover_text("How many frames are rendered at the same time (1 to 4), each with all the CPU threads and the GPU: one fills the gaps another leaves, so the CPU and the GPU stay busy; more takes more memory");
             ui.checkbox(&mut self.video_blend, "Blend frames").on_hover_text("Every frame is blended into the frames before it, moved to its view, as Blend frames does in flights: with the 1x qualities every frame takes another sample, so the video gathers samples over time and moves smoothly for the cost of one sample a frame (fine with 1x + blur). With more samples it smooths the motion");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
         });
@@ -548,6 +730,41 @@ mod tests {
         assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60), &["-g", "30", "+faststart"]));
         assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
         assert_eq!((extension(VideoQuality::Lossless), extension(VideoQuality::NearLossless)), ("mkv", "mp4"));
+    }
+
+    #[test]
+    fn the_climber_keeps_one_more_frame_at_once_only_when_it_is_faster() {
+        let mut climber = Climber::new(2, 4);
+        assert_eq!(climber.measured(10.0), 3, "after a measurement at 2: try 3");
+        assert_eq!(climber.measured(12.0), 4, "3 is faster: keep it, try 4");
+        assert_eq!(climber.measured(12.1), 3, "4 is not faster (by less than the noise): back to 3");
+        for _ in 0..HOLD_WINDOWS {
+            assert_eq!(climber.measured(12.0), 3, "and stay there for a while");
+        }
+        assert_eq!(climber.measured(11.0), 4, "then measure 3 again and try 4 again");
+        assert_eq!(climber.measured(13.0), 4, "now 4 pays, and it is the most the memory allows");
+        assert_eq!(climber.measured(13.0), 4);
+        assert_eq!(Climber::new(2, 1).measured(5.0), 1, "never more than the most");
+    }
+
+    #[test]
+    fn the_scheduler_lets_as_many_frames_start_as_allowed() {
+        let scheduler = FrameScheduler::new(2);
+        let cancel = AtomicBool::new(false);
+        assert!(scheduler.start_frame(&cancel) && scheduler.start_frame(&cancel));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(!scheduler.start_frame(&cancel), "no free place, cancelled");
+        scheduler.finish_frame(true);
+        assert!(scheduler.start_frame(&AtomicBool::new(false)), "a finished frame frees a place");
+        scheduler.set_allowed(3);
+        assert!(scheduler.start_frame(&AtomicBool::new(false)), "one more allowed");
+        assert_eq!(scheduler.finished.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn the_memory_bounds_the_frames_at_once() {
+        assert!((1..=MAX_AT_ONCE).contains(&frames_memory_allows(3840 * 2160)));
+        assert_eq!(frames_memory_allows(usize::MAX / 64), 1, "a frame too large for the memory still renders, one at a time");
     }
 
     #[test]

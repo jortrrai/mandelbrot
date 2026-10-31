@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
-use super::video::{Playback, VideoQuality, FRAMES_AT_ONCE, FRAME_RATES, SPEEDS};
+use super::video::{Playback, VideoQuality, FRAME_RATES, SPEEDS};
 use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
 use crate::auto_iterations::AutoPreset;
@@ -67,7 +67,6 @@ pub(super) struct Settings {
     video_playback: Option<String>,
     video_pngs: Option<bool>,
     video_blend: Option<bool>,
-    video_frames_at_once: Option<usize>,
 }
 
 /// The auto iterations presets, to find one by its name
@@ -157,7 +156,6 @@ impl MandelbrotApp {
             video_playback: Some(self.video_playback.name().to_string()),
             video_pngs: Some(self.video_pngs),
             video_blend: Some(self.video_blend),
-            video_frames_at_once: Some(self.video_frames_at_once),
         }
     }
 
@@ -266,9 +264,6 @@ impl MandelbrotApp {
         }
         if let Some(playback) = settings.video_playback.as_deref().and_then(Playback::of_name) {
             self.video_playback = playback;
-        }
-        if let Some(at_once) = settings.video_frames_at_once.filter(|at_once| FRAMES_AT_ONCE.contains(at_once)) {
-            self.video_frames_at_once = at_once;
         }
         set(settings.video_pngs, &mut self.video_pngs);
         set(settings.video_blend, &mut self.video_blend);

@@ -180,9 +180,9 @@ impl<'a> Render<'a> {
         self
     }
 
-    /// Without CPU threads in the passes, so the GPU computes every sample (with `gpu`): to test that whole renders by the GPU are the CPU's, which a share that
-    /// depends on the timing of the threads cannot show reliably
-    #[cfg(test)]
+    /// Without CPU threads in the passes, so the GPU computes every sample (with `gpu`): for a renderer of video frames that keeps the GPU busy while the CPU
+    /// threads render other frames, and to test that whole renders by the GPU are the CPU's (which a share that depends on the timing of the threads cannot
+    /// show reliably). If the GPU fails, the thread that feeds it computes the rest
     #[must_use]
     pub(crate) const fn on_the_gpu_only(mut self) -> Self {
         self.cpu_threads = 0;
@@ -572,7 +572,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                         return;
                     }
                 }
-                //Without CPU threads (a test) the rows that are left after the GPU failed are this thread's
+                //Without CPU threads (a GPU-only render) the rows that are left after the GPU failed are this thread's
                 if cpu_threads == 0 {
                     loop {
                         if cancel.load(Ordering::Relaxed) {

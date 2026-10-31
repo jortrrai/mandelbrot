@@ -25,6 +25,7 @@ wgpu = "30"
 naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+cpu-time = "1"
 
 [profile.release]
 lto = "fat"

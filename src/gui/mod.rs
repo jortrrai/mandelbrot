@@ -190,8 +190,10 @@ pub struct MandelbrotApp {
     video_pngs: bool,
     /// Whether the frames of a video are blended over time, see `video` and `temporal`
     video_blend: bool,
-    /// How many frames of a video render at once, see `video`
-    video_frames_at_once: usize,
+    /// A fixed number of frames a video renders at once, for measurements (the window always lets the job choose, see `video::FrameScheduler`)
+    video_at_once_fixed: Option<usize>,
+    /// Whether a video with a GPU has a renderer of whole frames on the GPU alone (on; off only for measurements), see `video`
+    video_gpu_renderer: bool,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
@@ -358,7 +360,8 @@ impl MandelbrotApp {
             video_playback: video::Playback::Maximum,
             video_pngs: false,
             video_blend: false,
-            video_frames_at_once: 2,
+            video_at_once_fixed: None,
+            video_gpu_renderer: true,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,

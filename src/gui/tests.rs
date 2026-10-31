@@ -1670,7 +1670,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     app.flight_rendering = super::flight::FlightRendering::Resolution(37);
     (app.route, app.constant_speed, app.dive_zoom) = (super::flight::Route::Straight, 7.5, 250.0);
     (app.frames_ahead, app.blend_frames, app.f32_frames, app.quality_blur, app.neighborhood_margin) = (1, true, false, true, 250);
-    (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs, app.video_frames_at_once) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true, 3);
+    (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true);
     app.video_blend = true;
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     let now = std::time::Instant::now();
@@ -1685,7 +1685,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
         (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
     assert_eq!((next.route, next.constant_speed, next.dive_zoom), (super::flight::Route::Straight, 7.5, 250.0));
     assert_eq!((next.frames_ahead, next.blend_frames, next.f32_frames, next.quality_blur, next.neighborhood_margin), (1, true, false, true, 250));
-    assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs, next.video_frames_at_once), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true, 3));
+    assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true));
     assert!(next.video_blend);
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     //A file with unknown and missing values loads what it knows
@@ -1761,7 +1761,7 @@ fn a_video_of_the_last_flight_has_a_frame_for_every_step_of_its_frame_rate() {
     app.video_folder = folder.join("saved");
     app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
     (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
-    (app.pace, app.video_pngs, app.video_frames_at_once) = (super::flight::Pace::Fast, true, 3); //(Three frames at once: still every frame, in order)
+    (app.pace, app.video_pngs) = (super::flight::Pace::Fast, true); //(Several frames at once: still every frame, in order)
     app.go_to_point_of_interest(0);
     app.skip_flight();
     let duration = super::flight::Flight::new(app.last_flight.as_ref().unwrap().from, app.last_flight.as_ref().unwrap().to, super::flight::Pace::Fast).duration();
@@ -2133,26 +2133,37 @@ fn with_auto_blur_the_place_stays_blurred_until_its_render_is_finished() {
 #[test]
 #[ignore = "timing, run by hand"]
 fn video_render_time_with_frames_at_once() {
-    for at_once in [1, 2, 3] {
-        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    //(Measurement, run by hand: the time of a video with a fixed number of frames at once and with the number the job chooses (`None`), and what it chose.
+    //MANDELBROT_VIDEO_TEST="width height samples speed place" sets the video, e.g. "1920 1080 16 25 09-the-whirlpool.json"; by default a short 1080p one)
+    let setup = std::env::var("MANDELBROT_VIDEO_TEST").unwrap_or_else(|_| String::from("1920 1080 4 25 -"));
+    let fields: Vec<&str> = setup.split_whitespace().collect();
+    let (width, height, samples, speed) = (fields[0].parse().unwrap(), fields[1].parse().unwrap(), fields[2].parse().unwrap(), fields[3].parse().unwrap());
+    let place = if fields[4] == "-" { String::from(HSV_BGR_PLACE) } else { std::fs::read_to_string(std::path::Path::new("points_of_interest").join(fields[4])).unwrap() };
+    for (fixed, gpu_renderer) in [(Some(2), false), (None, false), (Some(2), true), (None, true)] {
+        let (mut app, folder) = app_with_points(&[("test-place.json", &place)]);
         if app.gpu.is_none() {
             app.gpu = rendering::gpu::GpuIterator::new().ok().map(std::sync::Arc::new);
         }
         app.video_folder = folder.join("saved");
         app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
-        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (1920, 1080, 4, 30);
-        (app.pace, app.video_frames_at_once, app.use_gpu) = (super::flight::Pace::Fast, at_once, true);
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (width, height, samples, 30);
+        (app.pace, app.use_gpu, app.video_speed, app.video_at_once_fixed, app.video_gpu_renderer) = (super::flight::Pace::Fast, true, speed, fixed, gpu_renderer);
         app.go_to_point_of_interest(0);
         app.skip_flight();
         wait_for_job(&mut app);
         let started = std::time::Instant::now();
         app.start_video();
         let ctx = egui::Context::default();
-        while app.video_job.is_some() {
+        let mut seen = Vec::new();
+        while let Some(job) = &app.video_job {
+            let state = (job.scheduler.allowed(), job.scheduler.cpu_percent.load(Ordering::Relaxed));
+            if seen.last() != Some(&state) {
+                seen.push(state);
+            }
             app.poll_video(&ctx);
             std::thread::sleep(Duration::from_millis(5));
         }
-        println!("{at_once} at once: {:.2} s, {}", started.elapsed().as_secs_f64(), app.log.last().unwrap());
+        println!("{fixed:?} at once, GPU renderer {gpu_renderer}: {:.2} s; (at once, CPU %) on the way: {seen:?}; {}", started.elapsed().as_secs_f64(), app.log.last().unwrap());
         let _ = std::fs::remove_dir_all(folder);
     }
 }
@@ -2164,7 +2175,7 @@ fn a_blended_video_has_every_frame_and_blends_the_frames_after_the_first() {
         app.video_folder = folder.join("saved");
         app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
         (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, 1, 24);
-        (app.pace, app.video_pngs, app.video_blend, app.video_frames_at_once) = (super::flight::Pace::Fast, true, blend, 3);
+        (app.pace, app.video_pngs, app.video_blend) = (super::flight::Pace::Fast, true, blend);
         app.go_to_point_of_interest(0);
         app.skip_flight();
         app.start_video();
