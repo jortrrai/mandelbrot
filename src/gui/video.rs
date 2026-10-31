@@ -76,10 +76,10 @@ impl VideoQuality {
     const fn bits_per_pixel(self, playback: Playback) -> f64 {
         match (self, playback) {
             (VideoQuality::Lossless, _) => 8.2,
-            (VideoQuality::High, Playback::Computers) => 0.65,
-            (VideoQuality::VeryHigh, Playback::Computers) => 1.1,
-            (VideoQuality::UltraHigh, Playback::Computers) => 1.75,
-            (VideoQuality::NearLossless, Playback::Computers) => 3.4,
+            (VideoQuality::High, Playback::Maximum) => 0.65,
+            (VideoQuality::VeryHigh, Playback::Maximum) => 1.1,
+            (VideoQuality::UltraHigh, Playback::Maximum) => 1.75,
+            (VideoQuality::NearLossless, Playback::Maximum) => 3.4,
             (VideoQuality::High, _) => 0.57,
             (VideoQuality::VeryHigh, _) => 0.9,
             (VideoQuality::UltraHigh, _) => 1.3,
@@ -88,30 +88,41 @@ impl VideoQuality {
     }
 }
 
-/// Where the video has to play, which decides its color resolution and codec (lossless videos are always FFV1)
+/// The format of the video: its codec, bit depth and color resolution (lossless videos are always FFV1)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Playback {
     /// HEVC (on an NVIDIA GPU's encoder; H.264 on the CPU otherwise) in 10 bits with the full color resolution (4:4:4): the best colors; computers play it
     /// (VLC, most players), phones and TVs do not
-    Computers,
+    Maximum,
     /// HEVC Main 10 (10 bits, half the color resolution, 4:2:0), which phones, TVs and browsers decode in hardware. Detail of single pixels in strong colors
     /// gets softer
-    Phones,
+    HighQuality,
     /// H.264 in 8 bits with half the color resolution: plays on anything, with the softest colors
-    Everywhere,
+    MostCompatible,
 }
 
 impl Playback {
     /// Every choice, in the order of the list (the default first)
-    pub(super) const ALL: [Playback; 3] = [Playback::Computers, Playback::Phones, Playback::Everywhere];
+    pub(super) const ALL: [Playback; 3] = [Playback::Maximum, Playback::HighQuality, Playback::MostCompatible];
 
     /// The name in the list
     pub(super) const fn name(self) -> &'static str {
         match self {
-            Playback::Computers => "Computers",
-            Playback::Phones => "Phones and TVs",
-            Playback::Everywhere => "Everywhere",
+            Playback::Maximum => "Maximum",
+            Playback::HighQuality => "High quality",
+            Playback::MostCompatible => "Most compatible",
         }
+    }
+
+    /// The choice of `name`, also by the names it had before (issue #173: "Computers", "Phones and TVs", "Everywhere"), so saved settings keep their choice
+    pub(super) fn of_name(name: &str) -> Option<Playback> {
+        let name = match name {
+            "Computers" => "Maximum",
+            "Phones and TVs" => "High quality",
+            "Everywhere" => "Most compatible",
+            name => name,
+        };
+        Playback::ALL.into_iter().find(|playback| playback.name() == name)
     }
 }
 
@@ -136,11 +147,11 @@ fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32) -
     let nvenc_hevc = |format: &str| vec![format.to_string(), "-c:v".into(), "hevc_nvenc".into(), "-preset".into(), "p7".into(), "-tune".into(), "hq".into(), "-rc".into(), "constqp".into(), "-qp".into(), qp.into(), "-tag:v".into(), "hvc1".into()];
     let mut arguments = vec![String::from("-vf")];
     arguments.extend(match playback {
-        Playback::Computers if nvenc => nvenc_hevc(&format!("{FULL}yuv444p16le")),
-        Playback::Computers => vec![format!("{FULL}yuv444p10le"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into()],
-        Playback::Phones if nvenc => [nvenc_hevc(&format!("{HALF}p010le")), vec!["-profile:v".into(), "main10".into()]].concat(),
-        Playback::Phones => vec![format!("{HALF}yuv420p10le"), "-c:v".into(), "libx265".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-tag:v".into(), "hvc1".into(), "-x265-params".into(), "log-level=error".into()],
-        Playback::Everywhere => vec![format!("{HALF}yuv420p"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-profile:v".into(), "high".into()],
+        Playback::Maximum if nvenc => nvenc_hevc(&format!("{FULL}yuv444p16le")),
+        Playback::Maximum => vec![format!("{FULL}yuv444p10le"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into()],
+        Playback::HighQuality if nvenc => [nvenc_hevc(&format!("{HALF}p010le")), vec!["-profile:v".into(), "main10".into()]].concat(),
+        Playback::HighQuality => vec![format!("{HALF}yuv420p10le"), "-c:v".into(), "libx265".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-tag:v".into(), "hvc1".into(), "-x265-params".into(), "log-level=error".into()],
+        Playback::MostCompatible => vec![format!("{HALF}yuv420p"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-profile:v".into(), "high".into()],
     });
     arguments.extend(["-g".into(), (fps / 2).max(1).to_string(), "-bf".into(), "2".into(), "-movflags".into(), "+faststart".into()]);
     arguments.extend(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"].map(String::from));
@@ -467,16 +478,16 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("How much of the rendered detail the video file keeps: a fixed quality, so busy views get the bits they need and calm ones stay small");
             ui.add_enabled_ui(self.video_quality != VideoQuality::Lossless, |ui| {
-                ui.label("for");
+                ui.label("Format:");
                 egui::ComboBox::from_id_salt("video_playback").selected_text(self.video_playback.name()).show_ui(ui, |ui| {
                     for playback in Playback::ALL {
                         ui.selectable_value(&mut self.video_playback, playback, playback.name()).on_hover_text(match playback {
-                            Playback::Computers => "Full color resolution in 10 bits (HEVC on an NVIDIA GPU, else H.264): the best colors, no banding; plays on computers (VLC and most players), not on phones and TVs",
-                            Playback::Phones => "HEVC Main 10 (10 bits, half the color resolution), which phones, TVs and browsers play in hardware; single pixels of strong colors get softer",
-                            Playback::Everywhere => "H.264 in 8 bits with half the color resolution: plays on anything, with the softest colors",
+                            Playback::Maximum => "Full color resolution in 10 bits (HEVC on an NVIDIA GPU, else H.264): the best colors, no banding; plays on computers (VLC and most players), not on phones and TVs",
+                            Playback::HighQuality => "HEVC Main 10 (10 bits, half the color resolution), which phones, TVs and browsers play in hardware; single pixels of strong colors get a little softer",
+                            Playback::MostCompatible => "H.264 in 8 bits with half the color resolution: plays on anything, even old devices, with the softest colors",
                         });
                     }
-                }).response.on_hover_text("Where the video has to play, which sets its color resolution and codec");
+                }).response.on_hover_text("The codec, bit depth and color resolution of the video: Maximum for the best colors, High quality to play on phones and TVs, Most compatible to play anywhere");
             });
         });
         //What the video will be: its length and frames are exact, its size an estimate (an upper end: measured on a busy view)
@@ -525,25 +536,36 @@ mod tests {
     #[test]
     fn the_tiers_keep_a_fixed_quality_for_the_player_they_are_for() {
         let has = |arguments: &[String], wanted: &[&str]| wanted.iter().all(|wanted| arguments.iter().any(|argument| argument.contains(wanted)));
-        //Computers: full color in 10 bits, on the GPU or the CPU; a fixed quantizer that follows the tier
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Computers, true, 60), &["hevc_nvenc", "yuv444p16le", "constqp", "20", "bt709"]));
-        assert!(has(&arguments(VideoQuality::UltraHigh, Playback::Computers, true, 60), &["16"]));
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Computers, false, 60), &["libx264", "yuv444p10le", "14"]));
-        //Phones: HEVC Main 10, half the color resolution made with a sharp filter; everywhere: 8-bit H.264
-        assert!(has(&arguments(VideoQuality::High, Playback::Phones, true, 60), &["hevc_nvenc", "p010le", "main10", "lanczos"]));
-        assert!(has(&arguments(VideoQuality::High, Playback::Phones, false, 60), &["libx265", "yuv420p10le"]));
-        assert!(has(&arguments(VideoQuality::High, Playback::Everywhere, true, 60), &["libx264", "yuv420p", "18"]));
+        //Maximum: full color in 10 bits, on the GPU or the CPU; a fixed quantizer that follows the tier
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, true, 60), &["hevc_nvenc", "yuv444p16le", "constqp", "20", "bt709"]));
+        assert!(has(&arguments(VideoQuality::UltraHigh, Playback::Maximum, true, 60), &["16"]));
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, false, 60), &["libx264", "yuv444p10le", "14"]));
+        //High quality: HEVC Main 10, half the color resolution made with a sharp filter; Most compatible: 8-bit H.264
+        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, true, 60), &["hevc_nvenc", "p010le", "main10", "lanczos"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, false, 60), &["libx265", "yuv420p10le"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60), &["libx264", "yuv420p", "18"]));
         //A keyframe every half second and the index at the start; lossless is FFV1 whatever the player
-        assert!(has(&arguments(VideoQuality::High, Playback::Everywhere, true, 60), &["-g", "30", "+faststart"]));
-        assert_eq!(arguments(VideoQuality::Lossless, Playback::Phones, true, 60), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
+        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60), &["-g", "30", "+faststart"]));
+        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
         assert_eq!((extension(VideoQuality::Lossless), extension(VideoQuality::NearLossless)), ("mkv", "mp4"));
     }
 
     #[test]
+    fn the_formats_are_found_by_their_names_and_by_the_names_they_had_before() {
+        for playback in Playback::ALL {
+            assert_eq!(Playback::of_name(playback.name()), Some(playback));
+        }
+        assert_eq!(Playback::of_name("Computers"), Some(Playback::Maximum));
+        assert_eq!(Playback::of_name("Phones and TVs"), Some(Playback::HighQuality));
+        assert_eq!(Playback::of_name("Everywhere"), Some(Playback::MostCompatible));
+        assert_eq!(Playback::of_name("Somewhere"), None);
+    }
+
+    #[test]
     fn the_estimate_has_the_exact_frames_and_length_and_a_size_that_grows_with_the_tier() {
-        let (frames, length, high) = estimate(Duration::from_secs(13), 60, 50, (1920, 1080), VideoQuality::High, Playback::Computers);
+        let (frames, length, high) = estimate(Duration::from_secs(13), 60, 50, (1920, 1080), VideoQuality::High, Playback::Maximum);
         assert_eq!((frames, length.as_secs()), (1561, 26), "13 s at half speed: 26 s, at 60 FPS");
-        let sizes: Vec<f64> = VideoQuality::ALL.iter().map(|quality| estimate(Duration::from_secs(13), 60, 50, (1920, 1080), *quality, Playback::Computers).2).collect();
+        let sizes: Vec<f64> = VideoQuality::ALL.iter().map(|quality| estimate(Duration::from_secs(13), 60, 50, (1920, 1080), *quality, Playback::Maximum).2).collect();
         assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]) && (sizes[0] - high).abs() < 1.0);
         //Lossless: about 3.2 GB, as Jort measured (3 GB for 26 s)
         assert!((2.5e9..4e9).contains(&sizes[4]), "{}", sizes[4]);

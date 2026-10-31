@@ -264,7 +264,7 @@ impl MandelbrotApp {
         if let Some(quality) = settings.video_quality.as_deref().and_then(|name| VideoQuality::ALL.into_iter().find(|quality| quality.name() == name)) {
             self.video_quality = quality;
         }
-        if let Some(playback) = settings.video_playback.as_deref().and_then(|name| Playback::ALL.into_iter().find(|playback| playback.name() == name)) {
+        if let Some(playback) = settings.video_playback.as_deref().and_then(Playback::of_name) {
             self.video_playback = playback;
         }
         if let Some(at_once) = settings.video_frames_at_once.filter(|at_once| FRAMES_AT_ONCE.contains(at_once)) {

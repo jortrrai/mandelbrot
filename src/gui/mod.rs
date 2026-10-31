@@ -353,7 +353,7 @@ impl MandelbrotApp {
             video_fps: 30,
             video_speed: 100,
             video_quality: video::VideoQuality::VeryHigh,
-            video_playback: video::Playback::Computers,
+            video_playback: video::Playback::Maximum,
             video_pngs: false,
             video_blend: false,
             video_frames_at_once: 2,
