@@ -2206,6 +2206,50 @@ fn the_depth_control_changes_only_the_zoom_and_renders_like_a_gesture_while_drag
 }
 
 #[test]
+fn a_dive_made_of_keyframes_flies_renders_and_saves_with_the_colors_of_each_keyframe() {
+    //Issue #194 with #193: keyframes at three depths of one center, each with its own divide, then the sequence flown, rendered and saved
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flights_folder = folder.join("flights");
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_point_of_interest(0);
+    let center = app.current_point(String::new(), String::new()).location;
+    for (zoom, divide) in [(1.0, 1.0), (300.0, 0.25), (1.0 / 6.4e-5, 4.0)] {
+        assert!(app.set_depth(zoom));
+        app.m.palette.divide = divide;
+        app.add_keyframe();
+    }
+    app.sequence_seconds = vec![String::from("0.5"), String::from("1")];
+    assert!(app.sequence().is_complete());
+    assert!(app.sequence_keyframes.iter().all(|keyframe| keyframe.real.to_bits() == center.real.to_bits() && keyframe.imaginary.to_bits() == center.imaginary.to_bits()), "one center, exactly");
+    //Flown in the window: from the first keyframe, to the last, with its colors
+    app.flight_name_input = String::from("Keyframe dive");
+    app.fly_sequence();
+    assert!(app.flight.is_some());
+    assert_eq!(app.m.palette.divide, 1.0, "starts with the first keyframe's colors");
+    app.skip_flight();
+    assert_eq!((app.c.get_scale(), app.m.palette.divide), (6.4e-5, 4.0), "ends at the last keyframe with its colors");
+    //Rendered: 1.5 s at 24 FPS, every frame on the same center, the colors of the keyframes on the way
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs) = (48, 32, 1, 24, true);
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight: 37 of 37 frames"), "{message}");
+    let frames_folder = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&frames_folder).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    frames.sort();
+    let views: Vec<crate::points_of_interest::PointOfInterest> = frames.iter().map(|frame| crate::image_metadata::view_of_png(frame).unwrap()).collect();
+    assert!(views.iter().all(|view| view.location.real.to_bits() == center.real.to_bits()), "never sideways");
+    let divide = |view: &crate::points_of_interest::PointOfInterest| view.appearance.as_ref().and_then(|appearance| appearance.iteration_divide).unwrap();
+    assert_eq!((divide(&views[0]), divide(&views[12]), divide(&views[36])), (1.0, 0.25, 4.0), "the divide of each keyframe at its time (frame 12 is 0.5 s)");
+    //Saved and read back with its keyframes
+    app.save_last_flight();
+    app.reload_saved_flights();
+    assert_eq!(app.saved_flights[0].flight.sequence, Some(app.sequence()));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_video_that_fits_a_length_lasts_exactly_that_long() {
     //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);

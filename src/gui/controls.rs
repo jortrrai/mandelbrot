@@ -36,7 +36,11 @@ impl MandelbrotApp {
         self.section(ui, "Places", true, Self::places_controls);
         self.section(ui, "Image quality", true, Self::quality_controls);
         self.section(ui, "Colors", false, Self::color_controls);
-        self.section(ui, "Flights", false, Self::flight_controls);
+        self.section(ui, "Flights", false, |app, ui| {
+            app.flight_controls(ui);
+            ui.separator();
+            app.sequence_ui(ui);
+        });
         self.section(ui, "Performance", false, Self::performance_controls);
         self.section(ui, "Save image and video", false, |app, ui| {
             app.save_controls(ui);

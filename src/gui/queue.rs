@@ -8,7 +8,6 @@
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-use super::flight::Flight;
 use super::video::{speed_text, VideoSpec};
 use super::MandelbrotApp;
 
@@ -94,7 +93,7 @@ impl MandelbrotApp {
         let mut added = 0;
         for saved in self.saved_flights.clone() {
             let flight = &saved.flight;
-            let duration = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom).duration();
+            let duration = flight.path().duration();
             let speed = match saved.length {
                 Some(length) => duration.as_secs_f64() * 100.0 / length.as_secs_f64(),
                 None => match self.video_speed_for(duration) {

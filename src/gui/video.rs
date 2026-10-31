@@ -346,6 +346,24 @@ pub(super) struct VideoFlight {
     pub(super) limits: (u32, u32),
     /// The color cycle at the start and at the place, blended on the way like a flight's (see `points::PointFlight::palettes`)
     pub(super) palettes: (crate::mandelbrot_set::ColorCycle, crate::mandelbrot_set::ColorCycle),
+    /// A flight through keyframes instead (see `sequence`): then `from` and `to` are its first and last keyframes
+    #[serde(default)]
+    pub(super) sequence: Option<super::sequence::Sequence>,
+}
+
+impl VideoFlight {
+    /// The path of the flight: through its keyframes, or from `from` to `to` at its pace along its route
+    pub(super) fn path(&self) -> Flight {
+        self.sequence.as_ref().map_or_else(
+            || Flight::with(self.from, self.to, self.pace, self.route, self.constant_speed, self.speed, self.dive_zoom),
+            |sequence| Flight::of_sequence(sequence.clone(), (self.constant_speed, self.speed)),
+        )
+    }
+
+    /// The colors of the frame `time` into the flight: from its keyframes, or blended from those at the start to the place's
+    pub(super) fn palette_at(&self, path: &Flight, time: Duration) -> crate::mandelbrot_set::ColorCycle {
+        path.palette_at(time).unwrap_or_else(|| self.palettes.0.blend(self.palettes.1, path.share_of_path(time)))
+    }
 }
 
 /// Everything a video is made of: the flight and every setting of the render, taken when the video is started or added to the queue, so later changes of
@@ -465,7 +483,7 @@ impl MandelbrotApp {
     pub(super) fn video_spec(&self) -> Result<VideoSpec, String> {
         let flight = self.last_flight.clone().ok_or_else(|| String::from("there is no flight yet"))?;
         let resolution = self.save_size.resolve(self.default_save_resolution(), self.view_resolution())?;
-        let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
+        let path = flight.path();
         let speed = self.video_speed_for(path.duration())?;
         Ok(VideoSpec {
             flight,
@@ -509,7 +527,7 @@ impl MandelbrotApp {
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
         let thread_scheduler = Arc::clone(&scheduler);
-        let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
+        let path = flight.path();
         let total = frame_count(path.duration(), fps, speed);
         let coloring_function = super::COLORING_FUNCTIONS[coloring_index.min(super::COLORING_FUNCTIONS.len() - 1)].1;
         let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
@@ -565,11 +583,11 @@ impl MandelbrotApp {
                     for (frame, rgb) in png_receiver {
                         let time = frame_time(frame, fps, speed);
                         let camera = path.camera_at(time);
-                        let palette = flight.palettes.0.blend(flight.palettes.1, path.share_of_path(time));
+                        let palette = flight.palette_at(&path, time);
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
                             description: format!("Frame {} of {total} of the video {name}", frame + 1),
-                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings)) },
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))) },
                             appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
                             file_name: String::new(),
                         });
@@ -698,10 +716,12 @@ impl MandelbrotApp {
                             let time = frame_time(frame, fps, speed);
                             let camera = path.camera_at(time);
                             plane.set_view(&camera.view());
-                            if let Some(settings) = auto_settings {
+                            if let Some(limit) = path.limit_at(time) {
+                                m.max_iterations = limit; //The limits of the keyframes
+                            } else if let Some(settings) = auto_settings {
                                 m.max_iterations = limit_at(camera.scale, flight, settings);
                             }
-                            m.palette = flight.palettes.0.blend(flight.palettes.1, path.share_of_path(time));
+                            m.palette = flight.palette_at(path, time);
                             let mut colors = Vec::new();
                             let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
                                 .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
@@ -942,7 +962,7 @@ impl MandelbrotApp {
         });
         //What the video will be: its length and frames are exact, its size an estimate (an upper end: measured on a busy view)
         if let Some(flight) = &self.last_flight {
-            let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
+            let path = flight.path();
             let size = self.save_size.resolve(self.default_save_resolution(), self.view_resolution()).map_or((0, 0), |resolution| (resolution.width, resolution.height));
             match self.video_speed_for(path.duration()) {
                 Ok(speed) => {
@@ -972,7 +992,7 @@ mod tests {
     #[test]
     fn the_limit_of_a_video_frame_goes_from_the_limit_at_the_start_to_that_of_the_place() {
         let settings = crate::auto_iterations::AutoPreset::Balanced.settings();
-        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE) };
+        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None };
         assert_eq!(limit_at(1.0, &flight, &settings), 300);
         assert_eq!(limit_at(6.4e-5, &flight, &settings), 5000);
         let middle = limit_at(8e-3, &flight, &settings);

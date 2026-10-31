@@ -20,7 +20,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::flight::{Camera, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
+use super::flight::{Camera, Flight, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
 use super::video::VideoFlight;
 use crate::mandelbrot_set::ColorCycle;
 
@@ -74,6 +74,9 @@ struct FlightFile {
     dive_zoom: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     length_seconds: Option<f64>,
+    /// A flight through keyframes (see `sequence`); `start` and `destination` are then its first and last keyframes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sequence: Option<super::sequence::Sequence>,
 }
 
 /// A flight loaded from a file: the flight, the length its video should have (if the file gives one), and the name of the file
@@ -97,6 +100,7 @@ pub(super) fn to_json(flight: &VideoFlight, length: Option<std::time::Duration>)
         speed: flight.speed,
         dive_zoom: flight.dive_zoom,
         length_seconds: length.map(|length| length.as_secs_f64()),
+        sequence: flight.sequence.clone(),
     };
     serde_json::to_string_pretty(&file).expect("a flight is plain text and numbers, which always serialize") + "\n"
 }
@@ -125,6 +129,7 @@ pub(super) fn parse(text: &str, file_name: &str) -> Result<SavedFlight, String> 
         name: file.name,
         limits: (file.start.max_iterations.max(1), file.destination.max_iterations.max(1)),
         palettes: (file.start.palette(), file.destination.palette()),
+        sequence: file.sequence.filter(super::sequence::Sequence::is_complete),
     };
     let length = file.length_seconds.filter(|seconds| seconds.is_finite() && *seconds > 0.0).map(std::time::Duration::from_secs_f64);
     Ok(SavedFlight { flight, length, file_name: file_name.to_string() })
@@ -208,7 +213,14 @@ impl super::MandelbrotApp {
     /// Flies saved flight `index` in the window: from its start, with its colors and limits, to its destination (see `use_saved_flight`)
     pub(super) fn fly_saved_flight(&mut self, index: usize) {
         self.use_saved_flight(index);
-        let Some(flight) = self.last_flight.clone() else { return };
+        if let Some(flight) = self.last_flight.clone() {
+            self.fly_video_flight(&flight);
+        }
+    }
+
+    /// Flies `flight` in the window: from its start, with its colors and limits, along its path (through its keyframes, if it has them) to its destination,
+    /// and makes it the last flight
+    pub(super) fn fly_video_flight(&mut self, flight: &VideoFlight) {
         self.c.set_view(&crate::complex_plane::View::new(flight.from.x, flight.from.y, flight.from.scale));
         (self.m.palette, self.m.max_iterations, self.max_iterations_input) = (flight.palettes.0, flight.limits.0, flight.limits.0);
         let point = crate::points_of_interest::PointOfInterest {
@@ -218,8 +230,9 @@ impl super::MandelbrotApp {
             appearance: None,
             file_name: String::new(),
         };
-        self.fly_to(point, flight.palettes.1);
-        self.last_flight = Some(flight); //Exactly the saved flight (the speed control has whole percents)
+        let path = if flight.sequence.is_some() { flight.path() } else { Flight::with(flight.from, flight.to, self.pace, self.route, self.constant_speed, self.speed_factor(), self.dive_zoom) };
+        self.fly_path(point, flight.palettes.1, path);
+        self.last_flight = Some(flight.clone()); //Exactly the flight (the speed control has whole percents)
     }
 
     /// The controls of the saved flights: the name and *Save flight* for the last flight, and the list of saved flights with *Fly*
@@ -275,6 +288,7 @@ mod tests {
             name: String::from("Seahorse dive"),
             limits: (300, 5000),
             palettes: (ColorCycle { divide: 1.0, offset: 0.0, stretch: false }, ColorCycle { divide: 0.113, offset: 278.0, stretch: false }),
+            sequence: None,
         }
     }
 

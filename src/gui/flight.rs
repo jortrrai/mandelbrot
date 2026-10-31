@@ -270,6 +270,24 @@ pub struct Flight {
     duration: Duration,
     /// The speed it was timed for: of the constant pace (doublings per second), and the factor of the other paces (see `with`)
     timing: (f64, f64),
+    /// A flight through keyframes (see `of_sequence`): its legs, one between every two keyframes, and the time each starts at, in seconds
+    sequence: Option<std::sync::Arc<SequencePath>>,
+}
+
+/// The path of a flight through keyframes, see `Flight::of_sequence`
+#[derive(Debug)]
+struct SequencePath {
+    sequence: super::sequence::Sequence,
+    legs: Vec<Leg>,
+    starts: Vec<f64>,
+}
+
+impl SequencePath {
+    /// The transition at `seconds` after the start, and the share of it (0 to 1) that has passed
+    fn transition_at(&self, seconds: f64) -> (usize, f64) {
+        let index = self.starts.iter().rposition(|start| *start <= seconds).unwrap_or(0).min(self.legs.len() - 1);
+        (index, ((seconds - self.starts[index]) / self.sequence.seconds[index]).clamp(0.0, 1.0))
+    }
 }
 
 impl Flight {
@@ -288,7 +306,41 @@ impl Flight {
             Route::Dive => Leg::straight(Camera { x: to.x, y: to.y, scale: 1.0 / dive_zoom.clamp(*DIVE_ZOOMS.start(), *DIVE_ZOOMS.end()) }, to),
         };
         let duration = Flight::duration_of(&leg, pace, constant, factor);
-        Flight { leg, pace, duration, timing: (constant, factor) }
+        Flight { leg, pace, duration, timing: (constant, factor), sequence: None }
+    }
+
+    /// A flight through the keyframes of `sequence` (see `sequence`): between every two, the path of a flight at a constant speed along it, in the time of that
+    /// transition; `timing` is what the speed controls were (a sequence keeps its times when they change). A sequence that is not complete flies to its first
+    /// keyframe at once
+    pub fn of_sequence(sequence: super::sequence::Sequence, timing: (f64, f64)) -> Flight {
+        if !sequence.is_complete() {
+            let first = sequence.keyframes.first().map_or(Camera { x: -0.75, y: 0.0, scale: 1.0 }, super::sequence::Keyframe::camera);
+            return Flight { leg: Leg::new(first, first), pace: Pace::Constant, duration: Duration::from_millis(1), timing, sequence: None };
+        }
+        let legs: Vec<Leg> = sequence.keyframes.windows(2).map(|pair| Leg::new(pair[0].camera(), pair[1].camera())).collect();
+        let starts: Vec<f64> = sequence.seconds.iter().scan(0.0, |start, seconds| {
+            let this = *start;
+            *start += seconds;
+            Some(this)
+        }).collect();
+        let duration = Duration::from_secs_f64(sequence.seconds.iter().sum());
+        Flight { leg: legs[0].clone(), pace: Pace::Constant, duration, timing, sequence: Some(std::sync::Arc::new(SequencePath { sequence, legs, starts })) }
+    }
+
+    /// The colors of a flight through keyframes `elapsed` after the start (`None` for other flights, whose colors go from those at the start to the place's)
+    pub fn palette_at(&self, elapsed: Duration) -> Option<crate::mandelbrot_set::ColorCycle> {
+        let path = self.sequence.as_ref()?;
+        let (index, share) = path.transition_at(elapsed.as_secs_f64());
+        let keyframes = &path.sequence.keyframes;
+        Some(super::sequence::blend_palettes(keyframes[index].palette(), keyframes[index + 1].palette(), share))
+    }
+
+    /// The iteration limit of a flight through keyframes `elapsed` after the start (`None` for other flights)
+    pub fn limit_at(&self, elapsed: Duration) -> Option<u32> {
+        let path = self.sequence.as_ref()?;
+        let (index, share) = path.transition_at(elapsed.as_secs_f64());
+        let keyframes = &path.sequence.keyframes;
+        Some(super::sequence::blend_limits(keyframes[index].max_iterations, keyframes[index + 1].max_iterations, share))
     }
 
     /// The duration of a flight along `leg` at `pace`, see `with`
@@ -300,7 +352,10 @@ impl Flight {
 
     /// The same flight at other speeds (see `with`), as the speed controls change during a flight: the camera at the same share of the time is at the same place
     pub fn retimed(&self, constant: f64, factor: f64) -> Flight {
-        Flight { leg: self.leg.clone(), pace: self.pace, duration: Flight::duration_of(&self.leg, self.pace, constant, factor), timing: (constant, factor) }
+        if self.sequence.is_some() {
+            return Flight { timing: (constant, factor), ..self.clone() }; //A sequence keeps the times of its transitions
+        }
+        Flight { leg: self.leg.clone(), pace: self.pace, duration: Flight::duration_of(&self.leg, self.pace, constant, factor), timing: (constant, factor), sequence: None }
     }
 
     /// The speeds the flight is timed for, see `with`
@@ -315,6 +370,11 @@ impl Flight {
 
     /// The camera `elapsed` after the start: the start view at 0, exactly the destination from `duration` on
     pub fn camera_at(&self, elapsed: Duration) -> Camera {
+        if let Some(path) = &self.sequence {
+            let (index, share) = path.transition_at(elapsed.as_secs_f64());
+            let leg = &path.legs[index];
+            return leg.camera_at(share * leg.length);
+        }
         self.leg.camera_at(self.pace.ease(elapsed.as_secs_f64() / self.duration.as_secs_f64()) * self.leg.length)
     }
 
@@ -332,6 +392,30 @@ impl Flight {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sequence_passes_every_keyframe_at_its_time_and_a_dive_never_moves_sideways() {
+        use super::super::sequence::{Keyframe, Sequence};
+        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false };
+        let sequence = Sequence { keyframes: vec![keyframe(1.0, 1.0, 300), keyframe(1e-3, 0.5, 1000), keyframe(1e-6, 4.0, 5000)], seconds: vec![4.0, 6.0] };
+        let flight = Flight::of_sequence(sequence.clone(), (3.0, 1.0));
+        assert_eq!(flight.duration(), Duration::from_secs(10));
+        for (seconds, keyframe) in [(0.0, &sequence.keyframes[0]), (4.0, &sequence.keyframes[1]), (10.0, &sequence.keyframes[2])] {
+            let camera = flight.camera_at(Duration::from_secs_f64(seconds));
+            assert!((camera.scale / keyframe.scale - 1.0).abs() < 1e-9, "at {seconds} s: {camera:?}");
+            assert_eq!(flight.palette_at(Duration::from_secs_f64(seconds)), Some(keyframe.palette()));
+            assert_eq!(flight.limit_at(Duration::from_secs_f64(seconds)), Some(keyframe.max_iterations));
+        }
+        for tenth in 0..=100 {
+            let camera = flight.camera_at(Duration::from_secs_f64(f64::from(tenth) / 10.0));
+            assert_eq!((camera.x.to_bits(), camera.y.to_bits()), (sequence.keyframes[0].real.to_bits(), sequence.keyframes[0].imaginary.to_bits()), "a dive: the center never moves");
+        }
+        //Halfway through the second transition: halfway (logarithmically) between the zooms
+        let camera = flight.camera_at(Duration::from_secs(7));
+        assert!((camera.scale.log10() + 4.5).abs() < 1e-9, "{}", camera.scale);
+        assert_eq!(flight.retimed(9.0, 2.0).duration(), flight.duration(), "the speed controls do not change a sequence's times");
+        assert!(Flight::new(RESET, SEAHORSE, Pace::Fast).palette_at(Duration::ZERO).is_none(), "other flights blend their own colors");
+    }
 
     const RESET: Camera = Camera { x: -0.75, y: 0.0, scale: 1.0 };
     const SEAHORSE: Camera = Camera { x: -0.7498, y: 0.0203, scale: 0.00006 };

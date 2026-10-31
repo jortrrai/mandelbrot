@@ -47,7 +47,7 @@ pub(super) struct PointFlight {
 impl PointFlight {
     /// The color cycle of the frame at `elapsed`, see `palettes`
     pub(super) fn palette_at(&self, elapsed: Duration) -> ColorCycle {
-        self.palettes.0.blend(self.palettes.1, self.flight.share_of_path(elapsed))
+        self.flight.palette_at(elapsed).unwrap_or_else(|| self.palettes.0.blend(self.palettes.1, self.flight.share_of_path(elapsed)))
     }
 
     /// The frames shown in the second before `now`
@@ -397,13 +397,22 @@ impl MandelbrotApp {
             return;
         }
         let flight = Flight::with(from, to, self.pace, self.route, self.constant_speed, self.speed_factor(), self.dive_zoom);
+        self.fly_path(point, destination_palette, flight);
+    }
+
+    /// Flies from the current view to `point` along `flight` (a flight from the controls, or one through keyframes), the colors going from the current ones to
+    /// `destination_palette`
+    pub(super) fn fly_path(&mut self, point: PointOfInterest, destination_palette: ColorCycle, flight: Flight) {
+        let center = self.c.center();
+        let from = Camera { x: center.x, y: center.y, scale: self.c.get_scale() };
+        let to = Camera { x: point.location.real, y: point.location.imaginary, scale: point.location.scale };
         let route = if self.route == Route::Shortest { String::new() } else { format!(", {} route", self.route.name().to_lowercase()) };
         self.log(format!("Flying to {} ({}{route}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| std::sync::Arc::new(std::sync::Mutex::new(self.flight_limits(to)))); //(Shared with the flight job, which a change of a setting restarts)
         let now = Instant::now();
         let palettes = (self.m.palette, destination_palette);
         self.flight_name_input.clone_from(&point.name); //The name the flight is saved under, unless it is changed (see `flight_files`)
-        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None });
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes, wait_logged: false });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
@@ -509,6 +518,7 @@ impl MandelbrotApp {
             //Auto iterations follow the zoom all the way: the limit of this frame (see `FlightLimits`)
             let scale = self.c.get_scale();
             let limit = match &flight.limits {
+                _ if flight.flight.limit_at(elapsed).is_some() => flight.flight.limit_at(elapsed).unwrap_or(1), //The limits of the keyframes
                 Some(limits) => limits.lock().unwrap().limit_at(scale, &self.auto_settings),
                 None => self.auto_settings.initial_limit(scale),
             };

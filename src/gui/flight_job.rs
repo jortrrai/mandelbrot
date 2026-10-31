@@ -100,13 +100,15 @@ impl MandelbrotApp {
                     break; //The window stopped the job between the check and the reset
                 }
                 plane.set_view(&path.camera_at(elapsed).view());
-                if let Some(settings) = &auto_settings {
+                if let Some(limit) = path.limit_at(elapsed) {
+                    m.max_iterations = limit; //The limits of the keyframes of a sequence
+                } else if let Some(settings) = &auto_settings {
                     //The limit of the zoom of this frame (see `points::FlightLimits`)
                     let scale = plane.get_scale();
                     m.max_iterations = limits.as_ref().map_or_else(|| settings.initial_limit(scale), |limits| limits.lock().unwrap().limit_at(scale, settings));
                 }
-                //The color cycle of this frame, on the way from the start to the place's (see `points::PointFlight::palettes`)
-                m.palette = palettes.0.blend(palettes.1, path.share_of_path(elapsed));
+                //The color cycle of this frame: of the keyframes, or on the way from the start to the place's (see `points::PointFlight::palettes`)
+                m.palette = path.palette_at(elapsed).unwrap_or_else(|| palettes.0.blend(palettes.1, path.share_of_path(elapsed)));
                 let last = path.arrived(elapsed);
                 if auto.is_some() {
                     (required, levels) = (Readiness::FULL_RESOLUTION, Vec::new());

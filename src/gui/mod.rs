@@ -29,6 +29,7 @@ mod points;
 mod queue;
 mod render_job;
 mod save_size;
+mod sequence;
 mod settings;
 mod sharing;
 pub use settings::settings_path;
@@ -224,6 +225,9 @@ pub struct MandelbrotApp {
     lock_center: bool,
     /// The center the depth control keeps, exactly (see `depth::exact_center`)
     depth_center: Option<crate::complex::Complex>,
+    /// The keyframes of the sequence being made, and the times of its transitions as typed (see `sequence`)
+    sequence_keyframes: Vec<sequence::Keyframe>,
+    sequence_seconds: Vec<String>,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
@@ -408,6 +412,8 @@ impl MandelbrotApp {
             depth_dragging: false,
             lock_center: false,
             depth_center: None,
+            sequence_keyframes: Vec::new(),
+            sequence_seconds: Vec::new(),
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
