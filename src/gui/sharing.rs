@@ -66,11 +66,15 @@ impl MandelbrotApp {
         self.fly_to(point, palette);
     }
 
-    /// Opens the images dropped on the window (see `open_image`)
+    /// Opens the images dropped on the window (see `open_image`); an audio file becomes the music of videos (see `music`)
     pub(super) fn open_dropped_images(&mut self, ctx: &egui::Context) {
         let dropped: Vec<std::path::PathBuf> = ctx.input(|input| input.raw.dropped_files.iter().map(|file| file.path().to_path_buf()).filter(|path| !path.as_os_str().is_empty()).collect());
         if let Some(path) = dropped.last() {
-            self.open_image(path);
+            if super::music::is_audio(path) {
+                self.use_music_file(path);
+            } else {
+                self.open_image(path);
+            }
         }
     }
 

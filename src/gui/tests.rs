@@ -1674,6 +1674,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true);
     app.video_blend = true;
     (app.video_fit_length, app.video_length) = (true, [String::from("1"), String::new(), String::from("7.5")]);
+    (app.music_path, app.follow_music, app.music_strength) = (String::from("/music/track.mp3"), true, 0.8);
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     let now = std::time::Instant::now();
     app.keep_settings(now);
@@ -1690,6 +1691,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true));
     assert!(next.video_blend);
     assert_eq!((next.video_fit_length, next.target_length()), (true, Some(Duration::from_secs_f64(3607.5))));
+    assert_eq!((next.music_path.as_str(), next.follow_music, next.music_strength), ("/music/track.mp3", true, 0.8));
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
@@ -2246,6 +2248,38 @@ fn a_dive_made_of_keyframes_flies_renders_and_saves_with_the_colors_of_each_keyf
     app.save_last_flight();
     app.reload_saved_flights();
     assert_eq!(app.saved_flights[0].flight.sequence, Some(app.sequence()));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_video_that_follows_music_lasts_as_long_as_the_track_slows_down_in_its_quiet_part_and_has_its_sound() {
+    //Issue #185: a track of 2 s of a quiet tone and 2 s of loud noise
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    std::fs::create_dir_all(&folder).unwrap();
+    let track = folder.join("track.wav");
+    let made = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-f", "lavfi", "-i", "anoisesrc=d=2:a=0.8", "-filter_complex", "[0]volume=0.02[quiet];[quiet][1]concat=n=2:v=0:a=1"]).arg(&track).status().unwrap();
+    assert!(made.success());
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs) = (48, 32, 1, 24, true);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    app.use_music_file(&track);
+    app.music_strength = 1.0;
+    assert_eq!(app.followed_music_length().map(|length| length.as_secs_f64().round()), Some(4.0));
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight: 97 of 97 frames") && message.contains("with the music"), "4 s at 24 FPS: {message}");
+    let saved = folder.join("saved");
+    let video = std::fs::read_dir(&saved).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mp4")).unwrap();
+    let streams = std::process::Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0"]).arg(&video).output().unwrap();
+    assert!(String::from_utf8_lossy(&streams.stdout).contains("audio"), "the track is the sound of the video");
+    //Halfway through the track (frame 49, at 2 s) the flight is not yet halfway: it went slowly through the quiet part
+    let frames_folder = std::fs::read_dir(&saved).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+    let middle = crate::image_metadata::view_of_png(&frames_folder.join("frame-00049.png")).unwrap();
+    let path = app.last_flight.as_ref().unwrap().path();
+    assert!(middle.location.scale > path.camera_at(path.duration() / 2).scale * 1.5, "still further out than the middle of the flight: {}", middle.location.scale);
     let _ = std::fs::remove_dir_all(folder);
 }
 

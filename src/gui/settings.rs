@@ -64,6 +64,9 @@ pub(super) struct Settings {
     video_fps: Option<u32>,
     video_speed: Option<u16>,
     video_fit_length: Option<bool>,
+    music_path: Option<String>,
+    follow_music: Option<bool>,
+    music_strength: Option<f64>,
     video_length: Option<[String; 3]>,
     video_quality: Option<String>,
     video_playback: Option<String>,
@@ -155,6 +158,9 @@ impl MandelbrotApp {
             video_fps: Some(self.video_fps),
             video_speed: Some(self.video_speed),
             video_fit_length: Some(self.video_fit_length),
+            music_path: Some(self.music_path.clone()),
+            follow_music: Some(self.follow_music),
+            music_strength: Some(self.music_strength),
             video_length: Some(self.video_length.clone()),
             video_quality: Some(self.video_quality.name().to_string()),
             video_playback: Some(self.video_playback.name().to_string()),
@@ -265,6 +271,15 @@ impl MandelbrotApp {
         }
         if let Some(fit) = settings.video_fit_length {
             self.video_fit_length = fit;
+        }
+        if let Some(path) = settings.music_path.clone() {
+            self.music_path = path;
+        }
+        if let Some(follow) = settings.follow_music {
+            self.follow_music = follow;
+        }
+        if let Some(strength) = settings.music_strength.filter(|strength| (0.0..=1.0).contains(strength)) {
+            self.music_strength = strength;
         }
         if let Some(length) = settings.video_length.clone() {
             self.video_length = length;

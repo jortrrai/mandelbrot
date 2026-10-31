@@ -318,6 +318,28 @@ fn frame_count(duration: Duration, fps: u32, speed: f64) -> usize {
     (duration.as_secs_f64() * 100.0 / speed.max(1.0) * f64::from(fps) - 1e-6).ceil().max(0.0) as usize + 1
 }
 
+/// The time along the flight of every frame of a video: at `fps` and `speed` percent of the flight's speed, or following the `music` (see `music`), when the
+/// flight of `duration` lasts as long as the track
+#[derive(Clone, Debug)]
+pub(super) struct FrameClock {
+    fps: u32,
+    speed: f64,
+    music: Option<Arc<super::music::MusicClock>>,
+    duration: Duration,
+}
+
+impl FrameClock {
+    /// The time along the flight of frame `frame`
+    fn time(&self, frame: usize) -> Duration {
+        self.music.as_ref().map_or_else(|| frame_time(frame, self.fps, self.speed), |music| self.duration.mul_f64(music.share_at(frame as f64 / f64::from(self.fps))))
+    }
+
+    /// The frames of the video, from the start to the place, both included
+    fn frames(&self) -> usize {
+        self.music.as_ref().map_or_else(|| frame_count(self.duration, self.fps, self.speed), |music| (music.length().as_secs_f64() * f64::from(self.fps) - 1e-6).ceil().max(0.0) as usize + 1)
+    }
+}
+
 /// A speed in percent as the video controls and the log show it: whole percents without decimals
 pub(super) fn speed_text(speed: f64) -> String {
     if (speed - speed.round()).abs() < 0.05 { format!("{speed:.0}%") } else { format!("{speed:.1}%") }
@@ -396,6 +418,9 @@ pub(super) struct VideoSpec {
     /// The name of the video file (without extension), given when it is first started: a resumed video keeps its name (see `chunks`)
     #[serde(default)]
     pub(super) output: Option<String>,
+    /// The audio track the video follows and has as its sound (see `music`)
+    #[serde(default)]
+    pub(super) music: Option<super::music::Music>,
 }
 
 /// The name of a new video of `flight` in `folder` (without extension): the time and the name of the place, with a number when a video of that name (or its
@@ -484,7 +509,8 @@ impl MandelbrotApp {
         let flight = self.last_flight.clone().ok_or_else(|| String::from("there is no flight yet"))?;
         let resolution = self.save_size.resolve(self.default_save_resolution(), self.view_resolution())?;
         let path = flight.path();
-        let speed = self.video_speed_for(path.duration())?;
+        let music = self.followed_music();
+        let speed = if music.is_some() { 100.0 } else { self.video_speed_for(path.duration())? }; //(A video that follows music lasts as long as the track)
         Ok(VideoSpec {
             flight,
             width: resolution.width,
@@ -505,6 +531,7 @@ impl MandelbrotApp {
             use_gpu: self.use_gpu,
             fast_gpu: self.fast_gpu,
             output: None,
+            music,
         })
     }
 
@@ -522,13 +549,22 @@ impl MandelbrotApp {
         let name = spec.output.clone().unwrap_or_else(|| video_name(&spec.flight, &self.video_folder));
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _ } = spec;
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music } = spec;
         let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
         let thread_scheduler = Arc::clone(&scheduler);
         let path = flight.path();
-        let total = frame_count(path.duration(), fps, speed);
+        //The clock of the frames: at the video speed, or following the music (see `music`)
+        let music_clock = match music.as_ref().map(|music| super::music::clock_of_track(std::path::Path::new(&music.path), music.strength)).transpose() {
+            Ok(clock) => clock.map(Arc::new),
+            Err(reason) => {
+                self.log(format!("Could not render the video: {reason}"));
+                return;
+            }
+        };
+        let clock = FrameClock { fps, speed, music: music_clock, duration: path.duration() };
+        let total = clock.frames();
         let coloring_function = super::COLORING_FUNCTIONS[coloring_index.min(super::COLORING_FUNCTIONS.len() - 1)].1;
         let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
         let auto_settings = auto;
@@ -577,11 +613,11 @@ impl MandelbrotApp {
             let png_writer = {
                 let (folder, png_done, failure, cancel) = (folder.clone(), Arc::clone(&png_done), Arc::clone(&failure), Arc::clone(&thread_cancel));
                 //Every frame has its view in its metadata (see `image_metadata`): where the camera is, its limit and its colors, and which frame of which video it is
-                let (path, flight, auto_settings, limit, name) = (path.clone(), flight.clone(), auto_settings.clone(), m.max_iterations, name.clone());
+                let (path, flight, auto_settings, limit, name, png_clock) = (path.clone(), flight.clone(), auto_settings.clone(), m.max_iterations, name.clone(), clock.clone());
                 let coloring = if coloring_index == 0 { crate::points_of_interest::Coloring::Hsv } else { crate::points_of_interest::Coloring::Bernstein };
                 std::thread::spawn(move || {
                     for (frame, rgb) in png_receiver {
-                        let time = frame_time(frame, fps, speed);
+                        let time = png_clock.time(frame);
                         let camera = path.camera_at(time);
                         let palette = flight.palette_at(&path, time);
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
@@ -699,7 +735,7 @@ impl MandelbrotApp {
                 //frames on the GPU alone: the CPU threads take most rows of a frame they share with the GPU, so the GPU would otherwise be idle much of the time
                 for renderer in 0..most_at_once + usize::from(gpu_renderer) {
                     let on_the_gpu = renderer == most_at_once;
-                    let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu);
+                    let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu, clock) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu, &clock);
                     scope.spawn(move || {
                         let (mut plane, mut m) = (ComplexPlane::new(width, height), m);
                         loop {
@@ -713,7 +749,7 @@ impl MandelbrotApp {
                                 }
                                 return;
                             }
-                            let time = frame_time(frame, fps, speed);
+                            let time = clock.time(frame);
                             let camera = path.camera_at(time);
                             plane.set_view(&camera.view());
                             if let Some(limit) = path.limit_at(time) {
@@ -805,8 +841,15 @@ impl MandelbrotApp {
                 return;
             }
             let _ = std::fs::remove_dir_all(&parts);
+            let mut with_music = String::new();
+            if let Some(music) = &music {
+                match super::music::add_track(&video, std::path::Path::new(&music.path)) {
+                    Ok(()) => with_music = format!(", with the music of {}", music.path),
+                    Err(reason) => with_music = format!(" ({reason})"),
+                }
+            }
             let resumed = if resumed { format!(" (resumed at frame {})", first + 1) } else { String::new() };
-            let _ = sender.send(format!("Video of the flight: {total} of {total} frames at {fps} FPS, {speed} speed{resumed}{written} as {}", video.display()));
+            let _ = sender.send(format!("Video of the flight: {total} of {total} frames at {fps} FPS, {speed} speed{resumed}{written} as {}{with_music}", video.display()));
         });
         self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {} speed, {}, {}", speed_text(speed), quality.name(), playback.name()));
         self.video_job = Some(VideoJob { done, scheduler, total, cancel, started: Instant::now(), result });
@@ -935,6 +978,7 @@ impl MandelbrotApp {
             });
         });
         self.song_ui(ui);
+        self.music_ui(ui);
         ui.horizontal(|ui| {
             ui.label("Quality:");
             egui::ComboBox::from_id_salt("video_quality").selected_text(self.video_quality.name()).show_ui(ui, |ui| {
@@ -965,11 +1009,17 @@ impl MandelbrotApp {
         if let Some(flight) = &self.last_flight {
             let path = flight.path();
             let size = self.save_size.resolve(self.default_save_resolution(), self.view_resolution()).map_or((0, 0), |resolution| (resolution.width, resolution.height));
-            match self.video_speed_for(path.duration()) {
+            let music_length = self.followed_music_length();
+            let speed = match (self.followed_music(), music_length) {
+                (Some(_), Some(length)) => Ok(path.duration().as_secs_f64() * 100.0 / length.as_secs_f64()), //(The average speed: the video lasts as long as the track)
+                (Some(music), None) => Err(format!("The music {} cannot be read", music.path)),
+                (None, _) => self.video_speed_for(path.duration()),
+            };
+            match speed {
                 Ok(speed) => {
                     let (frames, length, bytes) = estimate(path.duration(), self.video_fps, speed, size, self.video_quality, self.video_playback);
                     let png = if self.video_pngs { format!(" + PNG frames about {}", megabytes(frames as f64 * (size.0 * size.1) as f64 * 3.0 / 2.0)) } else { String::new() };
-                    let fitted = if self.video_fit_length { format!(" at {} speed", speed_text(speed)) } else { String::new() };
+                    let fitted = if music_length.is_some() && self.follow_music { String::from(", following the music") } else if self.video_fit_length { format!(" at {} speed", speed_text(speed)) } else { String::new() };
                     ui.label(format!("{} ({:.1} s){fitted}, {frames} frames of {} x {}, up to about {}{png}", length_text(length), length.as_secs_f64(), size.0, size.1, megabytes(bytes)))
                         .on_hover_text("The length and the frames of the video, and the size of its file at most (measured on a busy, detailed view; calm views take far less)");
                 }
