@@ -1986,6 +1986,35 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
 }
 
 #[test]
+fn cycling_colors_in_the_window_keeps_its_one_sample_steps_and_the_history() {
+    //As the window runs every frame: the cycling step, then the settling of a gesture (which must not turn each step into a full render)
+    let ctx = egui::Context::default();
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 1.0, offset: 0.0, stretch: false };
+    app.render("Colors");
+    wait_for_job(&mut app);
+    let history = app.history.len();
+    (app.cycle_rate, app.color_cycling) = (100.0, false);
+    app.toggle_color_cycle();
+    let started = std::time::Instant::now();
+    let mut steps = 0;
+    while started.elapsed() < Duration::from_millis(300) {
+        let offset = app.m.palette.offset;
+        app.poll_job();
+        app.cycle_colors(&ctx, std::time::Instant::now());
+        app.settle_gesture(&ctx);
+        steps += usize::from((app.m.palette.offset - offset).abs() > 1e-9);
+        assert!(app.progress.as_ref().is_none_or(|progress| progress.total == 1), "no full-quality render between the steps");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(steps >= 5, "the colors moved in steps: {steps}");
+    assert_eq!(app.history.len(), history, "the steps are not views of the history");
+    app.toggle_color_cycle();
+    wait_for_job(&mut app);
+    assert!(app.buffer_is_complete, "stopping renders the view to its full quality");
+}
+
+#[test]
 fn flight_settings_take_effect_during_a_flight_and_a_new_speed_keeps_the_camera_where_it_is() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     (app.flight_rendering, app.pace) = (super::flight::FlightRendering::FULL_RESOLUTION, super::flight::Pace::Cinematic);

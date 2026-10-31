@@ -333,6 +333,9 @@ impl MandelbrotApp {
         if self.flight.is_some() {
             return; //A flight renders its destination with full quality when it arrives, see `points::fly_at`
         }
+        if self.color_cycling && !self.gesture_active {
+            return; //Every step of the cycling is a one-sample frame like those of a gesture; the full-quality render follows when it stops, see `cycle::toggle_color_cycle`
+        }
         let Some((_, changed, _)) = &self.settle else { return };
         if let (true, Some(remaining)) = (self.gesture_active, GESTURE_PAUSE.checked_sub(changed.elapsed())) {
             ctx.request_repaint_after(remaining);
