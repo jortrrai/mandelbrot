@@ -6,7 +6,7 @@
 //! to a folder of `saved/` (with *PNG frames*, off by default), another pipes it to `ffmpeg`, when it is installed, which encodes the video in the chosen
 //! `VideoQuality` for the chosen `Playback`. Several frames render at once, as many as keep the CPU busy (`FrameScheduler`), and the renderers go on while the writers write the last
 //! ones (at most `FRAMES_WAITING` frames wait), so neither the CPU threads nor the GPU wait for the encoder or for the end of a layer. The iteration limit follows the zoom like a flight with auto iterations: from the limit at the start to the limit of
-//! the place. Frames are sharp (no motion blur). An interrupted video keeps the frames written.
+//! the place. Frames are sharp (no motion blur). A video is written in chunks that survive any interruption and can be resumed (see `chunks`).
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
@@ -375,6 +375,21 @@ pub(super) struct VideoSpec {
     pub(super) auto: Option<crate::auto_iterations::AutoIterationSettings>,
     pub(super) use_gpu: bool,
     pub(super) fast_gpu: bool,
+    /// The name of the video file (without extension), given when it is first started: a resumed video keeps its name (see `chunks`)
+    #[serde(default)]
+    pub(super) output: Option<String>,
+}
+
+/// The name of a new video of `flight` in `folder` (without extension): the time and the name of the place, with a number when a video of that name (or its
+/// chunks) is there already
+pub(super) fn video_name(flight: &VideoFlight, folder: &std::path::Path) -> String {
+    let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    let slug: String = flight.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let base = format!("video-{stamp}-{slug}");
+    let taken = |name: &str| ["mp4", "mkv", "parts"].iter().any(|extension| folder.join(format!("{name}.{extension}")).exists()) || folder.join(name).exists();
+    //(Every name is a new file name, so one of the first more than there are entries in the folder is free)
+    let entries = std::fs::read_dir(folder).map_or(0, Iterator::count);
+    (1..=entries + 2).map(|copy| if copy == 1 { base.clone() } else { format!("{base}-{copy}") }).find(|name| !taken(name)).expect("a free name")
 }
 
 /// The color channels of a `VideoSpec` in a file as their text ("RGB", "BGR", ...)
@@ -413,10 +428,10 @@ fn limit_at(scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations:
     (limit.round() as u32).clamp(1, 1_000_000)
 }
 
-/// `ffmpeg` encoding raw RGB frames of `width` x `height` at `fps` from its standard input into `path` in `quality` for `playback`, if `ffmpeg` can be started
-fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, quality: VideoQuality, playback: Playback) -> Option<Child> {
+/// `ffmpeg` encoding raw RGB frames of `width` x `height` at `fps` from its standard input into `path` in `quality` for `playback` (with `nvenc` on the GPU's
+/// encoder), if `ffmpeg` can be started
+fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, quality: VideoQuality, playback: Playback, nvenc: bool) -> Option<Child> {
     let (size, rate) = (format!("{width}x{height}"), fps.to_string());
-    let nvenc = width >= NVENC_SMALLEST.0 && height >= NVENC_SMALLEST.1 && nvenc_works();
     let mut command = Command::new("ffmpeg");
     command.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &size, "-r", &rate, "-i", "-"]).args(arguments(quality, playback, nvenc, fps)).arg(path);
     command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
@@ -470,6 +485,7 @@ impl MandelbrotApp {
             auto: self.auto_iterations.then(|| self.auto_settings.clone()),
             use_gpu: self.use_gpu,
             fast_gpu: self.fast_gpu,
+            output: None,
         })
     }
 
@@ -484,15 +500,16 @@ impl MandelbrotApp {
     /// Renders the video `spec` in the background (see the module): a video of the last flight, or one of the queue
     #[allow(clippy::too_many_lines)] // The settings of the job, its two writers and its loop over the frames
     pub(super) fn start_video_of(&mut self, spec: VideoSpec) {
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu } = spec;
+        let name = spec.output.clone().unwrap_or_else(|| video_name(&spec.flight, &self.video_folder));
+        let spec = VideoSpec { output: Some(name.clone()), ..spec };
+        let manifest_spec = spec.clone();
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _ } = spec;
+        let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
         let thread_scheduler = Arc::clone(&scheduler);
         let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
         let total = frame_count(path.duration(), fps, speed);
-        let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-        let slug: String = flight.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-        let name = format!("video-{stamp}-{slug}");
         let coloring_function = super::COLORING_FUNCTIONS[coloring_index.min(super::COLORING_FUNCTIONS.len() - 1)].1;
         let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
         let auto_settings = auto;
@@ -505,17 +522,36 @@ impl MandelbrotApp {
         let destination = flight.name.clone();
         let saved = self.video_folder.clone();
         std::thread::spawn(move || {
+            use super::chunks;
             let folder = saved.join(&name);
-            let created = if pngs { std::fs::create_dir_all(&folder) } else { std::fs::create_dir_all(&saved) };
+            let parts = chunks::parts_folder(&saved, &name);
+            let created = std::fs::create_dir_all(&saved).and_then(|()| if pngs { std::fs::create_dir_all(&folder) } else { Ok(()) });
             if let Err(err) = created {
                 let _ = sender.send(format!("Could not render the video: {err}"));
                 return;
             }
-            let video = saved.join(format!("{name}.{}", extension(quality))).display().to_string();
-            let mut ffmpeg = start_ffmpeg((width, height), fps, &video, quality, playback);
-            let encoding = ffmpeg.is_some();
+            let video = saved.join(format!("{name}.{}", extension(quality)));
+            //The chunks so far, when the video was started before (see `chunks`), or a new manifest; ffmpeg is needed for the video file
+            let encoding = Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success());
+            let nvenc_now = width >= NVENC_SMALLEST.0 && height >= NVENC_SMALLEST.1 && nvenc_works();
+            let mut manifest = chunks::read_manifest(&parts).filter(|manifest| manifest.total == total).unwrap_or_else(|| chunks::Manifest::new(manifest_spec, total, chunk_frames, nvenc_now));
+            if encoding {
+                if manifest.nvenc && !nvenc_now {
+                    let _ = sender.send(format!("Could not resume the video: it was started with the GPU's encoder (NVENC), which does not work now; its chunks are kept in {}", parts.display()));
+                    return;
+                }
+                if let Err(err) = std::fs::create_dir_all(&parts).and_then(|()| chunks::write_manifest(&parts, &manifest)) {
+                    let _ = sender.send(format!("Could not render the video: {err}"));
+                    return;
+                }
+            }
+            //Without ffmpeg only PNG frames are written, all of them
+            let first = if encoding { manifest.first_frame() } else { 0 };
+            let resumed = first > 0;
+            //With Blend frames the frames before the first one are rendered again, so the blend continues as before (they are not written)
+            let warm_up = if blend { first.min(chunks::WARM_UP_FRAMES) } else { 0 };
             //The two writers, each with its own queue of frames; a frame counts as done when both have written it
-            let (png_done, encoded) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let (png_done, encoded) = (Arc::new(AtomicUsize::new(first)), Arc::new(AtomicUsize::new(first)));
             let failure = Arc::new(std::sync::Mutex::new(None::<String>));
             let (png_sender, png_receiver) = mpsc::sync_channel::<(usize, Arc<Vec<u8>>)>(FRAMES_WAITING);
             let (ffmpeg_sender, ffmpeg_receiver) = mpsc::sync_channel::<Arc<Vec<u8>>>(FRAMES_WAITING);
@@ -532,16 +568,60 @@ impl MandelbrotApp {
                     }
                 })
             };
+            //The encoder writes chunk after chunk, each a file of its own: a chunk counts in the manifest once ffmpeg has finished it
             let ffmpeg_writer = {
-                let (encoded, mut stdin) = (Arc::clone(&encoded), ffmpeg.as_mut().and_then(|child| child.stdin.take()));
+                let (encoded, failure, cancel, parts, mut manifest) = (Arc::clone(&encoded), Arc::clone(&failure), Arc::clone(&thread_cancel), parts.clone(), manifest.clone());
                 std::thread::spawn(move || {
-                    for rgb in ffmpeg_receiver {
-                        if stdin.as_mut().is_some_and(|stdin| stdin.write_all(&rgb).is_err()) {
-                            stdin = None; //ffmpeg stopped: the PNG frames go on
+                    let mut chunk: Option<(Child, usize)> = None; //The ffmpeg of the chunk under way, and its frames so far
+                    let finish_chunk = |child: Child, number: usize, complete: bool, manifest: &mut chunks::Manifest| -> Result<(), String> {
+                        let mut child = child;
+                        drop(child.stdin.take()); //The end of the frames of the chunk
+                        let encoded = child.wait().is_ok_and(|status| status.success());
+                        if !complete {
+                            let _ = std::fs::remove_file(chunks::chunk_path(&parts, number, extension(quality)));
+                            return Ok(());
                         }
-                        encoded.fetch_add(1, Ordering::Relaxed);
+                        if !encoded {
+                            return Err(format!("ffmpeg could not encode chunk {} of the video", number + 1));
+                        }
+                        manifest.chunks_done = number + 1;
+                        chunks::write_manifest(&parts, manifest).map_err(|err| format!("Could not save the progress of the video: {err}"))
+                    };
+                    for rgb in ffmpeg_receiver {
+                        let number = manifest.chunks_done;
+                        if chunk.is_none() {
+                            let path = chunks::chunk_path(&parts, number, extension(quality)).display().to_string();
+                            match start_ffmpeg((width, height), fps, &path, quality, playback, manifest.nvenc) {
+                                Some(child) => chunk = Some((child, 0)),
+                                None => {
+                                    *failure.lock().unwrap() = Some(String::from("Could not start ffmpeg for the video"));
+                                    cancel.store(true, Ordering::Relaxed);
+                                    return;
+                                }
+                            }
+                        }
+                        let (child, frames) = chunk.as_mut().expect("a chunk under way");
+                        if child.stdin.as_mut().is_none_or(|stdin| stdin.write_all(&rgb).is_err()) {
+                            *failure.lock().unwrap() = Some(format!("ffmpeg stopped while encoding chunk {} of the video", number + 1));
+                            cancel.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                        *frames += 1;
+                        let written = encoded.fetch_add(1, Ordering::Relaxed) + 1;
+                        if *frames == manifest.chunk_frames || written == manifest.total {
+                            let (child, _) = chunk.take().expect("a chunk under way");
+                            if let Err(err) = finish_chunk(child, number, true, &mut manifest) {
+                                *failure.lock().unwrap() = Some(err);
+                                cancel.store(true, Ordering::Relaxed);
+                                return;
+                            }
+                        }
                     }
-                    drop(stdin); //The end of the frames
+                    //Stopped in the middle of a chunk: it is not kept (the manifest only counts finished chunks)
+                    if let Some((child, _)) = chunk.take() {
+                        let number = manifest.chunks_done;
+                        let _ = finish_chunk(child, number, false, &mut manifest);
+                    }
                 })
             };
             let progress = |png_done: &AtomicUsize, encoded: &AtomicUsize, rendered: usize| {
@@ -552,8 +632,8 @@ impl MandelbrotApp {
             //Renderers take the next frame as soon as the scheduler lets them (each with all the CPU threads and the GPU, so one fills the gaps the other leaves:
             //the end of a layer, the GPU's batches); the frames go to the writers in their order
             let scheduler = &thread_scheduler;
-            let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(0), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(most_at_once));
-            let mut rendered = 0;
+            let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(first - warm_up), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(most_at_once));
+            let mut rendered = first - warm_up;
             std::thread::scope(|scope| {
                 //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
                 let (next_ref, steering_cancel) = (&next, &thread_cancel);
@@ -653,8 +733,9 @@ impl MandelbrotApp {
                                 colors_to_rgb_bytes(&finish(shown, blur, width, height, samples), mapping)
                             }
                         });
-                        //(A full queue makes the renderers wait for the writers; a writer that stopped makes the send fail, and the cancel flag says why)
-                        if (pngs && png_sender.send((rendered, Arc::clone(&rgb))).is_err()) || (encoding && ffmpeg_sender.send(rgb).is_err()) {
+                        //(A full queue makes the renderers wait for the writers; a writer that stopped makes the send fail, and the cancel flag says why.
+                        //The frames that warm up the blend of a resumed video were written before)
+                        if rendered >= first && ((pngs && png_sender.send((rendered, Arc::clone(&rgb))).is_err()) || (encoding && ffmpeg_sender.send(rgb).is_err())) {
                             thread_cancel.store(true, Ordering::Relaxed);
                             break;
                         }
@@ -667,15 +748,31 @@ impl MandelbrotApp {
             let _ = (png_writer.join(), ffmpeg_writer.join());
             let failure = failure.lock().unwrap().take();
             if let Some(failure) = failure {
-                let _ = sender.send(failure);
+                let kept = if encoding { format!("; the finished chunks are kept in {}, and Resume continues the video", parts.display()) } else { String::new() };
+                let _ = sender.send(format!("{failure}{kept}"));
                 return;
             }
             let frames = progress(&png_done, &encoded, rendered);
             thread_done.store(frames, Ordering::Relaxed);
-            let encoded = ffmpeg.and_then(|mut child| child.wait().ok().filter(std::process::ExitStatus::success)).is_some();
-            let complete = if frames == total { "" } else { " (stopped: incomplete)" };
-            let (written, file) = (if pngs { format!(" in {}", folder.display()) } else { String::new() }, if encoded { format!(" as {video}") } else if pngs { String::from(" (ffmpeg was not found or failed, so there is no video file; the frames can be encoded with it later)") } else { String::from(" (ffmpeg was not found or failed, and PNG frames are off: nothing was written)") });
-            let _ = sender.send(format!("Video of the flight: {frames} of {total} frames at {fps} FPS, {} speed{complete}{written}{file}", speed_text(speed)));
+            let speed = speed_text(speed);
+            let written = if pngs { format!(" in {}", folder.display()) } else { String::new() };
+            if !encoding {
+                let (complete, file) = (if frames == total { "" } else { " (stopped: incomplete)" }, if pngs { " (ffmpeg was not found, so there is no video file; the frames can be encoded with it later)" } else { " (ffmpeg was not found, and PNG frames are off: nothing was written)" });
+                let _ = sender.send(format!("Video of the flight: {frames} of {total} frames at {fps} FPS, {speed} speed{complete}{written}{file}"));
+                return;
+            }
+            manifest = chunks::read_manifest(&parts).unwrap_or(manifest);
+            if manifest.chunks_done < manifest.chunks() {
+                let _ = sender.send(format!("Video of the flight paused at {} of {total} frames: {} of {} chunks are kept in {}, and Resume continues it", manifest.first_frame(), manifest.chunks_done, manifest.chunks(), parts.display()));
+                return;
+            }
+            if !chunks::join_chunks(&parts, manifest.chunks(), extension(quality), &video) {
+                let _ = sender.send(format!("Could not join the chunks of the video into {}; they are kept in {}", video.display(), parts.display()));
+                return;
+            }
+            let _ = std::fs::remove_dir_all(&parts);
+            let resumed = if resumed { format!(" (resumed at frame {})", first + 1) } else { String::new() };
+            let _ = sender.send(format!("Video of the flight: {total} of {total} frames at {fps} FPS, {speed} speed{resumed}{written} as {}", video.display()));
         });
         self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {} speed, {}, {}", speed_text(speed), quality.name(), playback.name()));
         self.video_job = Some(VideoJob { done, scheduler, total, cancel, started: Instant::now(), result });
@@ -687,9 +784,10 @@ impl MandelbrotApp {
         ctx.request_repaint_after(Duration::from_millis(200));
         if let Ok(message) = job.result.try_recv() {
             //A video that was cancelled, stopped or could not start has not finished (for the queue)
-            let finished = !job.cancel.load(Ordering::Relaxed) && !message.starts_with("Could not") && !message.contains("(stopped");
+            let finished = !job.cancel.load(Ordering::Relaxed) && message.starts_with("Video of the flight:") && !message.contains("(stopped");
             self.video_job = None;
             self.log(message);
+            self.unfinished_videos = None; //Read again (see `unfinished_ui`)
             self.queue_video_ended(finished);
         }
     }
@@ -701,7 +799,7 @@ impl MandelbrotApp {
             let done = job.done.load(Ordering::Relaxed);
             let elapsed = job.started.elapsed().as_secs_f64();
             let left = if done > 0 { elapsed / done as f64 * (job.total - done) as f64 } else { 0.0 };
-            if ui.button("Cancel video").clicked() {
+            if ui.button("Pause video").on_hover_text("Stops the video: its finished chunks (10 seconds of video each) are kept, and Resume continues it later, also after the program was closed").clicked() {
                 job.cancel.store(true, Ordering::Relaxed);
             }
             let (at_once, cpu) = (job.scheduler.allowed(), job.scheduler.cpu_percent.load(Ordering::Relaxed));
@@ -737,6 +835,31 @@ impl MandelbrotApp {
         }
     }
 
+    /// Continues video `name` of the videos folder from its first unfinished chunk, with the settings it was started with (see `chunks`)
+    pub(super) fn resume_video(&mut self, name: &str) {
+        match super::chunks::read_manifest(&super::chunks::parts_folder(&self.video_folder, name)) {
+            Some(manifest) => self.start_video_of(VideoSpec { output: Some(name.to_string()), ..manifest.spec }),
+            None => self.log(format!("Could not resume the video {name}: its manifest cannot be read")),
+        }
+    }
+
+    /// The videos that were stopped before they were finished, each with *Resume* (the list is read again when a video ends)
+    fn unfinished_ui(&mut self, ui: &mut egui::Ui) {
+        let videos = self.unfinished_videos.get_or_insert_with(|| super::chunks::unfinished(&self.video_folder).into_iter().map(|(name, manifest)| (name, manifest.first_frame(), manifest.total)).collect());
+        let mut resume = None;
+        for (name, done, total) in videos.iter() {
+            ui.horizontal(|ui| {
+                if ui.button("Resume").on_hover_text("Continues this video from its first unfinished chunk, with the settings it was started with").clicked() {
+                    resume = Some(name.clone());
+                }
+                ui.label(format!("Unfinished: {name} ({done} of {total} frames)"));
+            });
+        }
+        if let Some(name) = resume {
+            self.resume_video(&name);
+        }
+    }
+
     /// The video controls: the button, the frame rate, the speed, the format and the PNG frames (the progress of a video under way is at the top, see
     /// `video_progress_ui`)
     pub(super) fn video_ui(&mut self, ui: &mut egui::Ui) {
@@ -745,6 +868,9 @@ impl MandelbrotApp {
             self.saved_flights_ui(ui);
             self.video_settings_ui(ui);
         });
+        if self.video_job.is_none() {
+            self.unfinished_ui(ui);
+        }
         self.queue_ui(ui);
     }
 

@@ -2018,6 +2018,117 @@ fn the_queue_renders_its_videos_with_their_own_settings_and_survives_a_restart()
     let _ = std::fs::remove_dir_all(folder);
 }
 
+/// The frames of the video file `path`, decoded to RGB bytes by ffmpeg
+fn decoded_frames(path: &std::path::Path) -> Vec<u8> {
+    let output = std::process::Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(path).args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap();
+    assert!(output.status.success(), "ffmpeg decodes {}", path.display());
+    output.stdout
+}
+
+/// A lossless 48 x 32 video app of the test place with chunks of 5 frames, the flight done, its videos in `folder`/saved
+fn chunked_video_app(blend: bool) -> (MandelbrotApp, std::path::PathBuf) {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (48, 32, if blend { 1 } else { 16 }, 24);
+    (app.video_quality, app.video_blend, app.video_chunk_frames, app.pace) = (super::video::VideoQuality::Lossless, blend, Some(5), super::flight::Pace::Fast);
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    wait_for_job(&mut app);
+    (app, folder)
+}
+
+/// Waits for the video under way to end, and returns its last message
+fn wait_for_video(app: &mut MandelbrotApp) -> String {
+    let (ctx, started) = (egui::Context::default(), std::time::Instant::now());
+    while app.video_job.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(120), "the video did not end");
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    app.log.iter().rev().find(|line| line.starts_with("Video of the flight") || line.starts_with("Could not")).cloned().unwrap()
+}
+
+#[test]
+fn a_paused_video_resumes_from_its_chunks_to_exactly_the_same_video() {
+    //Issue #182: lossless frames without blending, so the resumed video must be the uninterrupted one, byte for byte
+    let (mut whole, whole_folder) = chunked_video_app(false);
+    whole.start_video();
+    let message = wait_for_video(&mut whole);
+    let video = std::fs::read_dir(whole_folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mkv")).expect(&message);
+    let expected = decoded_frames(&video);
+    //The same video, paused once two chunks are done
+    let (mut app, folder) = chunked_video_app(false);
+    app.start_video();
+    let saved = folder.join("saved");
+    let parts = || std::fs::read_dir(&saved).ok().and_then(|entries| entries.filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "parts")));
+    let started = std::time::Instant::now();
+    while parts().and_then(|parts| super::chunks::read_manifest(&parts)).is_none_or(|manifest| manifest.chunks_done < 2) {
+        assert!(started.elapsed() < Duration::from_secs(60) && app.video_job.is_some(), "two chunks done before the video ends");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    app.video_job.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
+    let paused = wait_for_video(&mut app);
+    assert!(paused.contains("paused") && paused.contains("Resume continues it"), "{paused}");
+    let parts = parts().expect("the chunks are kept");
+    let manifest = super::chunks::read_manifest(&parts).unwrap();
+    assert!(manifest.chunks_done >= 2 && manifest.chunks_done < manifest.chunks(), "{manifest:?}");
+    //A new run of the program would find it in the list; Resume finishes it
+    app.unfinished_videos = None;
+    let name = super::chunks::unfinished(&saved).first().map(|(name, _)| name.clone()).expect("listed as unfinished");
+    app.resume_video(&name);
+    let resumed = wait_for_video(&mut app);
+    assert!(resumed.contains("resumed at frame"), "{resumed}");
+    assert!(!parts.exists(), "the chunks are joined and removed");
+    assert_eq!(decoded_frames(&saved.join(format!("{name}.mkv"))), expected, "exactly the frames of the video that was not paused");
+    let _ = (std::fs::remove_dir_all(folder), std::fs::remove_dir_all(whole_folder));
+}
+
+#[test]
+fn a_chunked_mp4_joins_into_one_video_with_every_frame() {
+    //The video file most videos are: HEVC or H.264 in an .mp4 (the GPU's encoder needs at least 160 x 64), from chunks of 5 frames
+    let (mut app, folder) = chunked_video_app(false);
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_quality) = (192, 108, 1, super::video::VideoQuality::VeryHigh);
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    let total: usize = message.split(" of ").nth(2).and_then(|rest| rest.split(' ').next()).and_then(|total| total.parse().ok()).expect(&message);
+    assert!(total > 10, "more than two chunks: {message}");
+    let video = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mp4")).expect(&message);
+    assert_eq!(decoded_frames(&video).len(), total * 192 * 108 * 3, "every frame, decodable: {message}");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_resumed_blended_video_warms_up_its_blend_and_has_every_frame() {
+    let (mut whole, whole_folder) = chunked_video_app(true);
+    whole.start_video();
+    let message = wait_for_video(&mut whole);
+    let frames = |message: &str| message.split(" of ").nth(2).and_then(|rest| rest.split(' ').next()).and_then(|total| total.parse::<usize>().ok()).unwrap();
+    let total = frames(&message);
+    //Paused after the first chunk (by writing its manifest as if the program had stopped there), then resumed
+    let (mut app, folder) = chunked_video_app(true);
+    let spec = super::video::VideoSpec { output: Some(String::from("video-resumed")), ..app.video_spec().unwrap() };
+    let parts = super::chunks::parts_folder(&folder.join("saved"), "video-resumed");
+    std::fs::create_dir_all(&parts).unwrap();
+    let mut manifest = super::chunks::Manifest::new(spec, total, 5, false);
+    std::fs::copy(std::fs::read_dir(whole_folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mkv")).unwrap(), parts.join("whole.mkv")).unwrap();
+    //(Its first chunk: the first 5 frames of the whole video)
+    let cut = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-i"]).arg(parts.join("whole.mkv")).args(["-frames:v", "5", "-c", "copy"]).arg(super::chunks::chunk_path(&parts, 0, "mkv")).status().unwrap();
+    assert!(cut.success());
+    std::fs::remove_file(parts.join("whole.mkv")).unwrap();
+    manifest.chunks_done = 1;
+    super::chunks::write_manifest(&parts, &manifest).unwrap();
+    app.resume_video("video-resumed");
+    let resumed = wait_for_video(&mut app);
+    assert!(resumed.contains(&format!("{total} of {total} frames")) && resumed.contains("resumed at frame 6"), "{resumed}");
+    let (expected, got) = (decoded_frames(&std::fs::read_dir(whole_folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mkv")).unwrap()), decoded_frames(&folder.join("saved").join("video-resumed.mkv")));
+    assert_eq!(got.len(), expected.len(), "every frame");
+    //The warm-up blends the frames before the chunk again: the frames after it are those of the whole video, nearly (they are blended into 8-bit colors)
+    let mean_error = got.iter().zip(&expected).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / got.len() as f64;
+    assert!(mean_error < 1.0, "the blend continued as if the video had not stopped: mean error {mean_error}");
+    let _ = (std::fs::remove_dir_all(folder), std::fs::remove_dir_all(whole_folder));
+}
+
 #[test]
 fn a_video_that_fits_a_length_lasts_exactly_that_long() {
     //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes

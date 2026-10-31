@@ -122,7 +122,9 @@ impl MandelbrotApp {
             self.log("The queue is done");
             return;
         }
-        let spec = self.video_queue.remove(0);
+        let mut spec = self.video_queue.remove(0);
+        //Named before it starts, so after a restart it resumes its own chunks (see `chunks`)
+        spec.output = spec.output.or_else(|| Some(super::video::video_name(&spec.flight, &self.video_folder)));
         self.queue_current = Some(spec.clone());
         self.save_queue();
         self.start_video_of(spec);

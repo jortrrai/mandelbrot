@@ -14,6 +14,7 @@
 mod actions;
 mod benchmark;
 mod blur;
+mod chunks;
 mod controls;
 mod cycle;
 mod fit;
@@ -210,6 +211,10 @@ pub struct MandelbrotApp {
     queue_running: bool,
     /// Whether a video with a GPU has a renderer of whole frames on the GPU alone (on; off only for measurements), see `video`
     video_gpu_renderer: bool,
+    /// The frames of a chunk of a video, for tests (else `chunks::CHUNK_SECONDS` of video)
+    video_chunk_frames: Option<usize>,
+    /// The unfinished videos of the videos folder (name, frames done, frames), read when the video controls are shown and again when a video ends
+    unfinished_videos: Option<Vec<(String, usize, usize)>>,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
@@ -388,6 +393,8 @@ impl MandelbrotApp {
             queue_current: None,
             queue_running: false,
             video_gpu_renderer: true,
+            video_chunk_frames: None,
+            unfinished_videos: None,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
