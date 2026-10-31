@@ -107,7 +107,9 @@ impl GpuIterator {
     /// # Errors
     /// The reason the GPU cannot be used: no adapter, a missing feature, a failed request, or an outcome that differs from the CPU's
     pub fn new() -> Result<GpuIterator, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        //Vulkan, Metal and DX12 only: the loops need f64 shaders and SPIR-V, which OpenGL does not have, and looking at OpenGL's adapters through EGL could
+        //panic in the EGL library while the window's OpenGL context is current on another thread (seen on X11 with NVIDIA), leaving the window without a GPU
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).map_err(|err| format!("no GPU: {err}"))?;
         let info = adapter.get_info();
         let name = format!("{} ({:?})", info.name, info.backend);
