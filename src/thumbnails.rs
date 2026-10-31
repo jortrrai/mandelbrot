@@ -163,7 +163,7 @@ mod tests {
     use super::*;
 
     fn request() -> ThumbnailRequest {
-        ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.02, max_iterations: 300 }, coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, palette: ColorCycle::CYCLE, width: 36, height: 24 }
+        ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.02, max_iterations: 300, exact: None }, coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, palette: ColorCycle::CYCLE, width: 36, height: 24 }
     }
 
     #[test]

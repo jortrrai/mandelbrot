@@ -60,14 +60,25 @@ impl MandelbrotApp {
             let points_per_pixel = size.x / width;
             let columns = whole_pixels(-drag.x, &mut self.drag_remainder.0, points_per_pixel);
             let rows_up = whole_pixels(drag.y, &mut self.drag_remainder.1, points_per_pixel);
-            if columns != 0 || rows_up != 0 {
+            if (columns != 0 || rows_up != 0) && self.deep_view().is_some() {
+                self.pan_deep(columns, rows_up); //Deeper than 64-bit floats: by exact steps (see `deep_view`)
+                self.render("Moved by dragging");
+            } else if columns != 0 || rows_up != 0 {
                 rendering::move_complex_plane_by_pixels(&mut self.c, rows_up, columns);
                 self.render_moved("Moved by dragging");
             }
         } else {
             self.drag_remainder = (0.0, 0.0);
         }
-        if scroll.abs() >= 1.0 {
+        if scroll.abs() >= 1.0 && self.zooms_deep(wheel_zoom_factor(scroll)) {
+            //Deeper than 64-bit floats can show: the deep view zooms around the cursor (or the center, with Lock center) by exact steps (see `deep_view`)
+            if let Some(position) = ui.input(|input| input.pointer.hover_pos()) {
+                let (x, y) = if self.lock_center { (width / 2.0, height / 2.0) } else { to_buffer(position) };
+                let factor = wheel_zoom_factor(scroll);
+                self.zoom_deep(factor, (f64::from(x), f64::from(y)));
+                self.render(if factor < 1.0 { "Zoomed in with the wheel" } else { "Zoomed out with the wheel" });
+            }
+        } else if scroll.abs() >= 1.0 {
             let factor = wheel_zoom_factor(scroll);
             let zooming_in = factor < 1.0;
             if !(zooming_in && self.c.precision() == Precision::Exhausted) {

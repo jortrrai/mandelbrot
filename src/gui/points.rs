@@ -334,12 +334,23 @@ impl MandelbrotApp {
     /// The current view as a point of interest called `name`: the view, the iterations of its render, and the appearance as it is now (for a new place file,
     /// the metadata of a saved image, and the text of *Copy view*)
     pub(super) fn current_point(&self, name: String, description: String) -> PointOfInterest {
+        if let Some(deep) = self.deep_shown() {
+            //Deeper than 64-bit floats: the exact center as text, and the scale of the deep view (see `deep_view`)
+            let mut point = self.point_of_the_plane(name, description);
+            point.location = points_of_interest::Location { real: deep.real.to_f64(), imaginary: deep.imaginary.to_f64(), scale: deep.scale, max_iterations: self.m.max_iterations, exact: Some((deep.real.to_decimal(), deep.imaginary.to_decimal())) };
+            return point;
+        }
+        self.point_of_the_plane(name, description)
+    }
+
+    /// The view of the complex plane as a point of interest, see `current_point`
+    fn point_of_the_plane(&self, name: String, description: String) -> PointOfInterest {
         let center = self.exact_center(); //(Exactly the center the depth control keeps: keyframes of a dive share it bit for bit)
         let coloring = if self.coloring_index == 0 { Coloring::Hsv } else { Coloring::Bernstein }; //See COLORING_FUNCTIONS
         PointOfInterest {
             name,
             description,
-            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations },
+            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations, exact: None },
             appearance: Some(points_of_interest::Appearance {
                 coloring: Some(coloring),
                 color_channels: Some(self.p.color_channel_mapping),
@@ -412,7 +423,7 @@ impl MandelbrotApp {
         let now = Instant::now();
         let palettes = (self.m.palette, destination_palette);
         self.flight_name_input.clone_from(&point.name); //The name the flight is saved under, unless it is changed (see `flight_files`)
-        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None });
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None, to_exact: point.location.exact.clone() });
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes, wait_logged: false });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
@@ -545,6 +556,9 @@ impl MandelbrotApp {
     fn arrive_at(&mut self, point: &PointOfInterest) {
         let location = &point.location;
         self.c.set_view(&View::new(location.real, location.imaginary, location.scale));
+        if let Some(exact) = &location.exact {
+            self.go_to_exact(exact, location.scale); //A place saved in a deep view: there again (see `deep_view`)
+        }
         self.m.max_iterations = location.max_iterations;
         self.max_iterations_input = location.max_iterations;
         let mut restored = String::new();

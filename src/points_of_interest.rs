@@ -85,6 +85,9 @@ pub struct Location {
     pub scale: f64,
     /// The most iterations of the escape-time iteration
     pub max_iterations: u32,
+    /// The center as decimal text with more digits than 64-bit floats hold, for a view deeper than they can show (`real_text` and `imaginary_text` in the
+    /// file, see `rendering::deep`); `real` and `imaginary` are then the nearest 64-bit numbers
+    pub exact: Option<(String, String)>,
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
@@ -128,6 +131,10 @@ pub struct PointOfInterest {
 struct RawCenter {
     real: f64,
     imaginary: f64,
+    #[serde(default)]
+    real_text: Option<String>,
+    #[serde(default)]
+    imaginary_text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -217,7 +224,9 @@ pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String
         appearance.stretch_palette = raw.stretch_palette;
         appearance
     });
-    let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations };
+    //A center given as text too (a view deeper than 64-bit floats) is kept as text, when both parts are numbers
+    let exact = location.center.real_text.zip(location.center.imaginary_text).filter(|(real, imaginary)| [real, imaginary].iter().all(|text| crate::rendering::deep::Fixed::parse(text, 64).is_some()));
+    let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations, exact };
     Ok((PointOfInterest { name, description: raw.description, location, appearance, file_name: file_name.to_string() }, warnings))
 }
 
@@ -294,6 +303,10 @@ pub fn to_json(point: &PointOfInterest) -> String {
             "max_iterations": location.max_iterations,
         },
     });
+    if let Some((real, imaginary)) = &location.exact {
+        file["location"]["center"]["real_text"] = serde_json::Value::from(real.clone());
+        file["location"]["center"]["imaginary_text"] = serde_json::Value::from(imaginary.clone());
+    }
     if !point.description.is_empty() {
         file["description"] = serde_json::Value::from(point.description.clone());
     }
@@ -387,7 +400,7 @@ mod tests {
         let (point, warnings) = parse(VALID, "test.json").unwrap();
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(point.name, "Test Place");
-        assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200 });
+        assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200, exact: None });
         let appearance = point.appearance.unwrap();
         assert_eq!(appearance.coloring, Some(Coloring::Hsv));
         assert_eq!(format!("{:?}", appearance.color_channels.unwrap()), "BGR");
@@ -541,7 +554,7 @@ mod tests {
             let point = PointOfInterest {
                 name: String::from("Comet's Crown"),
                 description: String::from(description),
-                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376 },
+                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376, exact: None },
                 appearance,
                 file_name: String::new(),
             };

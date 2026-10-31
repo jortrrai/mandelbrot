@@ -373,6 +373,10 @@ pub(super) struct VideoFlight {
     /// A flight through keyframes instead (see `sequence`): then `from` and `to` are its first and last keyframes
     #[serde(default)]
     pub(super) sequence: Option<super::sequence::Sequence>,
+    /// The exact center of the destination as decimal text, when it is deeper than 64-bit floats (see `deep_view`): frames that deep are rendered there by the
+    /// deep renderer
+    #[serde(default)]
+    pub(super) to_exact: Option<(String, String)>,
 }
 
 impl VideoFlight {
@@ -637,7 +641,7 @@ impl MandelbrotApp {
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
                             description: format!("Frame {} of {total} of the video {name}", frame + 1),
-                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))) },
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))), exact: None },
                             appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
                             file_name: String::new(),
                         });
@@ -780,12 +784,31 @@ impl MandelbrotApp {
                             }
                             m.palette = flight.palette_at(path, time);
                             let mut colors = Vec::new();
-                            let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
-                                .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
-                            //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
-                            let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
-                            let render = if on_the_gpu { render.on_the_gpu_only() } else { render };
-                            let completed = render.run(|layer, _| colors = layer.to_vec());
+                            //A frame deeper than 64-bit floats, of a flight to an exact center: rendered there by the deep renderer (see `deep_view`)
+                            let deep = flight.to_exact.as_ref().filter(|_| plane.precision() == crate::complex_plane::Precision::Exhausted);
+                            let completed = if let Some(exact) = deep {
+                                let bits = crate::rendering::deep::bits_for(camera.scale, width);
+                                let parse = |text: &str| crate::rendering::deep::Fixed::parse(text, bits);
+                                match (parse(&exact.0), parse(&exact.1)) {
+                                    (Some(real), Some(imaginary)) => {
+                                        let (real, imaginary) = (real.plus(camera.x - flight.to.x), imaginary.plus(camera.y - flight.to.y));
+                                        let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
+                                        crate::rendering::deep::render_layers(&m, &real, &imaginary, camera.scale, (width, height), samples, &color_of, thread_cancel, |layer, number| {
+                                            if number == samples.max(1) {
+                                                colors = layer.to_vec();
+                                            }
+                                        })
+                                    }
+                                    _ => false,
+                                }
+                            } else {
+                                let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
+                                    .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
+                                //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
+                                let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
+                                let render = if on_the_gpu { render.on_the_gpu_only() } else { render };
+                                render.run(|layer, _| colors = layer.to_vec())
+                            };
                             if on_the_gpu {
                                 scheduler.finished.fetch_add(usize::from(completed), Ordering::Relaxed);
                             } else {
@@ -795,7 +818,8 @@ impl MandelbrotApp {
                                 let _ = frames_sender.send((frame, None));
                                 return;
                             }
-                            let rendered = if blend {
+                            //(A deep frame is not blended: moving the frames before to its view needs 64-bit coordinates, which are all the same that deep)
+                            let rendered = if blend && deep.is_none() {
                                 RenderedFrame::Colors(colors, plane.clone()) //Blended in order, see below
                             } else {
                                 RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))
@@ -1077,7 +1101,7 @@ mod tests {
     #[test]
     fn the_limit_of_a_video_frame_goes_from_the_limit_at_the_start_to_that_of_the_place() {
         let settings = crate::auto_iterations::AutoPreset::Balanced.settings();
-        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None };
+        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, to_exact: None };
         assert_eq!(limit_at(1.0, &flight, &settings), 300);
         assert_eq!(limit_at(6.4e-5, &flight, &settings), 5000);
         let middle = limit_at(8e-3, &flight, &settings);

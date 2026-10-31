@@ -2219,8 +2219,10 @@ fn the_depth_control_changes_only_the_zoom_and_renders_like_a_gesture_while_drag
         assert!((app.c.get_scale() * zoom - 1.0).abs() < 1e-12);
     }
     assert!(app.set_depth(1.0));
-    assert!(!app.set_depth(1e15), "deeper than the 64-bit floats can show: refused");
-    assert!((app.c.get_scale() - 1.0).abs() < 1e-12, "and the view stays");
+    assert!(app.set_depth(1e15) && app.deep_view().is_some(), "deeper than the 64-bit floats can show: the deep view (see `deep_view`)");
+    let deep = app.deep_shown().map(|deep| (deep.real.to_f64(), deep.imaginary.to_f64())).unwrap();
+    assert_eq!((deep.0.to_bits(), deep.1.to_bits()), (center.x.to_bits(), center.y.to_bits()), "with the same center");
+    assert!(app.set_depth(1.0) && app.deep_view().is_none() && (app.c.get_scale() - 1.0).abs() < 1e-12, "and back");
     //Dragged: frames of a gesture (one sample per pixel); released: the full quality
     (app.depth_dragging, app.gesture_active) = (true, true);
     assert!(app.set_depth(1e4));
@@ -2308,6 +2310,122 @@ fn a_video_that_follows_music_lasts_as_long_as_the_track_slows_down_in_its_quiet
     let middle = crate::image_metadata::view_of_png(&frames_folder.join("frame-00049.png")).unwrap();
     let path = app.last_flight.as_ref().unwrap().path();
     assert!(middle.location.scale > path.camera_at(path.duration() / 2).scale * 1.5, "still further out than the middle of the flight: {}", middle.location.scale);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
+    //Issue #141: around c = i, a point of the boundary, which has structure at every depth
+    let mut app = manual_app(&Config::sized(64, 48, 200, 4));
+    app.c.set_view(&View::new(0.0, 1.0, 1e-11));
+    app.depth_center = Some(Complex::new(0.0, 1.0)); //Exactly i (the plane reads its center back from its edges, a step of a 64-bit number off)
+    app.render("Near the end of 64-bit floats");
+    wait_for_job(&mut app);
+    let mut steps = 0;
+    while app.deep_view().is_none() {
+        assert!(app.zooms_deep(0.5) || app.c.precision() != crate::complex_plane::Precision::Exhausted);
+        if app.zooms_deep(0.5) {
+            app.zoom_deep(0.5, (32.0, 24.0));
+        } else {
+            app.c.scale(0.5);
+        }
+        steps += 1;
+        assert!(steps < 40, "64-bit floats run out within 40 halvings");
+    }
+    for _ in 0..60 {
+        app.zoom_deep(0.5, (32.0, 24.0)); //Around the center: 18 more orders of magnitude
+    }
+    assert!(app.shown_scale() < 1e-28, "{}", app.shown_scale());
+    app.render("Deep");
+    wait_for_job(&mut app);
+    assert!(app.buffer_is_complete);
+    let distinct: std::collections::BTreeSet<(u8, u8, u8)> = app.p.colors.iter().map(|color| (color.red, color.green, color.blue)).collect();
+    assert!(distinct.len() > 10, "the deep view has structure: {} colors", distinct.len());
+    assert!(app.log.last().unwrap().contains("deep zoom"), "{:?}", app.log.last());
+    //Zooming out (still deep) and in again: exactly the same point (the center keeps its digits; a step of a pixel gives it digits that deep)
+    app.pan_deep(1, 1);
+    let before = app.deep_shown().map(|deep| deep.real.to_decimal()).unwrap();
+    for _ in 0..20 {
+        app.zoom_deep(2.0, (32.0, 24.0));
+    }
+    assert!(app.deep_view().is_some(), "still deep");
+    for _ in 0..20 {
+        app.zoom_deep(0.5, (32.0, 24.0));
+    }
+    assert_eq!(app.deep_shown().map(|deep| deep.real.to_decimal()), Some(before));
+    //Panning there and back: exactly the same center
+    let center = app.deep_shown().map(|deep| (deep.real.clone(), deep.imaginary.clone())).unwrap();
+    app.pan_deep(5, -3);
+    app.pan_deep(-5, 3);
+    assert_eq!(app.deep_shown().map(|deep| (deep.real.clone(), deep.imaginary.clone())), Some(center));
+    //The deep view renders the samples of the quality, layer by layer
+    app.render("Deep, all layers");
+    assert_eq!(app.progress.as_ref().map(|progress| progress.total), Some(app.supersampling_amount));
+    wait_for_job(&mut app);
+    assert!(app.log.last().unwrap().contains(&format!("{} samples", app.supersampling_amount)), "{:?}", app.log.last());
+    //Copy view keeps the exact center: pasted far away, it goes back into the deep view
+    let ctx = egui::Context::default();
+    app.copy_view(&ctx);
+    let text = app.log.last().unwrap().strip_prefix("Copied the view to the clipboard: ").unwrap().to_string();
+    assert!(text.contains("real_text"), "{text}");
+    let exact = app.deep_shown().map(|deep| (deep.real.to_decimal(), deep.imaginary.to_decimal(), deep.scale)).unwrap();
+    app.c.set_view(&View::new(-0.75, 0.0, 1.0));
+    assert!(app.deep_view().is_none());
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_shared(&text);
+    assert_eq!(app.deep_shown().map(|deep| (deep.real.to_decimal(), deep.imaginary.to_decimal(), deep.scale)), Some(exact.clone()), "the same deep view, exactly");
+    //A place saved there keeps it too
+    let folder = std::env::temp_dir().join(format!("mandelbrot-deep-place-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    app.points_folder = folder.clone();
+    app.new_point = Some((String::from("Deep"), String::new()));
+    app.save_new_point();
+    let saved = std::fs::read_to_string(folder.join("00-deep.json")).unwrap();
+    assert!(saved.contains("real_text") && saved.contains(&exact.0), "{saved}");
+    app.c.set_view(&View::new(-0.75, 0.0, 1.0));
+    app.go_to_point_of_interest(app.points.iter().position(|point| point.name == "Deep").unwrap());
+    assert_eq!(app.deep_shown().map(|deep| (deep.real.to_decimal(), deep.scale)), Some((exact.0.clone(), exact.2)), "going to the place: the deep view again");
+    let _ = std::fs::remove_dir_all(folder);
+    //The depth control goes deeper and back too
+    assert!(app.set_depth(1e20) && (app.shown_scale() - 1e-20).abs() < 1e-30);
+    //Zooming out leaves the deep view where 64-bit floats suffice
+    while app.deep_view().is_some() {
+        app.zoom_deep(2.0, (32.0, 24.0));
+    }
+    assert_ne!(app.c.precision(), crate::complex_plane::Precision::Exhausted);
+    assert!((app.c.center().y - 1.0).abs() < 1e-9, "near i still");
+}
+
+#[test]
+fn a_dive_video_into_a_place_deeper_than_64_bit_floats_renders_its_deep_frames_deep() {
+    //Issue #141: a place saved with its exact center (next to c = i, 10^-25), dived into from zoom 1
+    let deep_place = r#"{ "format_version": 1, "name": "Deep i", "location": { "center": { "real": 3e-26, "imaginary": 1.0, "real_text": "0.00000000000000000000000003", "imaginary_text": "1.00000000000000000000000002" }, "scale": 1e-25, "max_iterations": 500 } }"#;
+    let (mut app, folder) = app_with_points(&[("deep.json", deep_place)]);
+    assert_eq!(app.points[0].location.exact.as_ref().map(|exact| exact.0.as_str()), Some("0.00000000000000000000000003"));
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs, app.video_speed) = (48, 32, 1, 24, true, 400);
+    (app.pace, app.route) = (super::flight::Pace::Constant, super::flight::Route::Dive);
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    assert!(app.deep_view().is_some(), "arrived in the deep view");
+    assert!(app.last_flight.as_ref().unwrap().to_exact.is_some());
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight:") && !message.contains("stopped"), "{message}");
+    let frames_folder = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&frames_folder).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    frames.sort();
+    let colors_of = |path: &std::path::Path| {
+        let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap())).read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        reader.next_frame(&mut pixels).unwrap();
+        pixels.chunks(3).map(|pixel| (pixel[0], pixel[1], pixel[2])).collect::<std::collections::BTreeSet<_>>().len()
+    };
+    let last = frames.last().unwrap();
+    assert!(colors_of(last) > 5, "the last frame, at 10^-25, has structure: {} colors", colors_of(last));
+    let view = crate::image_metadata::view_of_png(last).unwrap();
+    assert!((view.location.scale / 1e-25 - 1.0).abs() < 1e-6, "{}", view.location.scale);
     let _ = std::fs::remove_dir_all(folder);
 }
 
