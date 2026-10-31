@@ -91,6 +91,11 @@ pub(super) fn clock_of_levels(levels: &[f64], strength: f64) -> MusicClock {
 
 /// The clock of the track at `path`, see the module (ffmpeg decodes it)
 pub(super) fn clock_of_track(path: &Path, strength: f64) -> Result<MusicClock, String> {
+    Ok(clock_of_levels(&levels_of_track(path)?, strength))
+}
+
+/// The loudness (RMS) of the track at `path` every `STEP` seconds (ffmpeg decodes it)
+fn levels_of_track(path: &Path) -> Result<Vec<f64>, String> {
     let output = std::process::Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(path).args(["-ac", "1", "-ar", &SAMPLE_RATE.to_string(), "-f", "s16le", "-"])
         .stdin(std::process::Stdio::null()).output().map_err(|err| format!("Could not start ffmpeg to read the music: {err}"))?;
     if !output.status.success() || output.stdout.len() < 4 {
@@ -98,8 +103,60 @@ pub(super) fn clock_of_track(path: &Path, strength: f64) -> Result<MusicClock, S
     }
     let samples: Vec<f64> = output.stdout.as_chunks::<2>().0.iter().map(|pair| f64::from(i16::from_le_bytes(*pair)) / 32768.0).collect();
     let per_step = (SAMPLE_RATE as f64 * STEP) as usize;
-    let levels: Vec<f64> = samples.chunks(per_step).map(|chunk| (chunk.iter().map(|sample| sample * sample).sum::<f64>() / chunk.len() as f64).sqrt()).collect();
-    Ok(clock_of_levels(&levels, strength))
+    Ok(samples.chunks(per_step).map(|chunk| (chunk.iter().map(|sample| sample * sample).sum::<f64>() / chunk.len() as f64).sqrt()).collect())
+}
+
+/// The loudness is smoothed over this many seconds to find the swells of a track (its sections, not its beats), see `swells_of_levels`
+const SWELL_SMOOTHING: f64 = 4.0;
+
+/// The `count` most prominent swells of the loudness `levels` (one every `STEP`): the moments (in seconds) where the smoothed loudness peaks highest above the
+/// quiet around it, at least an even share of the track apart, in order. The keyframes of a sequence can land on them (issue #185, see `sequence`)
+pub(super) fn swells_of_levels(levels: &[f64], count: usize) -> Vec<f64> {
+    if count == 0 || levels.len() < 3 {
+        return Vec::new();
+    }
+    let reach = ((SWELL_SMOOTHING / STEP / 2.0).round() as usize).max(1);
+    let mut sums = vec![0.0; levels.len() + 1];
+    for (index, level) in levels.iter().enumerate() {
+        sums[index + 1] = sums[index] + level;
+    }
+    let smooth: Vec<f64> = (0..levels.len()).map(|index| {
+        let (low, high) = (index.saturating_sub(reach), (index + reach + 1).min(levels.len()));
+        (sums[high] - sums[low]) / (high - low) as f64
+    }).collect();
+    //Every local maximum (the middle of a flat top), with its prominence: how far it rises above the lower of the lowest points on either side before something
+    //higher
+    let flat = |a: f64, b: f64| (a - b).abs() <= 1e-12 * a.abs().max(b.abs());
+    let mut peaks: Vec<(usize, f64)> = (1..smooth.len() - 1).filter_map(|start| {
+        if smooth[start] <= smooth[start - 1] || flat(smooth[start], smooth[start - 1]) {
+            return None;
+        }
+        let end = (start..smooth.len()).take_while(|index| flat(smooth[*index], smooth[start])).last().unwrap_or(start);
+        (end + 1 < smooth.len() && smooth[end + 1] < smooth[end]).then_some((start, end))
+    }).map(|(start, end)| {
+        let left = smooth[..start].iter().rev().take_while(|level| **level <= smooth[start]).fold(smooth[start], |low, level| low.min(*level));
+        let right = smooth[end + 1..].iter().take_while(|level| **level <= smooth[start]).fold(smooth[start], |low, level| low.min(*level));
+        (usize::midpoint(start, end), smooth[start] - left.max(right))
+    }).collect();
+    peaks.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let spacing = (smooth.len() / (2 * (count + 1))).max(1);
+    let mut chosen: Vec<usize> = Vec::new();
+    for (index, _) in peaks {
+        if chosen.len() == count {
+            break;
+        }
+        if chosen.iter().all(|other| other.abs_diff(index) >= spacing) && index >= spacing && index + spacing <= smooth.len() {
+            chosen.push(index);
+        }
+    }
+    chosen.sort_unstable();
+    chosen.into_iter().map(|index| index as f64 * STEP).collect()
+}
+
+/// The swells of the track at `path` (see `swells_of_levels`), and its length in seconds
+pub(super) fn swells_of_track(path: &Path, count: usize) -> Result<(Vec<f64>, f64), String> {
+    let levels = levels_of_track(path)?;
+    Ok((swells_of_levels(&levels, count), levels.len() as f64 * STEP))
 }
 
 /// Puts the track `music` into the video `video` (which then has it as its sound; a track longer than the video is cut at its end)
@@ -178,6 +235,22 @@ impl super::MandelbrotApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_swells_are_the_most_prominent_peaks_of_the_smoothed_loudness_in_order() {
+        //60 seconds: quiet, with swells at 15 s (small), 30 s (big) and 45 s (medium)
+        let levels: Vec<f64> = (0..1200).map(|step| {
+            let seconds = f64::from(step) * STEP;
+            let swell = |at: f64, height: f64| height * (-((seconds - at) / 3.0).powi(2)).exp();
+            0.05 + swell(15.0, 0.1) + swell(30.0, 0.6) + swell(45.0, 0.3)
+        }).collect();
+        let near = |found: f64, at: f64| (found - at).abs() < 1.0;
+        let two = swells_of_levels(&levels, 2);
+        assert!(two.len() == 2 && near(two[0], 30.0) && near(two[1], 45.0), "the two biggest, in order: {two:?}");
+        let three = swells_of_levels(&levels, 3);
+        assert!(three.len() == 3 && near(three[0], 15.0), "{three:?}");
+        assert_eq!(swells_of_levels(&levels, 0), Vec::<f64>::new());
+    }
 
     #[test]
     fn the_flight_goes_faster_through_the_loud_part_and_ends_with_the_track() {
