@@ -2219,8 +2219,10 @@ fn the_depth_control_changes_only_the_zoom_and_renders_like_a_gesture_while_drag
         assert!((app.c.get_scale() * zoom - 1.0).abs() < 1e-12);
     }
     assert!(app.set_depth(1.0));
-    assert!(!app.set_depth(1e15), "deeper than the 64-bit floats can show: refused");
-    assert!((app.c.get_scale() - 1.0).abs() < 1e-12, "and the view stays");
+    assert!(app.set_depth(1e15) && app.deep_view().is_some(), "deeper than the 64-bit floats can show: the deep view (see `deep_view`)");
+    let deep = app.deep_shown().map(|deep| (deep.real.to_f64(), deep.imaginary.to_f64())).unwrap();
+    assert_eq!((deep.0.to_bits(), deep.1.to_bits()), (center.x.to_bits(), center.y.to_bits()), "with the same center");
+    assert!(app.set_depth(1.0) && app.deep_view().is_none() && (app.c.get_scale() - 1.0).abs() < 1e-12, "and back");
     //Dragged: frames of a gesture (one sample per pixel); released: the full quality
     (app.depth_dragging, app.gesture_active) = (true, true);
     assert!(app.set_depth(1e4));
@@ -2309,6 +2311,50 @@ fn a_video_that_follows_music_lasts_as_long_as_the_track_slows_down_in_its_quiet
     let path = app.last_flight.as_ref().unwrap().path();
     assert!(middle.location.scale > path.camera_at(path.duration() / 2).scale * 1.5, "still further out than the middle of the flight: {}", middle.location.scale);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
+    //Issue #141: around c = i, a point of the boundary, which has structure at every depth
+    let mut app = manual_app(&Config::sized(64, 48, 200, 4));
+    app.c.set_view(&View::new(0.0, 1.0, 1e-11));
+    app.depth_center = Some(Complex::new(0.0, 1.0)); //Exactly i (the plane reads its center back from its edges, a step of a 64-bit number off)
+    app.render("Near the end of 64-bit floats");
+    wait_for_job(&mut app);
+    let mut steps = 0;
+    while app.deep_view().is_none() {
+        assert!(app.zooms_deep(0.5) || app.c.precision() != crate::complex_plane::Precision::Exhausted);
+        if app.zooms_deep(0.5) {
+            app.zoom_deep(0.5, (32.0, 24.0));
+        } else {
+            app.c.scale(0.5);
+        }
+        steps += 1;
+        assert!(steps < 40, "64-bit floats run out within 40 halvings");
+    }
+    for _ in 0..60 {
+        app.zoom_deep(0.5, (32.0, 24.0)); //Around the center: 18 more orders of magnitude
+    }
+    assert!(app.shown_scale() < 1e-28, "{}", app.shown_scale());
+    app.render("Deep");
+    wait_for_job(&mut app);
+    assert!(app.buffer_is_complete);
+    let distinct: std::collections::BTreeSet<(u8, u8, u8)> = app.p.colors.iter().map(|color| (color.red, color.green, color.blue)).collect();
+    assert!(distinct.len() > 10, "the deep view has structure: {} colors", distinct.len());
+    assert!(app.log.last().unwrap().contains("deep zoom"), "{:?}", app.log.last());
+    //Panning there and back: exactly the same center
+    let center = app.deep_shown().map(|deep| (deep.real.clone(), deep.imaginary.clone())).unwrap();
+    app.pan_deep(5, -3);
+    app.pan_deep(-5, 3);
+    assert_eq!(app.deep_shown().map(|deep| (deep.real.clone(), deep.imaginary.clone())), Some(center));
+    //The depth control goes deeper and back too
+    assert!(app.set_depth(1e20) && (app.shown_scale() - 1e-20).abs() < 1e-30);
+    //Zooming out leaves the deep view where 64-bit floats suffice
+    while app.deep_view().is_some() {
+        app.zoom_deep(2.0, (32.0, 24.0));
+    }
+    assert_ne!(app.c.precision(), crate::complex_plane::Precision::Exhausted);
+    assert!((app.c.center().y - 1.0).abs() < 1e-9, "near i still");
 }
 
 #[test]

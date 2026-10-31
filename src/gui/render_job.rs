@@ -383,6 +383,14 @@ impl MandelbrotApp {
         }
         self.buffer_is_complete = false;
         self.settle = during_gesture.then(|| (message.to_string(), Instant::now(), moved));
+        //A view deeper than 64-bit floats is rendered by the deep renderer (see `deep_view`)
+        if !matches!(kind, RenderKind::FlightFrame) && self.deep_view().is_some() {
+            (self.layer_shown, self.flight_job, self.flight_frame_job) = (false, false, false);
+            self.flight_queue.clear();
+            self.bars = None;
+            self.start_deep_render(message);
+            return;
+        }
         //The samples of the last render, handed from job to job; this job hands its own on when it stops, finished or not
         let previous_samples = self.samples.take();
         let (samples_sender, samples_receiver) = mpsc::channel();

@@ -11,7 +11,7 @@ use super::MandelbrotApp;
 
 
 /// The texts of the current view: the center and the zoom, formatted for reading, without losing the precision of the numbers
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentView {
     /// The real part of the center, all digits (the shortest text that reads back as the same number)
     pub real: String,
@@ -118,7 +118,8 @@ impl MandelbrotApp {
 
     /// The center and zoom of the view that is shown, read from the complex plane every frame, so it follows every move, zoom and jump at once
     pub(super) fn current_view_ui(&self, ui: &mut egui::Ui) {
-        let view = CurrentView::new(&self.c.center(), self.c.get_scale());
+        let deep = self.deep_shown().map(|deep| CurrentView { real: deep.real.to_decimal(), imaginary: deep.imaginary.to_decimal(), zoom: format_zoom(1.0 / deep.scale) });
+        let view = deep.clone().unwrap_or_else(|| CurrentView::new(&self.c.center(), self.c.get_scale()));
         ui.horizontal(|ui| {
             ui.heading("Current view");
             if ui.button("Copy").on_hover_text("Copies the center and the scale with all their digits").clicked() {
@@ -140,6 +141,9 @@ impl MandelbrotApp {
             ui.end_row();
         });
         match self.c.precision() {
+            _ if deep.is_some() => {
+                ui.colored_label(Color32::from_rgb(120, 190, 255), "Deep zoom (prototype): beyond 64-bit floats, by perturbation; one sample per pixel, on the CPU");
+            }
             Precision::Full => {}
             Precision::Degrading => {
                 ui.colored_label(Color32::from_rgb(230, 160, 40), PRECISION_DEGRADING_TEXT);

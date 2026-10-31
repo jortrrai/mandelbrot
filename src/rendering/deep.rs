@@ -173,7 +173,13 @@ pub fn position(m: &MandelbrotSet, orbit: &[(f64, f64)], center: (f64, f64), (dc
 pub fn render_positions(m: &MandelbrotSet, real: &str, imaginary: &str, scale: f64, width: usize, height: usize) -> Option<Vec<f64>> {
     let bits = bits_for(scale, width);
     let (center_real, center_imaginary) = (Fixed::parse(real, bits)?, Fixed::parse(imaginary, bits)?);
-    let orbit = reference_orbit(&center_real, &center_imaginary, m.max_iterations);
+    render_fixed(m, &center_real, &center_imaginary, scale, width, height, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// Like `render_positions`, for a center in fixed point (with at least `bits_for(scale, width)` bits); `None` when `cancel` was set before it finished
+pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, scale: f64, width: usize, height: usize, cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
+    use std::sync::atomic::Ordering;
+    let orbit = reference_orbit(center_real, center_imaginary, m.max_iterations);
     let center = (center_real.to_f64(), center_imaginary.to_f64());
     let pixel = 2.5 * scale / width as f64;
     let mut positions = vec![0.0; width * height];
@@ -184,6 +190,9 @@ pub fn render_positions(m: &MandelbrotSet, real: &str, imaginary: &str, scale: f
             let orbit = &orbit;
             scope.spawn(move || {
                 for (index, out) in rows.iter_mut().enumerate() {
+                    if index % width == 0 && cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
                     let (x, y) = (index % width, chunk * rows_per_thread + index / width);
                     let offset = ((x as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - 0.5) * pixel);
                     *out = position(m, orbit, center, offset);
@@ -191,7 +200,7 @@ pub fn render_positions(m: &MandelbrotSet, real: &str, imaginary: &str, scale: f
             });
         }
     });
-    Some(positions)
+    (!cancel.load(Ordering::Relaxed)).then_some(positions)
 }
 
 #[cfg(test)]

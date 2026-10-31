@@ -18,6 +18,7 @@ mod chunks;
 mod music;
 mod controls;
 mod cycle;
+mod deep_view;
 mod depth;
 mod fit;
 mod flight;
@@ -230,6 +231,8 @@ pub struct MandelbrotApp {
     /// The keyframes of the sequence being made, and the times of its transitions as typed (see `sequence`)
     sequence_keyframes: Vec<sequence::Keyframe>,
     sequence_seconds: Vec<String>,
+    /// The exact view when it is deeper than 64-bit floats can show (see `deep_view`)
+    deep: Option<deep_view::DeepView>,
     /// The song to fit a video to, the search under way, and the recordings found (see `songs`)
     song_input: String,
     song_search: Option<std::sync::mpsc::Receiver<Result<Vec<songs::Recording>, String>>>,
@@ -425,6 +428,7 @@ impl MandelbrotApp {
             depth_center: None,
             sequence_keyframes: Vec::new(),
             sequence_seconds: Vec::new(),
+            deep: None,
             song_input: String::new(),
             song_search: None,
             song_results: Vec::new(),
