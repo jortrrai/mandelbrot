@@ -35,7 +35,7 @@ struct Center {
 }
 
 /// One end of a flight: the view, its iteration limit and its color cycle
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct End {
     center: Center,
     scale: f64,
@@ -44,11 +44,14 @@ struct End {
     color_offset: f64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     stretch_palette: bool,
+    /// The center as decimal text, when it is deeper than 64-bit floats (see `deep_view`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exact: Option<(String, String)>,
 }
 
 impl End {
     fn of(camera: Camera, max_iterations: u32, palette: ColorCycle) -> End {
-        End { center: Center { real: camera.x, imaginary: camera.y }, scale: camera.scale, max_iterations, iteration_divide: palette.divide, color_offset: palette.offset, stretch_palette: palette.stretch }
+        End { center: Center { real: camera.x, imaginary: camera.y }, scale: camera.scale, max_iterations, iteration_divide: palette.divide, color_offset: palette.offset, stretch_palette: palette.stretch, exact: None }
     }
 
     const fn camera(&self) -> Camera {
@@ -93,7 +96,7 @@ pub(super) fn to_json(flight: &VideoFlight, length: Option<std::time::Duration>)
         format_version: FORMAT_VERSION,
         name: flight.name.clone(),
         start: End::of(flight.from, flight.limits.0, flight.palettes.0),
-        destination: End::of(flight.to, flight.limits.1, flight.palettes.1),
+        destination: End { exact: flight.to_exact.clone(), ..End::of(flight.to, flight.limits.1, flight.palettes.1) },
         route: flight.route.name().to_string(),
         pace: flight.pace.name().to_string(),
         constant_speed: flight.constant_speed,
@@ -130,6 +133,7 @@ pub(super) fn parse(text: &str, file_name: &str) -> Result<SavedFlight, String> 
         limits: (file.start.max_iterations.max(1), file.destination.max_iterations.max(1)),
         palettes: (file.start.palette(), file.destination.palette()),
         sequence: file.sequence.filter(super::sequence::Sequence::is_complete),
+        to_exact: file.destination.exact.clone(),
     };
     let length = file.length_seconds.filter(|seconds| seconds.is_finite() && *seconds > 0.0).map(std::time::Duration::from_secs_f64);
     Ok(SavedFlight { flight, length, file_name: file_name.to_string() })
@@ -289,6 +293,7 @@ mod tests {
             limits: (300, 5000),
             palettes: (ColorCycle { divide: 1.0, offset: 0.0, stretch: false }, ColorCycle { divide: 0.113, offset: 278.0, stretch: false }),
             sequence: None,
+            to_exact: None,
         }
     }
 

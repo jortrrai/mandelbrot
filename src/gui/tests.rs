@@ -2386,6 +2386,39 @@ fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
 }
 
 #[test]
+fn a_dive_video_into_a_place_deeper_than_64_bit_floats_renders_its_deep_frames_deep() {
+    //Issue #141: a place saved with its exact center (next to c = i, 10^-25), dived into from zoom 1
+    let deep_place = r#"{ "format_version": 1, "name": "Deep i", "location": { "center": { "real": 3e-26, "imaginary": 1.0, "real_text": "0.00000000000000000000000003", "imaginary_text": "1.00000000000000000000000002" }, "scale": 1e-25, "max_iterations": 500 } }"#;
+    let (mut app, folder) = app_with_points(&[("deep.json", deep_place)]);
+    assert_eq!(app.points[0].location.exact.as_ref().map(|exact| exact.0.as_str()), Some("0.00000000000000000000000003"));
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs, app.video_speed) = (48, 32, 1, 24, true, 400);
+    (app.pace, app.route) = (super::flight::Pace::Constant, super::flight::Route::Dive);
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    assert!(app.deep_view().is_some(), "arrived in the deep view");
+    assert!(app.last_flight.as_ref().unwrap().to_exact.is_some());
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight:") && !message.contains("stopped"), "{message}");
+    let frames_folder = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&frames_folder).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    frames.sort();
+    let colors_of = |path: &std::path::Path| {
+        let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap())).read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        reader.next_frame(&mut pixels).unwrap();
+        pixels.chunks(3).map(|pixel| (pixel[0], pixel[1], pixel[2])).collect::<std::collections::BTreeSet<_>>().len()
+    };
+    let last = frames.last().unwrap();
+    assert!(colors_of(last) > 5, "the last frame, at 10^-25, has structure: {} colors", colors_of(last));
+    let view = crate::image_metadata::view_of_png(last).unwrap();
+    assert!((view.location.scale / 1e-25 - 1.0).abs() < 1e-6, "{}", view.location.scale);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_video_that_fits_a_length_lasts_exactly_that_long() {
     //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);

@@ -120,6 +120,7 @@ impl MandelbrotApp {
             limits: (first.max_iterations, last.max_iterations),
             palettes: (first.palette(), last.palette()),
             sequence: Some(sequence),
+            to_exact: None,
         };
         self.fly_video_flight(&flight);
     }

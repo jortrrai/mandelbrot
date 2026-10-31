@@ -423,7 +423,7 @@ impl MandelbrotApp {
         let now = Instant::now();
         let palettes = (self.m.palette, destination_palette);
         self.flight_name_input.clone_from(&point.name); //The name the flight is saved under, unless it is changed (see `flight_files`)
-        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None });
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None, to_exact: point.location.exact.clone() });
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes, wait_logged: false });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
