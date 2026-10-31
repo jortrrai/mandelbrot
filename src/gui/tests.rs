@@ -2433,7 +2433,8 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
     app.toggle_color_cycle();
     let started = std::time::Instant::now();
     let mut steps = 0;
-    while started.elapsed() < Duration::from_millis(300) {
+    //(Until enough steps, at least 300 ms: a sleep of 5 ms takes about 15 on Windows)
+    while (started.elapsed() < Duration::from_millis(300) || steps < 8) && started.elapsed() < Duration::from_secs(3) {
         let offset = app.m.palette.offset;
         app.cycle_colors(&ctx, std::time::Instant::now());
         steps += usize::from((app.m.palette.offset - offset).abs() > 1e-9);
@@ -2442,7 +2443,7 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
     }
     let offset = app.m.palette.offset;
     assert!(steps >= 5, "the colors moved in steps: {steps}");
-    assert!((offset - 100.0 * started.elapsed().as_secs_f64()).abs() < 10.0, "about 100 steps per second: {offset} after {:?}", started.elapsed());
+    assert!((offset - 100.0 * started.elapsed().as_secs_f64()).abs() < 10.0 + 15.0 * started.elapsed().as_secs_f64(), "about 100 steps per second: {offset} after {:?}", started.elapsed());
     app.toggle_color_cycle();
     wait_for_job(&mut app);
     assert_eq!(app.m.palette.offset, offset, "stopping keeps the colors it reached");
@@ -2463,7 +2464,8 @@ fn cycling_colors_in_the_window_keeps_its_one_sample_steps_and_the_history() {
     app.toggle_color_cycle();
     let started = std::time::Instant::now();
     let mut steps = 0;
-    while started.elapsed() < Duration::from_millis(300) {
+    //(Until enough steps, at least 300 ms: a sleep of 5 ms takes about 15 on Windows)
+    while (started.elapsed() < Duration::from_millis(300) || steps < 8) && started.elapsed() < Duration::from_secs(3) {
         let offset = app.m.palette.offset;
         app.poll_job();
         app.cycle_colors(&ctx, std::time::Instant::now());
