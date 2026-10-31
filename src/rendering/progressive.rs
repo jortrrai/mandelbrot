@@ -53,12 +53,14 @@ pub struct Render<'a> {
     /// Whether the render keeps its samples (see `colors_only`), and which sample (its jitter) a render of colors only takes
     keep_samples: bool,
     colors_sample: u8,
+    /// The number of the first sample of a pixel (see `sample_offset`)
+    sample_offset: u8,
 }
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(f64, f64) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0 }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0, sample_offset: 0 }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -171,6 +173,15 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// Takes the samples numbered from `offset` instead of 0 (wrapping after 255): other positions inside the pixels (see `jitter`), for a frame of a video
+    /// that should not repeat the samples of the frame before, so that blending the frames gathers new samples at every quality (issue #188). The same offset
+    /// always gives the same image
+    #[must_use]
+    pub const fn sample_offset(mut self, offset: u8) -> Self {
+        self.sample_offset = offset;
+        self
+    }
+
     /// Like `colors_only`, with sample `sample` of every pixel (its jitter, see `jitter`) instead of the first: frames that are blended over time take another
     /// sample each, so the blend comes close to supersampling (see `gui::temporal`)
     #[must_use]
@@ -204,7 +215,7 @@ impl<'a> Render<'a> {
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     #[allow(clippy::too_many_lines)] // The setup of a render (its state, previews, recolor) and its loop over the layers
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset } = self;
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
         //(The samples remember whether the fast math was asked for, see `SampleKey`)
         let fast_key = fast_gpu && gpu.is_some();
@@ -305,7 +316,7 @@ impl<'a> Render<'a> {
             let pass_gpu = gpu.filter(|_| cpu_threads == 0 || expected.is_none_or(|expected| expected > GPU_WORTHWHILE))
                 .map(|(gpu, join_after)| (gpu, if expected.is_some() { Duration::ZERO } else { join_after }, gpu_samples, math));
             let (pass_started, gpu_before) = (Instant::now(), gpu_samples.load(Ordering::Relaxed));
-            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
+            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, sample.wrapping_add(sample_offset), track, state, &mut colors, mask.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
             //The time per sample of the CPU threads alone: the samples of the GPU do not count, so a pass that the GPU made short does not keep it out of the next one
             let on_cpu = processed.saturating_sub(gpu_samples.load(Ordering::Relaxed).saturating_sub(gpu_before));
             if on_cpu > 0 {
@@ -337,7 +348,7 @@ fn colors_only(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, width: usize, he
     let mut colors = state.as_mut().map_or_else(Vec::new, |state| std::mem::take(&mut state.colors));
     colors.clear();
     colors.resize(width * height, TrueColor::new(0, 0, 0));
-    sample_pass(c, m, sample, false, &mut SampleState::without_samples(width, height), &mut colors, None, &[], color_of, cancel, pixels_done, gpu, cpu_threads);
+    sample_pass(c, m, sample, sample, false, &mut SampleState::without_samples(width, height), &mut colors, None, &[], color_of, cancel, pixels_done, gpu, cpu_threads);
     let completed = !cancel.load(Ordering::Relaxed);
     if completed {
         on_pass(&colors, 1);
@@ -359,7 +370,7 @@ fn colors_only(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, width: usize, he
 /// bit for bit (see `gpu`); the CPU threads turn its outcomes into positions and apply them with the same code as their own rows, so the worker only feeds the GPU.
 /// If the GPU fails, its rows are computed on the CPU and the GPU is not used for the rest of the pass.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The state of `Render::run` that a pass shares; the CPU threads and the GPU worker share its closures
-fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
+fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, jitter: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
     cancel: &AtomicBool, pixels_done: &AtomicUsize, gpu: Option<(&GpuIterator, Duration, &AtomicUsize, GpuMath)>, cpu_threads: usize) -> usize {
     let (width, height, origin) = (state.width, state.height, state.origin);
     let started = Instant::now();
@@ -432,7 +443,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     //The positions of the pixels `xs` of row `y` on the CPU; a cancelled render stops in the middle of the row
     let on_cpu = |y: usize, xs: &[usize]| {
         let mut out = Vec::with_capacity(xs.len());
-        positions(c, m, y, xs, sample, origin, Some(cancel), |_, position| out.push(position));
+        positions(c, m, y, xs, jitter, origin, Some(cancel), |_, position| out.push(position));
         out
     };
     //The colors of the first two samples are only kept when they are needed (adaptive supersampling, a kept state); otherwise every row gets an empty slice
@@ -448,7 +459,7 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
     let gpu_pending = AtomicUsize::new(0);
     let finish_gpu_row = |(y, (((((row, counts), first), second), first_positions), color_row)): PassRow, xs: Cow<[usize]>, outcomes: Option<(Arc<GpuOutcomes>, usize)>| {
         let positions = match outcomes.as_ref().map(|(all, offset)| (&**all, *offset)) {
-            Some((GpuOutcomes::Exact(all), offset)) => xs.iter().zip(&all[offset..]).map(|(x, outcome)| outcome.position(m, &sample_point(c, *x, y, sample, origin))).collect(),
+            Some((GpuOutcomes::Exact(all), offset)) => xs.iter().zip(&all[offset..]).map(|(x, outcome)| outcome.position(m, &sample_point(c, *x, y, jitter, origin))).collect(),
             Some((GpuOutcomes::Fast(all), offset)) => all[offset..offset + xs.len()].iter().map(|outcome| outcome.position(m)).collect(),
             None => on_cpu(y, &xs),
         };
@@ -523,14 +534,14 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, track: bool, sta
                         //The fast loop gets the pixels and computes their points itself; the exact loop gets the points
                         let count: usize = selected.iter().map(|(_, xs)| xs.len()).sum();
                         let submitted = (count > 0).then(|| if *math == GpuMath::Exact {
-                            let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, sample, origin))).collect();
+                            let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, jitter, origin))).collect();
                             gpu.submit(m, &points)
                         } else {
                             pixels.clear();
                             for ((y, _), xs) in &selected {
                                 pixels.extend(xs.iter().map(|x| packed_pixel(*x, *y)));
                             }
-                            gpu.submit_pixels(m, c, sample, origin, &pixels, *math == GpuMath::Single)
+                            gpu.submit_pixels(m, c, jitter, origin, &pixels, *math == GpuMath::Single)
                         }); //Rows without pixels of this pass need no dispatch
                         //The points per row of the pass so far (rows with few or no pixels to sample in a preview level or an adaptive pass make it small)
                         (points_taken, rows_taken) = (points_taken + count, rows_taken + rows_in_batch);
@@ -880,7 +891,7 @@ fn sample_level_like_a_pass(c: &ComplexPlane, m: &MandelbrotSet, block: usize, t
         }
     });
     //(Without the flags of the first samples: the pixels to sample have none yet, and the colors of the others are filled in after the level)
-    let sampled = sample_pass(c, m, 0, track, state, colors, Some(&to_sample), &[], color_of, cancel, pixels_done, Some(gpu), cpu_threads);
+    let sampled = sample_pass(c, m, 0, 0, track, state, colors, Some(&to_sample), &[], color_of, cancel, pixels_done, Some(gpu), cpu_threads);
     if cancel.load(Ordering::Relaxed) {
         return None;
     }

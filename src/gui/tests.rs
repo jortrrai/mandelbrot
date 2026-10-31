@@ -1891,12 +1891,13 @@ fn another_color_cycle_keeps_the_limit_and_shows_the_recolored_image_at_once() {
 }
 
 #[test]
-fn the_quality_presets_go_from_fastest_to_best_and_the_blur_preset_takes_one_sample() {
+fn the_quality_presets_go_from_fastest_to_best_with_a_blurred_one_after_1x_4x_8x_and_16x() {
     use super::blur::Quality;
     let samples: Vec<u8> = Quality::PRESETS.iter().map(|preset| preset.samples).collect();
-    assert_eq!(samples, [1, 1, 2, 4, 8, 16, 32, 64]);
-    assert_eq!(Quality::PRESETS.iter().filter(|preset| preset.blurred).count(), 1);
-    assert_eq!(Quality::PRESETS[1].name(), "1x + blur (smooth, fast)");
+    assert_eq!(samples, [1, 1, 2, 4, 4, 8, 8, 16, 16, 32, 64]);
+    let blurred: Vec<u8> = Quality::PRESETS.iter().filter(|preset| preset.blurred).map(|preset| preset.samples).collect();
+    assert_eq!(blurred, [1, 4, 8, 16], "issue #186");
+    assert_eq!((Quality::PRESETS[1].name(), Quality::PRESETS[4].name()), (String::from("1x + blur (smooth, fast)"), String::from("4x + blur (close to 8x)")));
     assert_eq!(Quality { samples: 12, blurred: false }.name(), "12x", "a quality that is not a preset (from the configuration) is named too");
 }
 
@@ -2622,4 +2623,120 @@ fn a_blended_video_has_every_frame_and_blends_the_frames_after_the_first() {
     assert_eq!(plain.len(), blended.len(), "every frame");
     assert_eq!(plain[0], blended[0], "the first frame has nothing to blend with");
     assert!(plain.iter().zip(&blended).skip(1).any(|(a, b)| a != b), "the frames after it are blended");
+}
+
+/// The measures of a configuration of the quality experiment against the reference: the mean error per color channel, the sharpness (the mean gradient
+/// over the reference's), the shimmer (how much the change between two frames differs from the reference's change), and the change between frames
+#[derive(Default)]
+struct QualityMeasures {
+    error: f64,
+    sharpness: f64,
+    shimmer: f64,
+    change: f64,
+    frames: usize,
+}
+
+fn channels(colors: &[crate::coloring::TrueColor]) -> impl Iterator<Item = f64> + '_ {
+    colors.iter().flat_map(|color| [f64::from(color.red), f64::from(color.green), f64::from(color.blue)])
+}
+
+fn gradient(colors: &[crate::coloring::TrueColor], width: usize) -> f64 {
+    let values: Vec<f64> = channels(colors).collect();
+    let (rows, row) = (colors.len() / width, width * 3);
+    let mut total = 0.0;
+    for y in 0..rows - 1 {
+        for x in 0..row - 3 {
+            let at = y * row + x;
+            total += (values[at + 3] - values[at]).abs() + (values[at + row] - values[at]).abs();
+        }
+    }
+    total / ((rows - 1) * (row - 3)) as f64
+}
+
+#[test]
+#[ignore = "a quality experiment (issues #186 and #187), run by hand: cargo test --release --lib quality_experiment -- --ignored --nocapture"]
+#[allow(clippy::too_many_lines)] // One experiment: its configurations, its frames and its measures
+fn quality_experiment_supersampling_blur_and_blend_in_motion() {
+    use crate::coloring::TrueColor;
+    use std::fmt::Write;
+    let (width, height, frames) = (480, 270, 48);
+    //(name, samples, blur sigma, blend, jitter: every frame another single sample, or with more samples other sample numbers (issue #188))
+    let sigma = |samples: u8| super::blur::blur_sigma(1, samples);
+    let configurations: Vec<(String, u8, Option<f32>, bool, bool)> = vec![
+        (String::from("1x"), 1, None, false, false),
+        (String::from("1x + blur"), 1, Some(sigma(1)), false, false),
+        (String::from("1x jittered + blend + blur"), 1, Some(sigma(1)), true, true),
+        (String::from("4x"), 4, None, false, false),
+        (format!("4x + blur {:.2}", sigma(4) * 0.7), 4, Some(sigma(4) * 0.7), false, false),
+        (format!("4x + blur {:.2}", sigma(4)), 4, Some(sigma(4)), false, false),
+        (format!("4x + blur {:.2}", sigma(4) * 1.4), 4, Some(sigma(4) * 1.4), false, false),
+        (String::from("8x"), 8, None, false, false),
+        (format!("8x + blur {:.2}", sigma(8) * 0.7), 8, Some(sigma(8) * 0.7), false, false),
+        (format!("8x + blur {:.2}", sigma(8)), 8, Some(sigma(8)), false, false),
+        (format!("8x + blur {:.2}", sigma(8) * 1.4), 8, Some(sigma(8) * 1.4), false, false),
+        (String::from("16x"), 16, None, false, false),
+        (String::from("64x"), 64, None, false, false),
+        (String::from("64x + blend"), 64, None, true, false),
+        (String::from("4x + blend"), 4, None, true, false),
+        (String::from("4x rotating + blend"), 4, None, true, true),
+        (String::from("8x rotating + blend"), 8, None, true, true),
+        (format!("4x rotating + blend + blur {:.2}", sigma(4) * 0.7), 4, Some(sigma(4) * 0.7), true, true),
+    ];
+    let gpu = rendering::gpu::GpuIterator::new().ok();
+    let mut report = format!("{width} x {height}, {frames} frames of a zoom of 3 doublings into each place, adaptive supersampling, against 32x (the error per channel, 0 to 255)\n");
+    for place in ["02-frozen-constellation.json", "06-seahorse-embers.json", "09-the-whirlpool.json"] {
+        let (point, _) = crate::points_of_interest::parse(&std::fs::read_to_string(std::path::Path::new("points_of_interest").join(place)).unwrap(), place).unwrap();
+        let m = crate::mandelbrot_set::MandelbrotSet::new(point.location.max_iterations, 2.0);
+        let render = |frame: usize, samples: u8, jitter: Option<u8>| -> (Vec<TrueColor>, ComplexPlane, f64) {
+            let mut plane = ComplexPlane::new(width, height);
+            let scale = point.location.scale * 8.0_f64.powf(1.0 - frame as f64 / (frames - 1) as f64);
+            plane.set_view(&crate::complex_plane::View::new(point.location.real, point.location.imaginary, scale));
+            let started = std::time::Instant::now();
+            let mut colors = Vec::new();
+            let run = rendering::Render::new(&plane, &m, width, height, TrueColor::new_from_bernstein_polynomials).supersampling(samples).adaptive(Some(rendering::AdaptiveSampling::default()))
+                .gpu(gpu.as_ref().map(|gpu| (gpu, Duration::ZERO)));
+            let run = match jitter { Some(sample) if samples <= 1 => run.colors_only_of_sample(sample), Some(sample) => run.sample_offset(sample.wrapping_mul(samples)), None => run };
+            run.run(|layer, _| colors = layer.to_vec());
+            (colors, plane, started.elapsed().as_secs_f64())
+        };
+        let reference: Vec<Vec<TrueColor>> = (0..frames).map(|frame| render(frame, 32, None).0).collect();
+        let reference_gradient = reference.iter().map(|colors| gradient(colors, width)).sum::<f64>() / frames as f64;
+        let _ = writeln!(report, "\n{} (zoom {:.0} to {:.0}):", point.name, 1.0 / (point.location.scale * 8.0), 1.0 / point.location.scale);
+        for (name, samples, blur, blend, jitter) in &configurations {
+            let (mut measures, mut seconds, mut history, mut previous) = (QualityMeasures::default(), 0.0, None, None::<Vec<TrueColor>>);
+            for (frame, expected) in reference.iter().enumerate() {
+                let (colors, plane, time) = render(frame, *samples, jitter.then_some((frame % 64) as u8));
+                seconds += time;
+                let colors = if *blend {
+                    let mut shown = Vec::new();
+                    super::temporal::blend(&mut history, &plane, &colors, width, height, &mut shown);
+                    shown
+                } else {
+                    colors
+                };
+                let colors = blur.map_or(colors.clone(), |sigma| super::blur::blurred(&colors, width, height, sigma));
+                measures.error += channels(&colors).zip(channels(expected)).map(|(a, b)| (a - b).abs()).sum::<f64>() / (colors.len() * 3) as f64;
+                measures.sharpness += gradient(&colors, width) / reference_gradient;
+                if let Some(before) = &previous {
+                    let expected_before = &reference[frame - 1];
+                    let (mut shimmer, mut change) = (0.0, 0.0);
+                    for (((now, then), expected_now), expected_then) in channels(&colors).zip(channels(before)).zip(channels(expected)).zip(channels(expected_before)) {
+                        shimmer += ((now - then) - (expected_now - expected_then)).abs();
+                        change += (now - then).abs();
+                    }
+                    measures.shimmer += shimmer / (colors.len() * 3) as f64;
+                    measures.change += change / (colors.len() * 3) as f64;
+                }
+                previous = Some(colors);
+                measures.frames += 1;
+            }
+            let n = measures.frames as f64;
+            let _ = writeln!(report, "  {name:<28} error {:5.2}  sharpness {:4.2}  shimmer {:5.2}  change between frames {:5.2}  {:6.1} ms a frame",
+                measures.error / n, measures.sharpness / n, measures.shimmer / (n - 1.0), measures.change / (n - 1.0), seconds / n * 1000.0);
+        }
+        let reference_change = reference.windows(2).map(|pair| channels(&pair[1]).zip(channels(&pair[0])).map(|(a, b)| (a - b).abs()).sum::<f64>() / (pair[0].len() * 3) as f64).sum::<f64>() / (frames - 1) as f64;
+        let _ = writeln!(report, "  (32x itself: change between frames {reference_change:5.2})");
+    }
+    println!("{report}");
+    std::fs::write(std::env::temp_dir().join("mandelbrot-quality-experiment.txt"), report).unwrap();
 }
