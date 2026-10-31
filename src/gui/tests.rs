@@ -2710,6 +2710,7 @@ fn quality_experiment_supersampling_blur_and_blend_in_motion() {
     let (width, height, frames) = (480, 270, 48);
     //(name, samples, blur sigma, blend, jitter: every frame another single sample, or with more samples other sample numbers (issue #188))
     let sigma = |samples: u8| super::blur::blur_sigma(1, samples);
+    //(Blended configurations named "... zoom N" weigh new frames by the zoom with ZOOM_WEIGHT N, see `temporal::blend_with`)
     let configurations: Vec<(String, u8, Option<f32>, bool, bool)> = vec![
         (String::from("1x"), 1, None, false, false),
         (String::from("1x + blur"), 1, Some(sigma(1)), false, false),
@@ -2729,15 +2730,22 @@ fn quality_experiment_supersampling_blur_and_blend_in_motion() {
         (String::from("4x rotating + blend"), 4, None, true, true),
         (String::from("8x rotating + blend"), 8, None, true, true),
         (format!("4x rotating + blend + blur {:.2}", sigma(4) * 0.7), 4, Some(sigma(4) * 0.7), true, true),
+        (String::from("64x + blend zoom 4"), 64, None, true, false),
+        (String::from("64x + blend zoom 10"), 64, None, true, false),
+        (String::from("64x + blend zoom 25"), 64, None, true, false),
+        (String::from("1x jittered + blend + blur zoom 4"), 1, Some(sigma(1)), true, true),
+        (String::from("1x jittered + blend + blur zoom 10"), 1, Some(sigma(1)), true, true),
     ];
+    let only = std::env::var("MANDELBROT_EXPERIMENT_ONLY").ok(); //(A part of the names, to run only those configurations)
+    let doublings: f64 = std::env::var("MANDELBROT_EXPERIMENT_DOUBLINGS").ok().and_then(|doublings| doublings.parse().ok()).unwrap_or(3.0); //(How far the zoom goes in the 48 frames)
     let gpu = rendering::gpu::GpuIterator::new().ok();
-    let mut report = format!("{width} x {height}, {frames} frames of a zoom of 3 doublings into each place, adaptive supersampling, against 32x (the error per channel, 0 to 255)\n");
+    let mut report = format!("{width} x {height}, {frames} frames of a zoom of {doublings} doublings into each place, adaptive supersampling, against 32x (the error per channel, 0 to 255)\n");
     for place in ["02-frozen-constellation.json", "06-seahorse-embers.json", "09-the-whirlpool.json"] {
         let (point, _) = crate::points_of_interest::parse(&std::fs::read_to_string(std::path::Path::new("points_of_interest").join(place)).unwrap(), place).unwrap();
         let m = crate::mandelbrot_set::MandelbrotSet::new(point.location.max_iterations, 2.0);
         let render = |frame: usize, samples: u8, jitter: Option<u8>| -> (Vec<TrueColor>, ComplexPlane, f64) {
             let mut plane = ComplexPlane::new(width, height);
-            let scale = point.location.scale * 8.0_f64.powf(1.0 - frame as f64 / (frames - 1) as f64);
+            let scale = point.location.scale * 2.0_f64.powf(doublings * (1.0 - frame as f64 / (frames - 1) as f64));
             plane.set_view(&crate::complex_plane::View::new(point.location.real, point.location.imaginary, scale));
             let started = std::time::Instant::now();
             let mut colors = Vec::new();
@@ -2749,15 +2757,19 @@ fn quality_experiment_supersampling_blur_and_blend_in_motion() {
         };
         let reference: Vec<Vec<TrueColor>> = (0..frames).map(|frame| render(frame, 32, None).0).collect();
         let reference_gradient = reference.iter().map(|colors| gradient(colors, width)).sum::<f64>() / frames as f64;
-        let _ = writeln!(report, "\n{} (zoom {:.0} to {:.0}):", point.name, 1.0 / (point.location.scale * 8.0), 1.0 / point.location.scale);
+        let _ = writeln!(report, "\n{} (zoom {:.0} to {:.0}):", point.name, 1.0 / (point.location.scale * 2.0_f64.powf(doublings)), 1.0 / point.location.scale);
         for (name, samples, blur, blend, jitter) in &configurations {
+            if only.as_ref().is_some_and(|only| !name.contains(only.as_str())) {
+                continue;
+            }
+            let zoom_weight = name.split(" zoom ").nth(1).and_then(|weight| weight.parse::<f32>().ok()).unwrap_or(super::temporal::ZOOM_WEIGHT);
             let (mut measures, mut seconds, mut history, mut previous) = (QualityMeasures::default(), 0.0, None, None::<Vec<TrueColor>>);
             for (frame, expected) in reference.iter().enumerate() {
                 let (colors, plane, time) = render(frame, *samples, jitter.then_some((frame % 64) as u8));
                 seconds += time;
                 let colors = if *blend {
                     let mut shown = Vec::new();
-                    super::temporal::blend(&mut history, &plane, &colors, width, height, &mut shown);
+                    super::temporal::blend_with(&mut history, &plane, &colors, width, height, &mut shown, zoom_weight);
                     shown
                 } else {
                     colors
