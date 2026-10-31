@@ -226,7 +226,7 @@ impl super::MandelbrotApp {
         let point = crate::points_of_interest::PointOfInterest {
             name: flight.name.clone(),
             description: String::new(),
-            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1 },
+            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, exact: None },
             appearance: None,
             file_name: String::new(),
         };

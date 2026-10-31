@@ -6,7 +6,8 @@
 //! history, a flight, typed coordinates), leaves it.
 //!
 //! The complex plane of the window stays at the deepest view 64-bit floats can show, at the 64-bit center nearest the exact one, so everything that reads it
-//! keeps working; the deep view knows the real scale. Not yet in a deep view: supersampling (one sample per pixel), the GPU, flights and videos.
+//! keeps working; the deep view knows the real scale. A deep view renders the samples of the quality layer by layer, keeps its exact center in saved places,
+//! *Copy view* and saved images, and going to such a place enters it again. Not yet in a deep view: adaptive supersampling, the GPU, flights and videos.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
@@ -122,19 +123,70 @@ impl MandelbrotApp {
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let (sender, receiver) = mpsc::channel();
-        let message = format!("{message} (deep zoom, ×{:.3e}, {} iterations)", 1.0 / scale, m.max_iterations);
+        let samples = if self.quality_blur { self.supersampling_amount.max(1) } else { self.supersampling_amount.clamp(1, 64) };
+        let message = format!("{message} (deep zoom, ×{:.3e}, {} iterations, {samples} samples)", 1.0 / scale, m.max_iterations);
         std::thread::spawn(move || {
             let started = Instant::now();
-            let positions = deep::render_fixed(&m, &real, &imaginary, scale, width, height, &thread_cancel);
-            let completed = positions.is_some();
-            if let Some(positions) = positions {
-                let colors = positions.iter().map(|position| m.interpolated_color(*position, |count| m.color(coloring_function, count))).collect();
-                let _ = sender.send(JobMessage::Pass { colors, plane: c.clone(), pass: 1, total: 1, layer_time: started.elapsed(), whole: true });
-            }
-            let message = if completed { message } else { String::from("Cancelled the deep rendering") };
-            let _ = sender.send(JobMessage::Done { c, m, message, elapsed: started.elapsed(), completed, reported: completed });
+            let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
+            let mut layer_started = Instant::now();
+            let completed = deep::render_layers(&m, &real, &imaginary, scale, (width, height), samples, &color_of, &thread_cancel, |colors, layer| {
+                let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass: layer, total: samples, layer_time: layer_started.elapsed(), whole: true });
+                layer_started = Instant::now();
+            });
+            let message = if completed { message } else { String::from("Cancelled the deep rendering, showing the layers that were completed") };
+            let _ = sender.send(JobMessage::Done { c, m, message, elapsed: started.elapsed(), completed, reported: true });
         });
         self.job = Some(receiver);
-        self.progress = Some(Progress { pass: 0, total: 1, cancel, stop: None });
+        self.progress = Some(Progress { pass: 0, total: samples, cancel, stop: None });
+    }
+
+    /// Goes to the exact center `exact` (decimal text) at `scale`: the deep view when it is too deep for 64-bit floats (a place saved in a deep view)
+    pub(super) fn go_to_exact(&mut self, exact: &(String, String), scale: f64) {
+        let bits = deep::bits_for(scale, self.p.pixel_plane.width);
+        if let (Some(real), Some(imaginary)) = (Fixed::parse(&exact.0, bits), Fixed::parse(&exact.1, bits)) {
+            self.set_deep(&real, &imaginary, scale);
+        }
+    }
+
+    /// Saves the deep view as an image (rendered again at the saved size and quality, deep), with its exact view in the metadata; false when there is no deep
+    /// view (then the image is saved as always)
+    pub(super) fn save_deep_image(&mut self) -> bool {
+        let Some(deep) = self.deep_view() else { return false };
+        let (real, imaginary, scale) = (deep.real.clone(), deep.imaginary.clone(), deep.scale);
+        let resolution = match self.save_size.resolve(self.default_save_resolution(), self.view_resolution()) {
+            Ok(resolution) => resolution,
+            Err(reason) => {
+                self.log(format!("Could not save the image: {reason}"));
+                return true;
+            }
+        };
+        let (width, height) = (resolution.width, resolution.height);
+        //The center needs the bits of a pixel of the saved size, which can be smaller than a pixel of the window
+        let bits = deep::bits_for(scale, width).max(real.bits());
+        let (real, imaginary) = (real.with_bits(bits), imaginary.with_bits(bits));
+        let time_stamp = chrono::Utc::now().to_string();
+        let file_name = time_stamp.replace(':', "-").replace(' ', "_");
+        let place = crate::points_of_interest::to_json(&self.current_point(file_name.clone(), String::new()));
+        let (m, coloring_function, mapping, samples) = (self.m.clone(), self.coloring_function, self.p.color_channel_mapping, self.image_supersampling_amount);
+        let sender = self.notice_sender.clone();
+        std::thread::spawn(move || {
+            let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
+            let mut image = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(width, height));
+            image.color_channel_mapping = mapping;
+            deep::render_layers(&m, &real, &imaginary, scale, (width, height), samples, &color_of, &AtomicBool::new(false), |colors, layer| {
+                if layer == samples.max(1) {
+                    image.colors.copy_from_slice(colors);
+                }
+            });
+            image.update_pixels();
+            let view = View::new(real.to_f64(), imaginary.to_f64(), scale);
+            let message = match image.save_as_png(&time_stamp, &view, &m, samples, Some(&place)) {
+                Ok(()) => format!("Saved the deep image to saved/{file_name}.png"),
+                Err(err) => format!("Could not save the image to saved/{file_name}.png: {err}"),
+            };
+            let _ = sender.send(message);
+        });
+        self.log("Saving the deep image...");
+        true
     }
 }

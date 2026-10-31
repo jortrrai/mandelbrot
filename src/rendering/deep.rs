@@ -48,6 +48,11 @@ impl Fixed {
         Some(Fixed { value: if negative { -scaled } else { scaled }, bits })
     }
 
+    /// The bits after the binary point
+    pub const fn bits(&self) -> u32 {
+        self.bits
+    }
+
     /// The nearest 64-bit float
     pub fn to_f64(&self) -> f64 {
         //The top 64 bits as an integer, scaled by the rest: exact enough for a 64-bit result
@@ -176,6 +181,52 @@ pub fn render_positions(m: &MandelbrotSet, real: &str, imaginary: &str, scale: f
     render_fixed(m, &center_real, &center_imaginary, scale, width, height, &std::sync::atomic::AtomicBool::new(false))
 }
 
+/// The colors of a view like `render_fixed`, averaged over `samples` samples a pixel, one layer after the other.
+///
+/// The samples are at the jitter of the 64-bit renderer (see `jitter`); `on_layer` gets the average after every layer and its number (from 1), and
+/// `color_of` colors a smooth position. False when `cancel` stopped it
+#[allow(clippy::too_many_arguments)] // The view, its size and samples, how to color, when to stop and where the layers go
+pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, scale: f64, (width, height): (usize, usize), samples: u8, color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync),
+    cancel: &std::sync::atomic::AtomicBool, mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
+    use std::sync::atomic::Ordering;
+    let orbit = reference_orbit(center_real, center_imaginary, m.max_iterations);
+    let center = (center_real.to_f64(), center_imaginary.to_f64());
+    let pixel = 2.5 * scale / width as f64;
+    let threads = super::render_thread_count().max(1);
+    let rows_per_thread = height.div_ceil(threads);
+    let mut sums = vec![[0_u32; 3]; width * height];
+    let mut colors = vec![crate::coloring::TrueColor::new(0, 0, 0); width * height];
+    for sample in 0..samples.max(1) {
+        std::thread::scope(|scope| {
+            for (chunk, (rows, out)) in sums.chunks_mut(rows_per_thread * width).zip(colors.chunks_mut(rows_per_thread * width)).enumerate() {
+                let orbit = &orbit;
+                scope.spawn(move || {
+                    for (index, (sum, color)) in rows.iter_mut().zip(out.iter_mut()).enumerate() {
+                        if index % width == 0 && cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let (x, y) = (index % width, chunk * rows_per_thread + index / width);
+                        //The first sample in the middle of the pixel, the others at the jitter of the 64-bit renderer
+                        let (jx, jy) = if sample == 0 { (0.5, 0.5) } else { super::jitter::sample_jitter(x, y, sample) };
+                        let offset = ((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel);
+                        let new = color_of(position(m, orbit, center, offset));
+                        for (total, channel) in sum.iter_mut().zip([new.red, new.green, new.blue]) {
+                            *total += u32::from(channel);
+                        }
+                        let count = u32::from(sample) + 1;
+                        *color = crate::coloring::TrueColor::new(((sum[0] + count / 2) / count) as u8, ((sum[1] + count / 2) / count) as u8, ((sum[2] + count / 2) / count) as u8);
+                    }
+                });
+            }
+        });
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        on_layer(&colors, sample + 1);
+    }
+    true
+}
+
 /// Like `render_positions`, for a center in fixed point (with at least `bits_for(scale, width)` bits); `None` when `cancel` was set before it finished
 pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, scale: f64, width: usize, height: usize, cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
     use std::sync::atomic::Ordering;
@@ -248,6 +299,20 @@ mod tests {
             close += usize::from((deep - direct).abs() < 0.01);
         }
         assert!(close * 100 >= deep.len() * 95, "{close} of {} pixels agree", deep.len());
+    }
+
+    #[test]
+    fn supersampled_layers_average_their_samples_and_the_first_is_the_middle_of_the_pixels() {
+        let m = MandelbrotSet::new(2000, 2.0);
+        let bits = bits_for(1e-30, 32);
+        let (real, imaginary) = (Fixed::parse("0.0000000000000000000000000000003", bits).unwrap(), Fixed::parse("1.0000000000000000000000000000002", bits).unwrap());
+        let color_of = |position: f64| crate::coloring::TrueColor::new((position * 3.0) as u8, 0, 0);
+        let mut layers = Vec::new();
+        assert!(render_layers(&m, &real, &imaginary, 1e-30, (32, 24), 4, &color_of, &std::sync::atomic::AtomicBool::new(false), |colors, layer| layers.push((layer, colors.to_vec()))));
+        assert_eq!(layers.iter().map(|(layer, _)| *layer).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        let first = render_fixed(&m, &real, &imaginary, 1e-30, 32, 24, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert!(layers[0].1.iter().zip(&first).all(|(color, position)| color.red == (position * 3.0) as u8), "the first layer: one sample in the middle of every pixel");
+        assert!(layers[0].1.iter().zip(&layers[3].1).any(|(a, b)| a.red != b.red), "more samples change the image");
     }
 
     #[test]

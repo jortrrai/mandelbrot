@@ -32,6 +32,9 @@ impl MandelbrotApp {
     /// Saves the current view as an image on its own background thread. This does not interrupt a running render;
     /// while one runs, the buffer only holds a partially refined image, so the image is rendered again for saving.
     pub(super) fn save_image(&mut self) {
+        if self.save_deep_image() {
+            return; //A view deeper than 64-bit floats is saved by the deep renderer (see `deep_view`)
+        }
         let resolution = match self.save_size.resolve(self.default_save_resolution(), self.view_resolution()) {
             Ok(resolution) => resolution,
             Err(reason) => {

@@ -634,7 +634,7 @@ impl MandelbrotApp {
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
                             description: format!("Frame {} of {total} of the video {name}", frame + 1),
-                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))) },
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))), exact: None },
                             appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
                             file_name: String::new(),
                         });

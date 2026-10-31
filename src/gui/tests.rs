@@ -2347,6 +2347,34 @@ fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
     app.pan_deep(5, -3);
     app.pan_deep(-5, 3);
     assert_eq!(app.deep_shown().map(|deep| (deep.real.clone(), deep.imaginary.clone())), Some(center));
+    //The deep view renders the samples of the quality, layer by layer
+    app.render("Deep, all layers");
+    assert_eq!(app.progress.as_ref().map(|progress| progress.total), Some(app.supersampling_amount));
+    wait_for_job(&mut app);
+    assert!(app.log.last().unwrap().contains(&format!("{} samples", app.supersampling_amount)), "{:?}", app.log.last());
+    //Copy view keeps the exact center: pasted far away, it goes back into the deep view
+    let ctx = egui::Context::default();
+    app.copy_view(&ctx);
+    let text = app.log.last().unwrap().strip_prefix("Copied the view to the clipboard: ").unwrap().to_string();
+    assert!(text.contains("real_text"), "{text}");
+    let exact = app.deep_shown().map(|deep| (deep.real.to_decimal(), deep.imaginary.to_decimal(), deep.scale)).unwrap();
+    app.c.set_view(&View::new(-0.75, 0.0, 1.0));
+    assert!(app.deep_view().is_none());
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_shared(&text);
+    assert_eq!(app.deep_shown().map(|deep| (deep.real.to_decimal(), deep.imaginary.to_decimal(), deep.scale)), Some(exact.clone()), "the same deep view, exactly");
+    //A place saved there keeps it too
+    let folder = std::env::temp_dir().join(format!("mandelbrot-deep-place-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    app.points_folder = folder.clone();
+    app.new_point = Some((String::from("Deep"), String::new()));
+    app.save_new_point();
+    let saved = std::fs::read_to_string(folder.join("00-deep.json")).unwrap();
+    assert!(saved.contains("real_text") && saved.contains(&exact.0), "{saved}");
+    app.c.set_view(&View::new(-0.75, 0.0, 1.0));
+    app.go_to_point_of_interest(app.points.iter().position(|point| point.name == "Deep").unwrap());
+    assert_eq!(app.deep_shown().map(|deep| (deep.real.to_decimal(), deep.scale)), Some((exact.0.clone(), exact.2)), "going to the place: the deep view again");
+    let _ = std::fs::remove_dir_all(folder);
     //The depth control goes deeper and back too
     assert!(app.set_depth(1e20) && (app.shown_scale() - 1e-20).abs() < 1e-30);
     //Zooming out leaves the deep view where 64-bit floats suffice
