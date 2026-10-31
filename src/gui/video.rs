@@ -553,14 +553,17 @@ impl MandelbrotApp {
     /// Renders the video of the last flight with the current settings in the background (see the module)
     pub(super) fn start_video(&mut self) {
         match self.video_spec() {
-            Ok(spec) => self.start_video_of(spec),
+            Ok(spec) => {
+                self.start_video_of(spec);
+            }
             Err(reason) => self.log(format!("Could not render the video: {reason}")),
         }
     }
 
-    /// Renders the video `spec` in the background (see the module): a video of the last flight, or one of the queue
+    /// Renders the video `spec` in the background (see the module): a video of the last flight, or one of the queue; false when it could not start (the reason
+    /// is in the log)
     #[allow(clippy::too_many_lines)] // The settings of the job, its two writers and its loop over the frames
-    pub(super) fn start_video_of(&mut self, spec: VideoSpec) {
+    pub(super) fn start_video_of(&mut self, spec: VideoSpec) -> bool {
         let name = spec.output.clone().unwrap_or_else(|| video_name(&spec.flight, &self.video_folder));
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
@@ -575,7 +578,7 @@ impl MandelbrotApp {
             Ok(clock) => clock.map(Arc::new),
             Err(reason) => {
                 self.log(format!("Could not render the video: {reason}"));
-                return;
+                return false;
             }
         };
         let clock = FrameClock { fps, speed, music: music_clock, duration: path.duration() };
@@ -717,6 +720,10 @@ impl MandelbrotApp {
             let scheduler = &thread_scheduler;
             let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(first - warm_up), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(most_at_once));
             let mut rendered = first - warm_up;
+            //The frames in order so far: no renderer starts a frame more than `ahead` after it, so finished frames waiting for a slow one (on the
+            //GPU-only renderer, say) stay few
+            let written = AtomicUsize::new(rendered);
+            let ahead = most_at_once * 2 + 2;
             std::thread::scope(|scope| {
                 //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
                 let (next_ref, steering_cancel) = (&next, &thread_cancel);
@@ -750,12 +757,15 @@ impl MandelbrotApp {
                 //frames on the GPU alone: the CPU threads take most rows of a frame they share with the GPU, so the GPU would otherwise be idle much of the time
                 for renderer in 0..most_at_once + usize::from(gpu_renderer) {
                     let on_the_gpu = renderer == most_at_once;
-                    let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu, clock) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu, &clock);
+                    let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu, clock, written) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu, &clock, &written);
                     scope.spawn(move || {
                         let (mut plane, mut m) = (ComplexPlane::new(width, height), m);
                         loop {
                             if !on_the_gpu && !scheduler.start_frame(thread_cancel) {
                                 return;
+                            }
+                            while next.load(Ordering::SeqCst) >= written.load(Ordering::SeqCst) + ahead && !thread_cancel.load(Ordering::Relaxed) {
+                                std::thread::sleep(Duration::from_millis(5));
                             }
                             let frame = next.fetch_add(1, Ordering::SeqCst);
                             if frame >= total || thread_cancel.load(Ordering::Relaxed) {
@@ -845,6 +855,7 @@ impl MandelbrotApp {
                             break;
                         }
                         rendered += 1;
+                        written.store(rendered, Ordering::SeqCst);
                         thread_done.store(progress(&png_done, &encoded, rendered), Ordering::Relaxed);
                     }
                 }
@@ -889,6 +900,7 @@ impl MandelbrotApp {
         });
         self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {} speed, {}, {}", speed_text(speed), quality.name(), playback.name()));
         self.video_job = Some(VideoJob { done, scheduler, total, cancel, started: Instant::now(), result });
+        true
     }
 
     /// Takes the final message of the video job
@@ -897,7 +909,8 @@ impl MandelbrotApp {
         ctx.request_repaint_after(Duration::from_millis(200));
         if let Ok(message) = job.result.try_recv() {
             //A video that was cancelled, stopped or could not start has not finished (for the queue)
-            let finished = !job.cancel.load(Ordering::Relaxed) && message.starts_with("Video of the flight:") && !message.contains("(stopped");
+            //(By the result, not by Pause video: pressed while the chunks are joined, the video is still finished)
+            let finished = message.starts_with("Video of the flight:") && !message.contains("(stopped");
             self.video_job = None;
             self.log(message);
             self.unfinished_videos = None; //Read again (see `unfinished_ui`)
@@ -948,10 +961,19 @@ impl MandelbrotApp {
         }
     }
 
+    /// The video file of `spec` when it is finished: it is there, and no chunks of it wait to be joined (a queued video that was finished already)
+    pub(super) fn finished_video(&self, spec: &VideoSpec) -> Option<std::path::PathBuf> {
+        let name = spec.output.as_ref()?;
+        let video = self.video_folder.join(format!("{name}.{}", extension(spec.quality)));
+        (video.exists() && !super::chunks::parts_folder(&self.video_folder, name).exists()).then_some(video)
+    }
+
     /// Continues video `name` of the videos folder from its first unfinished chunk, with the settings it was started with (see `chunks`)
     pub(super) fn resume_video(&mut self, name: &str) {
         match super::chunks::read_manifest(&super::chunks::parts_folder(&self.video_folder, name)) {
-            Some(manifest) => self.start_video_of(VideoSpec { output: Some(name.to_string()), ..manifest.spec }),
+            Some(manifest) => {
+                self.start_video_of(VideoSpec { output: Some(name.to_string()), ..manifest.spec });
+            }
             None => self.log(format!("Could not resume the video {name}: its manifest cannot be read")),
         }
     }

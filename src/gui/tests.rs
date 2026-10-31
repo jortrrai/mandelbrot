@@ -2465,6 +2465,54 @@ fn a_sequence_fitted_to_music_lands_its_keyframes_on_the_swells_and_its_video_la
 }
 
 #[test]
+fn a_queued_video_that_cannot_start_stays_at_the_front_and_a_finished_one_is_not_rendered_again() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_quality) = (48, 32, 1, super::video::VideoQuality::Lossless);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    //Its music was moved away: it cannot start, so it waits at the front and the queue stops
+    (app.follow_music, app.music_path) = (true, folder.join("gone.wav").display().to_string());
+    app.add_to_queue();
+    app.follow_music = false;
+    app.add_to_queue();
+    app.queue_running = true;
+    app.run_queue();
+    assert_eq!((app.video_queue.len(), app.queue_running, app.queue_current.is_none(), app.video_job.is_none()), (2, false, true, true), "{:?}", app.log.last());
+    assert!(app.video_queue[0].music.is_some(), "the one that could not start is first");
+    //A video whose file is there already (finished while paused, or resumed by hand) is not rendered again
+    app.video_queue.remove(0);
+    std::fs::create_dir_all(folder.join("saved")).unwrap();
+    app.video_queue[0].output = Some(String::from("video-done"));
+    std::fs::write(folder.join("saved").join("video-done.mkv"), b"finished").unwrap();
+    app.queue_running = true;
+    app.run_queue();
+    assert!(app.video_job.is_none() && app.video_queue.is_empty(), "skipped: {:?}", app.log.last());
+    assert!(app.log.last().unwrap().contains("finished already"));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_sequence_flown_in_the_window_has_the_limits_of_its_keyframes_also_without_auto_iterations() {
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    (app.pace, app.auto_iterations, app.flight_rendering) = (super::flight::Pace::NoFlight, false, super::flight::FlightRendering::BestEffort);
+    app.go_to_point_of_interest(0);
+    for (zoom, limit) in [(1.0, 100), (1.0 / 6.4e-5, 10_000)] {
+        assert!(app.set_depth(zoom));
+        app.m.max_iterations = limit;
+        app.add_keyframe();
+    }
+    app.sequence_seconds = vec![String::from("2")];
+    app.fly_sequence();
+    let start = app.flight.as_ref().unwrap().last_frame;
+    app.fly_at(start + Duration::from_secs(1));
+    assert_eq!(app.m.max_iterations, 1000, "halfway between 100 and 10,000 on a logarithmic scale, as in its video");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_video_that_fits_a_length_lasts_exactly_that_long() {
     //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
@@ -2906,4 +2954,23 @@ fn quality_experiment_supersampling_blur_and_blend_in_motion() {
     }
     println!("{report}");
     std::fs::write(std::env::temp_dir().join("mandelbrot-quality-experiment.txt"), report).unwrap();
+}
+
+#[test]
+#[ignore = "issue #192 with Jort's settings and the GPU, run by hand"]
+fn after_a_cancelled_dive_with_jorts_settings_and_the_gpu_the_same_place_can_be_dived_to_again() {
+    for attempt in 0..5 {
+        let (mut app, _folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        app.gpu = rendering::gpu::GpuIterator::new().ok().map(std::sync::Arc::new);
+        (app.flight_rendering, app.pace, app.route, app.dive_zoom, app.auto_iterations, app.frames_ahead, app.f32_frames, app.fast_gpu, app.use_gpu) =
+            (super::flight::FlightRendering::FULL_RESOLUTION, super::flight::Pace::Constant, super::flight::Route::Dive, 0.3, true, 2, true, true, true);
+        app.go_to_point_of_interest(0);
+        let cancel_at = 0.1 + 0.2 * f64::from(attempt);
+        assert!(drive_flight(&mut app, 30, |app| app.flight.as_ref().is_some_and(|flight| flight.elapsed.as_secs_f64() > cancel_at * flight.flight.duration().as_secs_f64())), "attempt {attempt}: the first dive gets there");
+        app.cancel_flight();
+        app.go_to_point_of_interest(0);
+        let moving = |app: &MandelbrotApp| app.flight.as_ref().is_none_or(|flight| !flight.elapsed.is_zero());
+        assert!(drive_flight(&mut app, 30, moving), "attempt {attempt}: the second dive moves: {:?}", app.log.iter().rev().take(4).collect::<Vec<_>>());
+        assert!(drive_flight(&mut app, 120, |app| app.flight.is_none()), "attempt {attempt}: the second dive arrives: {:?}", app.log.iter().rev().take(4).collect::<Vec<_>>());
+    }
 }
