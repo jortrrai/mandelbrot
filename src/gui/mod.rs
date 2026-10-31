@@ -197,6 +197,8 @@ pub struct MandelbrotApp {
     flight: Option<points::PointFlight>,
     /// Whether the running job renders the frames of the flight (see `flight_job`), and the time between two frames of the screen, which the job keeps to
     flight_job: bool,
+    /// Whether the running job renders a frame of a flight in the window (best effort), not a render from before the flight (see `points::fly_at`)
+    flight_frame_job: bool,
     frame_interval: Duration,
     /// How complete the frames of a flight have to be (best effort by default), see `flight::FlightRendering`
     flight_rendering: flight::FlightRendering,
@@ -360,6 +362,7 @@ impl MandelbrotApp {
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
+            flight_frame_job: false,
             frame_interval: Duration::from_secs_f64(1.0 / 60.0),
             flight_rendering: flight::FlightRendering::BestEffort,
             immersion: false,

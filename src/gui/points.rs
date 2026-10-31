@@ -19,6 +19,9 @@ use super::{MandelbrotApp, Readiness, COLORING_FUNCTIONS};
 /// The most a flight that waits for its frames moves on after a frame, in flight time: two frames at 60 Hz (see `flight_job`)
 pub(super) const MAX_WAITING_STEP: Duration = Duration::from_millis(33);
 
+/// How long a flight may show no frame before the status log says what it waits for (#192)
+const FIRST_FRAME_WAIT: Duration = Duration::from_secs(2);
+
 /// A flight to a point of interest that is under way: the path, how far along it the flight is, and the point to apply on arrival
 pub(super) struct PointFlight {
     pub(super) flight: Flight,
@@ -37,6 +40,8 @@ pub(super) struct PointFlight {
     /// The color cycle where the flight starts and at the place: with "Restore the saved appearance", the place's divide and offset; the frames on the way blend
     /// them by the share of the path, so the colors change gradually and only on the way (see `palette_at`)
     pub(super) palettes: (ColorCycle, ColorCycle),
+    /// Whether the status log already said that the flight waits for its first frame (see `FIRST_FRAME_WAIT`)
+    pub(super) wait_logged: bool,
 }
 
 impl PointFlight {
@@ -386,7 +391,7 @@ impl MandelbrotApp {
         let destination_palette = point.appearance.as_ref().filter(|_| self.restore_appearance).map_or(self.m.palette, |appearance| appearance.palette_over(self.m.palette));
         let palettes = (self.m.palette, destination_palette);
         self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
-        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes });
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes, wait_logged: false });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
 
@@ -446,6 +451,12 @@ impl MandelbrotApp {
         self.frame_hold = self.frame_hold.saturating_sub(1);
         let Some(mut flight) = self.flight.take() else { return };
         flight.update_fps(now);
+        if flight.frames.is_empty() && !flight.wait_logged && now.saturating_duration_since(flight.started) > FIRST_FRAME_WAIT {
+            //A flight that shows nothing for long says why it waits, so a stuck flight can be reported (#192)
+            flight.wait_logged = true;
+            self.log(format!("The flight to {} has shown no frame after {} s: flight rendering {:?}, a job running: {}, a flight job: {}, a flight frame: {}, a frame shown: {}, auto iterations: {}, limit pending: {}",
+                flight.point.name, FIRST_FRAME_WAIT.as_secs(), self.flight_rendering, self.is_busy(), self.flight_job, self.flight_frame_job, self.frame_accepted, self.auto_iterations, self.limit_pending));
+        }
         //The speed controls take effect at once: the flight is timed again, at the same share of its time, so the camera does not jump
         let changed = flight.flight.timing() != (self.constant_speed, self.speed_factor());
         if changed {
@@ -491,7 +502,8 @@ impl MandelbrotApp {
         self.m.palette = flight.palette_at(elapsed);
         //Best effort: a frame whose render has not shown anything yet is not interrupted, or on an expensive view almost no render would ever be shown. The camera
         //moves on anyway (the image on the screen follows it, see `transform`), and the next render starts at the latest camera as soon as this one has shown a frame.
-        if self.is_busy() && !self.frame_accepted {
+        //A render from before the flight (the place a flight was cancelled at, the place it starts from) is not waited for: its view is no longer wanted (#192)
+        if self.is_busy() && !self.frame_accepted && self.flight_frame_job {
             self.flight = Some(flight);
             return;
         }

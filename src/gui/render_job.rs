@@ -279,6 +279,7 @@ impl MandelbrotApp {
                     self.landing_blur = false; //The render of the place is finished: sharp
                     self.job = None;
                     self.flight_job = false;
+                    self.flight_frame_job = false;
                     self.limit_pending = false;
                     //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
                     self.m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring, ..m };
@@ -478,6 +479,7 @@ impl MandelbrotApp {
         self.flight_queue.clear();
         self.job = Some(receiver);
         self.flight_job = false;
+        self.flight_frame_job = matches!(kind, RenderKind::FlightFrame);
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });
         if !self.gesture_active && !self.color_cycling {
             self.log("Rendering...");

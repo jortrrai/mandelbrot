@@ -2014,6 +2014,72 @@ fn cycling_colors_in_the_window_keeps_its_one_sample_steps_and_the_history() {
     assert!(app.buffer_is_complete, "stopping renders the view to its full quality");
 }
 
+/// Drives the flight under way as the window does, until `done` says so; false after `seconds` without that
+fn drive_flight(app: &mut MandelbrotApp, seconds: u64, done: impl Fn(&MandelbrotApp) -> bool) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(seconds) {
+        app.poll_job();
+        app.fly_at(std::time::Instant::now());
+        if done(app) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+#[test]
+fn a_best_effort_flight_does_not_wait_for_a_render_from_before_it() {
+    //Issue #192: the render of the view before the flight (e.g. a deep place, still choosing its limit) has shown nothing yet; the flight starts its own frames at once
+    let (mut app, _folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    (app.flight_rendering, app.route) = (super::flight::FlightRendering::BestEffort, super::flight::Route::Dive);
+    app.render("A view before the flight");
+    assert!(app.is_busy() && !app.frame_accepted && !app.flight_frame_job);
+    app.go_to_point_of_interest(0);
+    app.fly_at(std::time::Instant::now());
+    assert!(app.flight_frame_job, "the first frame of the flight renders, instead of waiting for the render from before");
+}
+
+#[test]
+fn a_flight_that_shows_no_frame_for_long_says_what_it_waits_for_once() {
+    let (mut app, _folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.go_to_point_of_interest(0);
+    let flight = app.flight.as_mut().unwrap();
+    flight.started -= Duration::from_secs(3);
+    let waiting = |app: &MandelbrotApp| app.log.iter().filter(|line| line.contains("has shown no frame")).count();
+    app.fly_at(std::time::Instant::now());
+    app.fly_at(std::time::Instant::now());
+    assert_eq!(waiting(&app), 1, "one line in the status log: {:?}", app.log.last());
+}
+
+#[test]
+fn after_a_cancelled_dive_the_same_place_can_be_dived_to_again() {
+    //Issue #192: a dive that is cancelled halfway, then the same place again, in every kind of flight rendering, with and without auto iterations
+    for rendering in [super::flight::FlightRendering::BestEffort, super::flight::FlightRendering::FULL_RESOLUTION, super::flight::FlightRendering::Auto(60)] {
+        for auto_iterations in [false, true] {
+            let (mut app, _folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+            (app.flight_rendering, app.pace, app.route, app.auto_iterations) = (rendering, super::flight::Pace::Fast, super::flight::Route::Dive, auto_iterations);
+            app.go_to_point_of_interest(0);
+            assert!(app.flight.is_some(), "{rendering:?}, auto {auto_iterations}: the first dive starts");
+            let halfway = |app: &MandelbrotApp| app.flight.as_ref().is_some_and(|flight| flight.elapsed.as_secs_f64() > 0.4 * flight.flight.duration().as_secs_f64());
+            assert!(drive_flight(&mut app, 30, halfway), "{rendering:?}, auto {auto_iterations}: the first dive gets halfway");
+            app.cancel_flight();
+            assert!(app.flight.is_none());
+            for _ in 0..3 {
+                app.poll_job();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            app.go_to_point_of_interest(0);
+            assert!(app.flight.is_some(), "{rendering:?}, auto {auto_iterations}: the second dive starts");
+            let moving = |app: &MandelbrotApp| app.flight.as_ref().is_none_or(|flight| !flight.elapsed.is_zero());
+            assert!(drive_flight(&mut app, 30, moving), "{rendering:?}, auto {auto_iterations}: the second dive moves");
+            assert!(drive_flight(&mut app, 60, |app| app.flight.is_none()), "{rendering:?}, auto {auto_iterations}: the second dive arrives");
+            let place = &app.points[0].location;
+            assert_eq!((app.c.center().x, app.c.get_scale()), (place.real, place.scale), "{rendering:?}, auto {auto_iterations}: at the place");
+        }
+    }
+}
+
 #[test]
 fn flight_settings_take_effect_during_a_flight_and_a_new_speed_keeps_the_camera_where_it_is() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
