@@ -84,7 +84,8 @@ pub(super) fn join_chunks(parts: &Path, chunks: usize, extension: &str, video: &
         return std::fs::rename(chunk_path(parts, 0, extension), video).is_ok();
     }
     let list = (0..chunks).fold(String::new(), |mut list, chunk| {
-        let _ = writeln!(list, "file '{}'", chunk_path(parts, chunk, extension).display().to_string().replace('\'', "'\\''"));
+        //(Forward slashes: the concat format reads a backslash, as in the paths of Windows, as an escape)
+        let _ = writeln!(list, "file '{}'", chunk_path(parts, chunk, extension).display().to_string().replace('\\', "/").replace('\'', "'\\''"));
         list
     });
     let list_path = parts.join("chunks.txt");

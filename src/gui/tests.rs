@@ -2021,6 +2021,15 @@ fn the_queue_renders_its_videos_with_their_own_settings_and_survives_a_restart()
     let _ = std::fs::remove_dir_all(folder);
 }
 
+/// Whether ffmpeg can be run: the tests that check video files need it, and say so when it is not there
+fn ffmpeg_available() -> bool {
+    let available = std::process::Command::new("ffmpeg").arg("-version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|status| status.success());
+    if !available {
+        eprintln!("ffmpeg is not installed: this test of video files is skipped");
+    }
+    available
+}
+
 /// The frames of the video file `path`, decoded to RGB bytes by ffmpeg
 fn decoded_frames(path: &std::path::Path) -> Vec<u8> {
     let output = std::process::Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(path).args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap();
@@ -2054,6 +2063,9 @@ fn wait_for_video(app: &mut MandelbrotApp) -> String {
 
 #[test]
 fn a_paused_video_resumes_from_its_chunks_to_exactly_the_same_video() {
+    if !ffmpeg_available() {
+        return;
+    }
     //Issue #182: lossless frames without blending, so the resumed video must be the uninterrupted one, byte for byte
     let (mut whole, whole_folder) = chunked_video_app(false);
     whole.start_video();
@@ -2089,6 +2101,9 @@ fn a_paused_video_resumes_from_its_chunks_to_exactly_the_same_video() {
 
 #[test]
 fn a_chunked_mp4_joins_into_one_video_with_every_frame() {
+    if !ffmpeg_available() {
+        return;
+    }
     //The video file most videos are: HEVC or H.264 in an .mp4 (the GPU's encoder needs at least 160 x 64), from chunks of 5 frames
     let (mut app, folder) = chunked_video_app(false);
     (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_quality) = (192, 108, 1, super::video::VideoQuality::VeryHigh);
@@ -2103,6 +2118,9 @@ fn a_chunked_mp4_joins_into_one_video_with_every_frame() {
 
 #[test]
 fn a_resumed_blended_video_warms_up_its_blend_and_has_every_frame() {
+    if !ffmpeg_available() {
+        return;
+    }
     let (mut whole, whole_folder) = chunked_video_app(true);
     whole.start_video();
     let message = wait_for_video(&mut whole);
@@ -2253,6 +2271,9 @@ fn a_dive_made_of_keyframes_flies_renders_and_saves_with_the_colors_of_each_keyf
 
 #[test]
 fn a_video_that_follows_music_lasts_as_long_as_the_track_slows_down_in_its_quiet_part_and_has_its_sound() {
+    if !ffmpeg_available() {
+        return;
+    }
     //Issue #185: a track of 2 s of a quiet tone and 2 s of loud noise
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     std::fs::create_dir_all(&folder).unwrap();
