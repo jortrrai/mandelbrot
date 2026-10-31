@@ -2130,6 +2130,52 @@ fn a_resumed_blended_video_warms_up_its_blend_and_has_every_frame() {
 }
 
 #[test]
+fn a_copied_view_is_pasted_to_the_same_view_and_colors() {
+    //Issue #184
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_point_of_interest(0);
+    (app.coloring_index, app.coloring_function) = (0, super::COLORING_FUNCTIONS[0].1);
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 0.113, offset: 278.0, stretch: false };
+    let ctx = egui::Context::default();
+    app.copy_view(&ctx);
+    let text = app.log.last().unwrap().strip_prefix("Copied the view to the clipboard: ").unwrap().to_string();
+    assert!(!text.contains('\n'), "one line: {text}");
+    let (center, scale, limit) = (app.c.center(), app.c.get_scale(), app.m.max_iterations);
+    //Somewhere else, with other colors
+    app.c.set_view(&crate::complex_plane::View::new(-0.5, 0.0, 1.0));
+    (app.coloring_index, app.m.palette) = (1, crate::mandelbrot_set::ColorCycle { divide: 5.0, offset: 0.0, stretch: false });
+    app.go_to_shared(&text);
+    assert_eq!((app.c.center().x, app.c.center().y, app.c.get_scale(), app.m.max_iterations), (center.x, center.y, scale, limit), "the same view");
+    assert_eq!((app.coloring_index, app.m.palette), (0, crate::mandelbrot_set::ColorCycle { divide: 0.113, offset: 278.0, stretch: false }), "and colors");
+    app.go_to_shared("{ not a view");
+    assert!(app.log.last().unwrap().starts_with("Could not go to the view"), "{:?}", app.log.last());
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn every_png_frame_of_a_video_has_its_view() {
+    //Issue #183: the first frame is the start of the flight, the last its place
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs) = (48, 32, 1, 24, true);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    let flight = app.last_flight.clone().unwrap();
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    let frames_folder = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).expect(&message);
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&frames_folder).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    frames.sort();
+    let (first, last) = (crate::image_metadata::view_of_png(&frames[0]).unwrap(), crate::image_metadata::view_of_png(frames.last().unwrap()).unwrap());
+    assert_eq!((first.location.real, first.location.scale), (flight.from.x, flight.from.scale), "{}", first.description);
+    assert!((last.location.scale / flight.to.scale - 1.0).abs() < 1e-9 && first.description.starts_with("Frame 1 of "), "{} / {}", last.location.scale, first.description);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_video_that_fits_a_length_lasts_exactly_that_long() {
     //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
@@ -2427,7 +2473,13 @@ fn a_blended_video_has_every_frame_and_blends_the_frames_after_the_first() {
         let written = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).find(|entry| entry.path().is_dir()).unwrap().path();
         let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&written).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
         frames.sort();
-        let bytes: Vec<Vec<u8>> = frames.iter().map(|frame| std::fs::read(frame).unwrap()).collect();
+        //(The pixels: the metadata names the video, which differs)
+        let bytes: Vec<Vec<u8>> = frames.iter().map(|frame| {
+            let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(frame).unwrap())).read_info().unwrap();
+            let mut pixels = vec![0; reader.output_buffer_size()];
+            reader.next_frame(&mut pixels).unwrap();
+            pixels
+        }).collect();
         let _ = std::fs::remove_dir_all(folder);
         bytes
     };

@@ -450,12 +450,13 @@ fn finish(colors: Vec<TrueColor>, blur: bool, width: usize, height: usize, sampl
 }
 
 /// Writes `rgb` (`width` x `height`) as a PNG file at `path`, with fast compression (a video has many frames; ffmpeg makes the small file)
-fn write_png(path: &std::path::Path, rgb: &[u8], width: usize, height: usize) -> std::io::Result<()> {
+fn write_png(path: &std::path::Path, rgb: &[u8], width: usize, height: usize, place: &str) -> std::io::Result<()> {
     let file = std::fs::File::create(path)?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Fast);
+    encoder.add_itxt_chunk(String::from(crate::image_metadata::KEYWORD), place.to_string()).map_err(std::io::Error::other)?;
     encoder.write_header().and_then(|mut writer| writer.write_image_data(rgb)).map_err(std::io::Error::other)
 }
 
@@ -557,9 +558,22 @@ impl MandelbrotApp {
             let (ffmpeg_sender, ffmpeg_receiver) = mpsc::sync_channel::<Arc<Vec<u8>>>(FRAMES_WAITING);
             let png_writer = {
                 let (folder, png_done, failure, cancel) = (folder.clone(), Arc::clone(&png_done), Arc::clone(&failure), Arc::clone(&thread_cancel));
+                //Every frame has its view in its metadata (see `image_metadata`): where the camera is, its limit and its colors, and which frame of which video it is
+                let (path, flight, auto_settings, limit, name) = (path.clone(), flight.clone(), auto_settings.clone(), m.max_iterations, name.clone());
+                let coloring = if coloring_index == 0 { crate::points_of_interest::Coloring::Hsv } else { crate::points_of_interest::Coloring::Bernstein };
                 std::thread::spawn(move || {
                     for (frame, rgb) in png_receiver {
-                        if let Err(err) = write_png(&folder.join(format!("frame-{:05}.png", frame + 1)), &rgb, width, height) {
+                        let time = frame_time(frame, fps, speed);
+                        let camera = path.camera_at(time);
+                        let palette = flight.palettes.0.blend(flight.palettes.1, path.share_of_path(time));
+                        let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
+                            name: format!("{} frame {}", flight.name, frame + 1),
+                            description: format!("Frame {} of {total} of the video {name}", frame + 1),
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings)) },
+                            appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
+                            file_name: String::new(),
+                        });
+                        if let Err(err) = write_png(&folder.join(format!("frame-{:05}.png", frame + 1)), &rgb, width, height, &place) {
                             *failure.lock().unwrap() = Some(format!("Could not write frame {} of the video: {err}", frame + 1));
                             cancel.store(true, Ordering::Relaxed);
                             return;

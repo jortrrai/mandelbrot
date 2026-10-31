@@ -46,6 +46,8 @@ impl MandelbrotApp {
         let buffer_is_complete = self.buffer_is_complete && self.progress.is_none() && !self.adaptive_supersampling; //An interrupted, cancelled or adaptively sampled buffer is not a full-quality image of the saved quality
         let sender = self.notice_sender.clone();
         let gpu = self.gpu.clone().filter(|_| self.use_gpu);
+        //The view in the image's metadata, so it can be opened again (see `image_metadata`)
+        let place = crate::points_of_interest::to_json(&self.current_point(file_name.clone(), String::new()));
         std::thread::spawn(move || {
             let view = c.get_view();
             let (view_width, view_height) = (p.pixel_plane.width, p.pixel_plane.height);
@@ -66,7 +68,7 @@ impl MandelbrotApp {
                 image_p.colors = super::blur::blurred(&image_p.colors, width, height, super::blur::blur_sigma(1, image_supersampling_amount));
                 image_p.update_pixels();
             }
-            let saved = image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount);
+            let saved = image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount, Some(&place));
             let message = match saved {
                 Ok(()) => format!("Saved the image to saved/{file_name}.png"),
                 Err(err) => format!("Could not save the image to saved/{file_name}.png: {err}"),

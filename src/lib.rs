@@ -61,6 +61,7 @@ pub mod gui;
 pub mod config;
 pub mod interaction;
 pub mod points_of_interest;
+pub mod image_metadata;
 pub mod resolution;
 pub mod thumbnails;
 

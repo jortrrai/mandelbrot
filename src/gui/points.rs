@@ -331,20 +331,14 @@ impl MandelbrotApp {
         self.points_folder = folder;
     }
 
-    /// Saves the current view as a new point of interest with the name and description of the form (see `controls::new_point_form`), in the folder of the list,
-    /// and loads the list again so it shows up (last). The location is the view, the iterations of its render, and the appearance as it is now.
-    pub(super) fn save_new_point(&mut self) {
-        let Some((name, description)) = self.new_point.take() else { return };
-        let name = name.trim().to_string();
-        if name.is_empty() {
-            self.new_point = Some((name, description));
-            return;
-        }
+    /// The current view as a point of interest called `name`: the view, the iterations of its render, and the appearance as it is now (for a new place file,
+    /// the metadata of a saved image, and the text of *Copy view*)
+    pub(super) fn current_point(&self, name: String, description: String) -> PointOfInterest {
         let center = self.c.center();
         let coloring = if self.coloring_index == 0 { Coloring::Hsv } else { Coloring::Bernstein }; //See COLORING_FUNCTIONS
-        let point = PointOfInterest {
-            name: name.clone(),
-            description: description.trim().to_string(),
+        PointOfInterest {
+            name,
+            description,
             location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations },
             appearance: Some(points_of_interest::Appearance {
                 coloring: Some(coloring),
@@ -354,7 +348,19 @@ impl MandelbrotApp {
                 stretch_palette: Some(self.m.palette.stretch),
             }),
             file_name: String::new(),
-        };
+        }
+    }
+
+    /// Saves the current view as a new point of interest with the name and description of the form (see `controls::new_point_form`), in the folder of the list,
+    /// and loads the list again so it shows up (last). The location is the view, the iterations of its render, and the appearance as it is now.
+    pub(super) fn save_new_point(&mut self) {
+        let Some((name, description)) = self.new_point.take() else { return };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.new_point = Some((name, description));
+            return;
+        }
+        let point = self.current_point(name.clone(), description.trim().to_string());
         match points_of_interest::save_new(&self.points_folder, &point) {
             Ok(file_name) => {
                 self.log(format!("Saved the view as the point of interest {name} ({file_name})"));

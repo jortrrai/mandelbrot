@@ -29,6 +29,7 @@ mod queue;
 mod render_job;
 mod save_size;
 mod settings;
+mod sharing;
 pub use settings::settings_path;
 mod status;
 mod temporal;
@@ -215,6 +216,8 @@ pub struct MandelbrotApp {
     video_chunk_frames: Option<usize>,
     /// The unfinished videos of the videos folder (name, frames done, frames), read when the video controls are shown and again when a video ends
     unfinished_videos: Option<Vec<(String, usize, usize)>>,
+    /// The text of the field to paste a view into (see `sharing`)
+    shared_view_input: String,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
@@ -395,6 +398,7 @@ impl MandelbrotApp {
             video_gpu_renderer: true,
             video_chunk_frames: None,
             unfinished_videos: None,
+            shared_view_input: String::new(),
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
@@ -677,6 +681,7 @@ impl eframe::App for MandelbrotApp {
         self.poll_neighborhood(&ctx);
         self.poll_video(&ctx);
         self.run_queue();
+        self.open_dropped_images(&ctx);
         self.cycle_colors(&ctx, std::time::Instant::now());
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
