@@ -178,6 +178,12 @@ impl MandelbrotSet {
         position.clamp(0.0, f64::from(self.max_iterations.saturating_sub(1)))
     }
 
+    /// The smooth position of a point `c` that escaped after `steps` steps at `z` (see `smooth_position`), for renderers that iterate it another way (deep zoom,
+    /// see `rendering::deep`)
+    pub(crate) fn smooth_position_of(&self, steps: u32, z: (f64, f64), c: (f64, f64)) -> f64 {
+        if self.smooth_coloring { self.smooth_position(steps, z, &Complex::new(c.0, c.1)) } else { f64::from(steps) }
+    }
+
     /// The color at a (fractional) table position: the colors of the two nearest integer iteration counts, mixed by the fraction in 1/256 steps (integer arithmetic).
     /// `lookup` gives the color of an integer iteration count. A whole position gives exactly `lookup(position)`, which is what coloring by integer counts did.
     pub fn interpolated_color(&self, position: f64, lookup: impl Fn(u32) -> crate::coloring::TrueColor) -> crate::coloring::TrueColor {
