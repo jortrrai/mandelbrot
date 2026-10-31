@@ -1927,6 +1927,45 @@ fn the_color_channels_have_a_drop_down_per_screen_channel_that_shows_its_source(
     assert_eq!(texts[at..at + 6], ["R:", "Blue", "G:", "Green", "B:", "Green"], "{:?}", &texts[at..]);
 }
 #[test]
+fn a_flight_is_saved_loaded_rendered_and_flown_again_exactly() {
+    //Issue #180: the last flight saved with a name and the length of Fit to length, chosen again from the list after other settings changed
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flights_folder = folder.join("flights");
+    (app.pace, app.route, app.dive_zoom, app.flight_speed) = (super::flight::Pace::Fast, super::flight::Route::Dive, 0.3, 150);
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.0, offset: 10.0, stretch: false };
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    wait_for_job(&mut app);
+    let flown = app.last_flight.clone().unwrap();
+    assert_eq!(app.flight_name_input, "Test Place", "the name of the place, to start with");
+    app.flight_name_input = String::from("My dive");
+    (app.video_fit_length, app.video_length) = (true, [String::new(), String::from("1"), String::from("5.5")]);
+    app.save_last_flight();
+    assert_eq!(app.saved_flights.len(), 1);
+    assert!(app.log.last().unwrap().contains("Saved the flight My dive"), "{:?}", app.log.last());
+    //Other settings, then the saved flight again
+    (app.pace, app.route, app.dive_zoom, app.flight_speed, app.video_fit_length) = (super::flight::Pace::Cinematic, super::flight::Route::Shortest, 1.0, 100, false);
+    app.video_length = [String::new(), String::new(), String::new()];
+    app.last_flight = None;
+    app.saved_flights_loaded = false;
+    app.reload_saved_flights();
+    app.use_saved_flight(0);
+    let loaded = app.last_flight.clone().unwrap();
+    assert_eq!(loaded, super::video::VideoFlight { name: String::from("My dive"), ..flown }, "the same flight, exactly");
+    assert_eq!((app.pace, app.route, app.dive_zoom, app.flight_speed), (super::flight::Pace::Fast, super::flight::Route::Dive, 0.3, 150), "the controls take its settings");
+    assert_eq!((app.video_fit_length, app.target_length()), (true, Some(Duration::from_secs_f64(65.5))), "and its length");
+    //Flown in the window: from its start, to its place, ending with its colors
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 9.0, offset: 99.0, stretch: false };
+    app.fly_saved_flight(0);
+    assert_eq!((app.c.center().x, app.c.get_scale()), (flown.from.x, flown.from.scale), "starts where the flight starts");
+    assert_eq!(app.m.palette, flown.palettes.0);
+    app.skip_flight();
+    assert_eq!((app.c.center().x, app.c.get_scale(), app.m.palette), (flown.to.x, flown.to.scale, flown.palettes.1), "ends at its place with its colors");
+    assert_eq!(app.last_flight.as_ref(), Some(&loaded));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_video_that_fits_a_length_lasts_exactly_that_long() {
     //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);

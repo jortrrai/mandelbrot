@@ -371,6 +371,12 @@ impl MandelbrotApp {
     /// With no flight (`Pace::NoFlight`) the place is shown at once.
     pub(super) fn go_to_point_of_interest(&mut self, index: usize) {
         let Some(point) = self.points.get(index).cloned() else { return };
+        let destination_palette = point.appearance.as_ref().filter(|_| self.restore_appearance).map_or(self.m.palette, |appearance| appearance.palette_over(self.m.palette));
+        self.fly_to(point, destination_palette);
+    }
+
+    /// Flies from the current view to `point` with the flight controls, the colors going from the current ones to `destination_palette` (see `PointFlight::palettes`)
+    pub(super) fn fly_to(&mut self, point: PointOfInterest, destination_palette: ColorCycle) {
         let center = self.c.center();
         let from = Camera { x: center.x, y: center.y, scale: self.c.get_scale() };
         let to = Camera { x: point.location.real, y: point.location.imaginary, scale: point.location.scale };
@@ -380,6 +386,7 @@ impl MandelbrotApp {
             return; //Deeper than the zoom limit: no flight
         }
         if self.pace == Pace::NoFlight {
+            self.m.palette = destination_palette;
             self.arrive_at(&point);
             return;
         }
@@ -388,8 +395,8 @@ impl MandelbrotApp {
         self.log(format!("Flying to {} ({}{route}, {:.1} s)", point.name, self.pace.name(), flight.duration().as_secs_f64()));
         let limits = self.auto_iterations.then(|| std::sync::Arc::new(std::sync::Mutex::new(self.flight_limits(to)))); //(Shared with the flight job, which a change of a setting restarts)
         let now = Instant::now();
-        let destination_palette = point.appearance.as_ref().filter(|_| self.restore_appearance).map_or(self.m.palette, |appearance| appearance.palette_over(self.m.palette));
         let palettes = (self.m.palette, destination_palette);
+        self.flight_name_input.clone_from(&point.name); //The name the flight is saved under, unless it is changed (see `flight_files`)
         self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes });
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes, wait_logged: false });
         self.frame_ready = true; //The view on the screen is where the flight starts
@@ -429,6 +436,7 @@ impl MandelbrotApp {
     pub(super) fn skip_flight(&mut self) {
         if let Some(flight) = self.flight.take() {
             self.log(format!("The flight to {} was skipped: {}", flight.point.name, flight.summary(Instant::now())));
+            self.m.palette = flight.palettes.1; //The colors of the place (a saved flight ends with its own, see `flight_files`)
             self.arrive_at(&flight.point);
         }
     }
@@ -468,6 +476,7 @@ impl MandelbrotApp {
         if self.flight_readiness() != Readiness::Any {
             if flight.flight.arrived(flight.elapsed) {
                 self.log(format!("The flight to {}: {}", flight.point.name, flight.summary(now)));
+                self.m.palette = flight.palettes.1;
                 self.arrive_at(&flight.point);
                 return;
             }
@@ -485,6 +494,7 @@ impl MandelbrotApp {
         let elapsed = flight.elapsed;
         if flight.flight.arrived(elapsed) {
             self.log(format!("The flight to {}: {}", flight.point.name, flight.summary(now)));
+            self.m.palette = flight.palettes.1;
             self.arrive_at(&flight.point);
             return;
         }

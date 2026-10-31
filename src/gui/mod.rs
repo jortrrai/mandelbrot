@@ -18,6 +18,7 @@ mod controls;
 mod cycle;
 mod fit;
 mod flight;
+mod flight_files;
 mod flight_job;
 mod history;
 mod neighborhood;
@@ -195,6 +196,13 @@ pub struct MandelbrotApp {
     video_blend: bool,
     /// A fixed number of frames a video renders at once, for measurements (the window always lets the job choose, see `video::FrameScheduler`)
     video_at_once_fixed: Option<usize>,
+    /// The saved flights (see `flight_files`): their folder (`flights`), the flights read from it (once the controls are first shown), the one chosen in the
+    /// list, and the name the last flight is saved under
+    flights_folder: std::path::PathBuf,
+    saved_flights: Vec<flight_files::SavedFlight>,
+    saved_flights_loaded: bool,
+    selected_flight: Option<usize>,
+    flight_name_input: String,
     /// Whether a video with a GPU has a renderer of whole frames on the GPU alone (on; off only for measurements), see `video`
     video_gpu_renderer: bool,
     /// Where videos are written (`saved`)
@@ -366,6 +374,11 @@ impl MandelbrotApp {
             video_pngs: false,
             video_blend: false,
             video_at_once_fixed: None,
+            flights_folder: std::path::PathBuf::from("flights"),
+            saved_flights: Vec::new(),
+            saved_flights_loaded: false,
+            selected_flight: None,
+            flight_name_input: String::new(),
             video_gpu_renderer: true,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,

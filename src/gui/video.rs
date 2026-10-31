@@ -331,7 +331,7 @@ fn length_text(length: Duration) -> String {
 }
 
 /// The flight a video is made of: from where to where, at which pace, and the iteration limits at both ends
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct VideoFlight {
     pub(super) from: Camera,
     pub(super) to: Camera,
@@ -673,7 +673,10 @@ impl MandelbrotApp {
     /// `video_progress_ui`)
     pub(super) fn video_ui(&mut self, ui: &mut egui::Ui) {
         ui.strong("Video of the last flight");
-        ui.add_enabled_ui(self.video_job.is_none(), |ui| self.video_settings_ui(ui));
+        ui.add_enabled_ui(self.video_job.is_none(), |ui| {
+            self.saved_flights_ui(ui);
+            self.video_settings_ui(ui);
+        });
     }
 
     fn video_settings_ui(&mut self, ui: &mut egui::Ui) {
