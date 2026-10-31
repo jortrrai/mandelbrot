@@ -514,11 +514,13 @@ impl MandelbrotApp {
             return;
         }
         self.c.set_view(&flight.flight.camera_at(elapsed).view());
-        if self.auto_iterations {
+        if let Some(limit) = flight.flight.limit_at(elapsed) {
+            //The limits of the keyframes of a sequence, as its video has them (also the typed limit, which a render without auto iterations uses)
+            (self.m.max_iterations, self.max_iterations_input) = (limit, limit);
+        } else if self.auto_iterations {
             //Auto iterations follow the zoom all the way: the limit of this frame (see `FlightLimits`)
             let scale = self.c.get_scale();
             let limit = match &flight.limits {
-                _ if flight.flight.limit_at(elapsed).is_some() => flight.flight.limit_at(elapsed).unwrap_or(1), //The limits of the keyframes
                 Some(limits) => limits.lock().unwrap().limit_at(scale, &self.auto_settings),
                 None => self.auto_settings.initial_limit(scale),
             };
