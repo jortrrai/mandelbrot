@@ -16,6 +16,10 @@ use super::video::VideoSpec;
 /// The length of a chunk, in seconds of video
 pub(super) const CHUNK_SECONDS: usize = 10;
 
+/// The container of the chunks: Matroska, which stores the timestamps of the frames as they are, so the chunks join without gaps. MP4 files with B-frames
+/// have an edit list that shifts them, which joining did not take into account: a constant-rate decode of a joined H.264 video showed 2 frames too many
+pub(super) const CHUNK_EXTENSION: &str = "mkv";
+
 /// The frames a resumed render with *Blend frames* renders again before its first chunk: the blend follows the view within about 10 frames (a new frame weighs
 /// at least 10%), so after 60 frames what came before weighs less than 0.2%
 pub(super) const WARM_UP_FRAMES: usize = 60;
@@ -78,14 +82,11 @@ pub(super) fn write_manifest(parts: &Path, manifest: &Manifest) -> std::io::Resu
     std::fs::rename(temporary, manifest_path(parts))
 }
 
-/// Joins the chunks `0..chunks` of `parts` into `video` without encoding them again; true if ffmpeg did
-pub(super) fn join_chunks(parts: &Path, chunks: usize, extension: &str, video: &Path) -> bool {
-    if chunks == 1 {
-        return std::fs::rename(chunk_path(parts, 0, extension), video).is_ok();
-    }
+/// Joins the chunks `0..chunks` of `parts` into `video` (an .mp4 or an .mkv) without encoding them again (`hevc`: they are HEVC); true if ffmpeg did
+pub(super) fn join_chunks(parts: &Path, chunks: usize, video: &Path, hevc: bool) -> bool {
     let list = (0..chunks).fold(String::new(), |mut list, chunk| {
         //(Forward slashes: the concat format reads a backslash, as in the paths of Windows, as an escape)
-        let _ = writeln!(list, "file '{}'", chunk_path(parts, chunk, extension).display().to_string().replace('\\', "/").replace('\'', "'\\''"));
+        let _ = writeln!(list, "file '{}'", chunk_path(parts, chunk, CHUNK_EXTENSION).display().to_string().replace('\\', "/").replace('\'', "'\\''"));
         list
     });
     let list_path = parts.join("chunks.txt");
@@ -94,8 +95,12 @@ pub(super) fn join_chunks(parts: &Path, chunks: usize, extension: &str, video: &
     }
     let mut arguments: Vec<String> = ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i"].map(String::from).to_vec();
     arguments.push(list_path.display().to_string());
-    arguments.extend(["-c", "copy"].map(String::from));
-    if extension == "mp4" {
+    arguments.extend(["-map", "0", "-c", "copy"].map(String::from));
+    if video.extension().is_some_and(|extension| extension == "mp4") {
+        //The options of MP4 files that the chunks do not have: the tag of HEVC that Apple's players need, and the index at the start
+        if hevc {
+            arguments.extend(["-tag:v:0", "hvc1"].map(String::from));
+        }
         arguments.extend(["-movflags", "+faststart"].map(String::from));
     }
     arguments.push(video.display().to_string());

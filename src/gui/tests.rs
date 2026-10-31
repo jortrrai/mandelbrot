@@ -1328,7 +1328,9 @@ fn a_best_effort_flight_does_not_interrupt_a_render_that_has_not_shown_anything(
     app.go_to_point_of_interest(0);
     let start = app.flight.as_ref().unwrap().last_frame;
     app.fly_at(start + Duration::from_millis(100));
-    let first_job = app.progress.as_ref().map(|progress| Arc::as_ptr(&progress.cancel)).unwrap();
+    //(The first job's cancel flag is kept, so a later job cannot get its address: identity by address only holds while it lives)
+    let first_cancel = app.progress.as_ref().map(|progress| Arc::clone(&progress.cancel)).unwrap();
+    let first_job = Arc::as_ptr(&first_cancel);
     let first_view = app.c.get_view();
     //The next frame comes before the render has shown anything: the camera moves on, the render goes on
     app.fly_at(start + Duration::from_millis(200));
@@ -2107,6 +2109,10 @@ fn a_chunked_mp4_joins_into_one_video_with_every_frame() {
     //The video file most videos are: HEVC or H.264 in an .mp4 (the GPU's encoder needs at least 160 x 64), from chunks of 5 frames
     let (mut app, folder) = chunked_video_app(false);
     (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_quality) = (192, 108, 1, super::video::VideoQuality::VeryHigh);
+    //(MANDELBROT_TEST_FORMAT="Most compatible" tests the H.264 of computers without NVIDIA's encoder, as CI has)
+    if let Ok(format) = std::env::var("MANDELBROT_TEST_FORMAT") {
+        app.video_playback = super::video::Playback::of_name(&format).unwrap();
+    }
     app.start_video();
     let message = wait_for_video(&mut app);
     let total: usize = message.split(" of ").nth(2).and_then(|rest| rest.split(' ').next()).and_then(|total| total.parse().ok()).expect(&message);

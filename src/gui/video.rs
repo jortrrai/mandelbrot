@@ -48,10 +48,12 @@ const MIN_WINDOW: Duration = Duration::from_secs(2);
 const BYTES_PER_PIXEL_UNDER_WAY: u64 = 48;
 
 /// How many frames of `pixels` the job may render at once: at most `MAX_AT_ONCE`, and together at most a third of the memory that is available (on systems
-/// where that is not known, 4)
+/// where that is not known, of 4 GB)
 fn frames_memory_allows(pixels: usize) -> usize {
     let per_frame = (pixels as u64 * BYTES_PER_PIXEL_UNDER_WAY).max(1);
-    let allowed = available_memory().map_or(4, |bytes| usize::try_from(bytes / 3 / per_frame).unwrap_or(MAX_AT_ONCE));
+    //(Where the system does not say, as much as a modest computer has free: 4 GB)
+    let available = available_memory().unwrap_or(4 << 30);
+    let allowed = usize::try_from(available / 3 / per_frame).unwrap_or(MAX_AT_ONCE);
     allowed.clamp(1, MAX_AT_ONCE)
 }
 
@@ -476,7 +478,16 @@ fn limit_at(scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations:
 fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, quality: VideoQuality, playback: Playback, nvenc: bool) -> Option<Child> {
     let (size, rate) = (format!("{width}x{height}"), fps.to_string());
     let mut command = Command::new("ffmpeg");
-    command.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &size, "-r", &rate, "-i", "-"]).args(arguments(quality, playback, nvenc, fps)).arg(path);
+    let mut arguments = arguments(quality, playback, nvenc, fps);
+    if std::path::Path::new(path).extension().is_some_and(|extension| extension == "mkv") {
+        //Options of MP4 files only: a chunk is Matroska, and the joined file gets them (see `chunks::join_chunks`)
+        for option in ["-tag:v", "-movflags"] {
+            if let Some(at) = arguments.iter().position(|argument| argument == option) {
+                arguments.drain(at..at + 2);
+            }
+        }
+    }
+    command.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &size, "-r", &rate, "-i", "-"]).args(arguments).arg(path);
     command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
 }
 
@@ -646,7 +657,7 @@ impl MandelbrotApp {
                         drop(child.stdin.take()); //The end of the frames of the chunk
                         let encoded = child.wait().is_ok_and(|status| status.success());
                         if !complete {
-                            let _ = std::fs::remove_file(chunks::chunk_path(&parts, number, extension(quality)));
+                            let _ = std::fs::remove_file(chunks::chunk_path(&parts, number, chunks::CHUNK_EXTENSION));
                             return Ok(());
                         }
                         if !encoded {
@@ -658,7 +669,7 @@ impl MandelbrotApp {
                     for rgb in ffmpeg_receiver {
                         let number = manifest.chunks_done;
                         if chunk.is_none() {
-                            let path = chunks::chunk_path(&parts, number, extension(quality)).display().to_string();
+                            let path = chunks::chunk_path(&parts, number, chunks::CHUNK_EXTENSION).display().to_string();
                             match start_ffmpeg((width, height), fps, &path, quality, playback, manifest.nvenc) {
                                 Some(child) => chunk = Some((child, 0)),
                                 None => {
@@ -836,7 +847,8 @@ impl MandelbrotApp {
                 let _ = sender.send(format!("Video of the flight paused at {} of {total} frames: {} of {} chunks are kept in {}, and Resume continues it", manifest.first_frame(), manifest.chunks_done, manifest.chunks(), parts.display()));
                 return;
             }
-            if !chunks::join_chunks(&parts, manifest.chunks(), extension(quality), &video) {
+            let hevc = arguments(quality, playback, manifest.nvenc, fps).iter().any(|argument| argument == "hevc_nvenc" || argument == "libx265");
+            if !chunks::join_chunks(&parts, manifest.chunks(), &video, hevc) {
                 let _ = sender.send(format!("Could not join the chunks of the video into {}; they are kept in {}", video.display(), parts.display()));
                 return;
             }
