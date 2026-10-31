@@ -167,7 +167,7 @@ impl Climber {
 /// The quality of the video file: how much of the rendered detail the encoder keeps. The tiers keep a fixed quality (the encoder's quantizer), so a busy view
 /// gets the bits it needs and a calm one stays small. Measured on 60 frames of a detailed 1080p zoom at 60 FPS (the mean error of a color channel, in levels of
 /// 255, on the GPU's encoder with full color): High 3.7, Very High 2.7, Ultra High 1.9, Near Lossless 0.9
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum VideoQuality {
     High,
     VeryHigh,
@@ -219,7 +219,7 @@ impl VideoQuality {
 }
 
 /// The format of the video: its codec, bit depth and color resolution (lossless videos are always FFV1)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Playback {
     /// HEVC (on an NVIDIA GPU's encoder; H.264 on the CPU otherwise) in 10 bits with the full color resolution (4:4:4): the best colors; computers play it
     /// (VLC, most players), phones and TVs do not
@@ -331,7 +331,7 @@ fn length_text(length: Duration) -> String {
 }
 
 /// The flight a video is made of: from where to where, at which pace, and the iteration limits at both ends
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) struct VideoFlight {
     pub(super) from: Camera,
     pub(super) to: Camera,
@@ -348,13 +348,57 @@ pub(super) struct VideoFlight {
     pub(super) palettes: (crate::mandelbrot_set::ColorCycle, crate::mandelbrot_set::ColorCycle),
 }
 
+/// Everything a video is made of: the flight and every setting of the render, taken when the video is started or added to the queue, so later changes of
+/// the controls do not change it
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // The settings of a render as the controls have them
+pub(super) struct VideoSpec {
+    pub(super) flight: VideoFlight,
+    pub(super) width: usize,
+    pub(super) height: usize,
+    pub(super) fps: u32,
+    /// In percent of the flight's speed (exact, also for *Fit to length*)
+    pub(super) speed: f64,
+    pub(super) quality: VideoQuality,
+    pub(super) playback: Playback,
+    pub(super) pngs: bool,
+    pub(super) blend: bool,
+    /// The samples per pixel, adaptive supersampling and the blur preset of saved images
+    pub(super) samples: u8,
+    pub(super) adaptive: bool,
+    pub(super) blur: bool,
+    /// The coloring (an index of `COLORING_FUNCTIONS`), the color channels, and the set (its limit without auto iterations, its smooth coloring)
+    pub(super) coloring_index: usize,
+    #[serde(with = "mapping_text")]
+    pub(super) mapping: crate::coloring::ColorChannelMapping,
+    pub(super) set: crate::mandelbrot_set::MandelbrotSet,
+    pub(super) auto: Option<crate::auto_iterations::AutoIterationSettings>,
+    pub(super) use_gpu: bool,
+    pub(super) fast_gpu: bool,
+}
+
+/// The color channels of a `VideoSpec` in a file as their text ("RGB", "BGR", ...)
+mod mapping_text {
+    use crate::coloring::ColorChannelMapping;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[allow(clippy::trivially_copy_pass_by_ref)] // The signature that `serde(with)` calls
+    pub(super) fn serialize<S: Serializer>(mapping: &ColorChannelMapping, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(mapping)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ColorChannelMapping, D::Error> {
+        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// A video job: its progress (frames written of all) and cancel flag, and the receiver of its final message
 pub(super) struct VideoJob {
     done: Arc<AtomicUsize>,
     /// How many frames render at once, and the CPU use (see `FrameScheduler`)
     pub(super) scheduler: Arc<FrameScheduler>,
     total: usize,
-    cancel: Arc<AtomicBool>,
+    pub(super) cancel: Arc<AtomicBool>,
     started: Instant,
     result: mpsc::Receiver<String>,
 }
@@ -401,37 +445,58 @@ fn write_png(path: &std::path::Path, rgb: &[u8], width: usize, height: usize) ->
 }
 
 impl MandelbrotApp {
-    /// Starts the video of the last flight, see the module
-    #[allow(clippy::too_many_lines)] // The settings of the job, its two writers and its loop over the frames
+    /// What a video of the last flight with the current settings would be (see `VideoSpec`), or why there is none
+    pub(super) fn video_spec(&self) -> Result<VideoSpec, String> {
+        let flight = self.last_flight.clone().ok_or_else(|| String::from("there is no flight yet"))?;
+        let resolution = self.save_size.resolve(self.default_save_resolution(), self.view_resolution())?;
+        let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
+        let speed = self.video_speed_for(path.duration())?;
+        Ok(VideoSpec {
+            flight,
+            width: resolution.width,
+            height: resolution.height,
+            fps: self.video_fps,
+            speed,
+            quality: self.video_quality,
+            playback: self.video_playback,
+            pngs: self.video_pngs,
+            blend: self.video_blend,
+            samples: self.image_supersampling_amount,
+            adaptive: self.adaptive_supersampling,
+            blur: self.image_quality_blur,
+            coloring_index: self.coloring_index,
+            mapping: self.p.color_channel_mapping,
+            set: self.m.clone(),
+            auto: self.auto_iterations.then(|| self.auto_settings.clone()),
+            use_gpu: self.use_gpu,
+            fast_gpu: self.fast_gpu,
+        })
+    }
+
+    /// Renders the video of the last flight with the current settings in the background (see the module)
     pub(super) fn start_video(&mut self) {
-        let Some(flight) = self.last_flight.clone() else { return };
-        let resolution = match self.save_size.resolve(self.default_save_resolution(), self.view_resolution()) {
-            Ok(resolution) => resolution,
-            Err(reason) => {
-                self.log(format!("Could not render the video: {reason}"));
-                return;
-            }
-        };
-        let (width, height, fps, quality, playback, pngs) = (resolution.width, resolution.height, self.video_fps, self.video_quality, self.video_playback, self.video_pngs);
+        match self.video_spec() {
+            Ok(spec) => self.start_video_of(spec),
+            Err(reason) => self.log(format!("Could not render the video: {reason}")),
+        }
+    }
+
+    /// Renders the video `spec` in the background (see the module): a video of the last flight, or one of the queue
+    #[allow(clippy::too_many_lines)] // The settings of the job, its two writers and its loop over the frames
+    pub(super) fn start_video_of(&mut self, spec: VideoSpec) {
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu } = spec;
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
         let thread_scheduler = Arc::clone(&scheduler);
         let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
-        let speed = match self.video_speed_for(path.duration()) {
-            Ok(speed) => speed,
-            Err(reason) => {
-                self.log(format!("Could not render the video: {reason}"));
-                return;
-            }
-        };
         let total = frame_count(path.duration(), fps, speed);
         let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
         let slug: String = flight.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
         let name = format!("video-{stamp}-{slug}");
-        let (m, coloring_function, mapping) = (self.m.clone(), self.coloring_function, self.p.color_channel_mapping);
-        let (samples, adaptive, blur, blend) = (self.image_supersampling_amount, self.adaptive_supersampling.then(rendering::AdaptiveSampling::default), self.image_quality_blur, self.video_blend);
-        let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
-        let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
+        let coloring_function = super::COLORING_FUNCTIONS[coloring_index.min(super::COLORING_FUNCTIONS.len() - 1)].1;
+        let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
+        let auto_settings = auto;
+        let gpu = self.gpu.clone().filter(|_| use_gpu);
         //With a GPU, one more renderer renders whole frames on the GPU alone (see the renderers below)
         let gpu_renderer = gpu.is_some() && self.video_gpu_renderer;
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
@@ -621,8 +686,11 @@ impl MandelbrotApp {
         let Some(job) = &self.video_job else { return };
         ctx.request_repaint_after(Duration::from_millis(200));
         if let Ok(message) = job.result.try_recv() {
+            //A video that was cancelled, stopped or could not start has not finished (for the queue)
+            let finished = !job.cancel.load(Ordering::Relaxed) && !message.starts_with("Could not") && !message.contains("(stopped");
             self.video_job = None;
             self.log(message);
+            self.queue_video_ended(finished);
         }
     }
 
@@ -677,6 +745,7 @@ impl MandelbrotApp {
             self.saved_flights_ui(ui);
             self.video_settings_ui(ui);
         });
+        self.queue_ui(ui);
     }
 
     fn video_settings_ui(&mut self, ui: &mut egui::Ui) {

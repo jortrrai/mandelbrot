@@ -15,7 +15,7 @@ use crate::complex_plane::View;
 const RHO: f64 = 1.42;
 
 /// How fast and how smoothly a flight moves
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Pace {
     Fast,
     Normal,
@@ -36,7 +36,7 @@ pub const CONSTANT_SPEEDS: std::ops::RangeInclusive<f64> = 0.25..=20.0;
 pub const FLIGHT_SPEEDS: std::ops::RangeInclusive<u16> = 10..=400;
 
 /// The way a flight takes from one view to another
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Route {
     /// The shortest path of van Wijk and Nuij: zooming out (only as far as the distance needs) to travel, see the module
     Shortest,
@@ -179,7 +179,7 @@ impl FlightRendering {
 }
 
 /// A view as the path sees it: the center and the width (the scale of the view)
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
     pub x: f64,
     pub y: f64,

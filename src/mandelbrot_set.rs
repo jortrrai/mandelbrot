@@ -13,7 +13,8 @@ use crate::complex::Complex;
 mod avx2;
 
 /// The Mandelbrot set as a computation: the maximum iterations and the orbit radius, with the escape-time iteration of a point and the coloring options of the renderer
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::unsafe_derive_deserialize)] // Plain numbers without invariants (for the render queue); the unsafe code is the vectorized iteration
 pub struct MandelbrotSet {
     /// The most iterations of the escape-time iteration of a point; a point that has not escaped by then counts as inside the set
     pub max_iterations: u32,
@@ -30,7 +31,7 @@ pub struct MandelbrotSet {
 /// Around and around a palette of `PALETTE_LENGTH` steps, `divide` iterations a step and starting `offset` steps into it, or stretched once over the iteration limit.
 /// As a cycle, a point keeps its color whatever the limit and the zoom, so a manual limit and an automatic one give the same image, and a flight does not recolor
 /// what it zooms into.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColorCycle {
     /// Iterations per step of the palette: 1 changes color fastest, more gives broader bands (deep views, whose counts are high and far apart, need more)
     pub divide: f64,

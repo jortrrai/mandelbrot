@@ -24,6 +24,7 @@ mod history;
 mod neighborhood;
 mod pointer;
 mod points;
+mod queue;
 mod render_job;
 mod save_size;
 mod settings;
@@ -203,6 +204,10 @@ pub struct MandelbrotApp {
     saved_flights_loaded: bool,
     selected_flight: Option<usize>,
     flight_name_input: String,
+    /// The render queue (see `queue`): the waiting videos, the one under way, and whether the queue runs
+    video_queue: Vec<video::VideoSpec>,
+    queue_current: Option<video::VideoSpec>,
+    queue_running: bool,
     /// Whether a video with a GPU has a renderer of whole frames on the GPU alone (on; off only for measurements), see `video`
     video_gpu_renderer: bool,
     /// Where videos are written (`saved`)
@@ -379,6 +384,9 @@ impl MandelbrotApp {
             saved_flights_loaded: false,
             selected_flight: None,
             flight_name_input: String::new(),
+            video_queue: Vec::new(),
+            queue_current: None,
+            queue_running: false,
             video_gpu_renderer: true,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
@@ -661,6 +669,7 @@ impl eframe::App for MandelbrotApp {
         self.poll_thumbnails(&ctx);
         self.poll_neighborhood(&ctx);
         self.poll_video(&ctx);
+        self.run_queue();
         self.cycle_colors(&ctx, std::time::Instant::now());
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job

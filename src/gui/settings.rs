@@ -295,6 +295,7 @@ impl MandelbrotApp {
         }
         self.settings_saved = Some(self.settings());
         self.settings_path = path;
+        self.load_queue();
         loaded.is_some_and(|settings| settings != Settings::default()) && self.settings() != self.settings_defaults
     }
 

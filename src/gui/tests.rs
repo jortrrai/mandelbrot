@@ -1966,6 +1966,59 @@ fn a_flight_is_saved_loaded_rendered_and_flown_again_exactly() {
 }
 
 #[test]
+fn the_queue_renders_its_videos_with_their_own_settings_and_survives_a_restart() {
+    //Issue #181
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    let settings = folder.join("config").join("settings.json");
+    app.use_settings_file(Some(settings.clone()));
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_quality) = (48, 32, 1, super::video::VideoQuality::Lossless);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    app.video_fps = 24;
+    app.add_to_queue();
+    app.video_fps = 12;
+    app.add_to_queue();
+    app.video_fps = 60; //Later changes do not change the queued videos
+    let queue_file = folder.join("config").join("video_queue.json");
+    assert!(queue_file.exists(), "the queue is saved");
+    let mut next = manual_app(&Config::sized(64, 48, 50, 4));
+    next.use_settings_file(Some(settings));
+    assert_eq!(next.video_queue.iter().map(|spec| spec.fps).collect::<Vec<_>>(), [24, 12], "and read by the next run");
+    assert!(!next.queue_running, "which waits for Start queue");
+    //Run it
+    app.queue_running = true;
+    let ctx = egui::Context::default();
+    let started = std::time::Instant::now();
+    while app.queue_running || app.video_job.is_some() {
+        assert!(started.elapsed() < Duration::from_secs(120), "the queue did not finish");
+        app.poll_video(&ctx);
+        app.run_queue();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let videos: Vec<&String> = app.log.iter().filter(|line| line.starts_with("Video of the flight")).collect();
+    assert_eq!(videos.len(), 2, "{:?}", app.log);
+    assert!(videos[0].contains("at 24 FPS") && videos[1].contains("at 12 FPS"), "in order, each with its own settings: {videos:?}");
+    assert_eq!(app.log.last().map(String::as_str), Some("The queue is done"));
+    assert!(!queue_file.exists(), "an empty queue leaves no file");
+    //A cancelled video goes back to the front, and the queue stops
+    app.add_to_queue();
+    app.queue_running = true;
+    app.run_queue();
+    assert!(app.video_job.is_some() && app.video_queue.is_empty());
+    app.video_job.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
+    while app.video_job.is_some() {
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!((app.video_queue.len(), app.queue_running), (1, false));
+    assert!(queue_file.exists());
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_video_that_fits_a_length_lasts_exactly_that_long() {
     //Issue #179: 3 seconds at 24 FPS are 72 frame intervals, with the frames at both ends 73 frames, whatever the flight takes
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
