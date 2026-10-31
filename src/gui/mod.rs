@@ -32,6 +32,7 @@ mod save_size;
 mod sequence;
 mod settings;
 mod sharing;
+mod songs;
 pub use settings::settings_path;
 mod status;
 mod temporal;
@@ -228,6 +229,10 @@ pub struct MandelbrotApp {
     /// The keyframes of the sequence being made, and the times of its transitions as typed (see `sequence`)
     sequence_keyframes: Vec<sequence::Keyframe>,
     sequence_seconds: Vec<String>,
+    /// The song to fit a video to, the search under way, and the recordings found (see `songs`)
+    song_input: String,
+    song_search: Option<std::sync::mpsc::Receiver<Result<Vec<songs::Recording>, String>>>,
+    song_results: Vec<songs::Recording>,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
@@ -414,6 +419,9 @@ impl MandelbrotApp {
             depth_center: None,
             sequence_keyframes: Vec::new(),
             sequence_seconds: Vec::new(),
+            song_input: String::new(),
+            song_search: None,
+            song_results: Vec::new(),
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
@@ -697,6 +705,7 @@ impl eframe::App for MandelbrotApp {
         self.poll_video(&ctx);
         self.run_queue();
         self.open_dropped_images(&ctx);
+        self.poll_song_search(&ctx);
         self.cycle_colors(&ctx, std::time::Instant::now());
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job

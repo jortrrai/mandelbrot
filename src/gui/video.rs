@@ -934,6 +934,7 @@ impl MandelbrotApp {
                 }
             });
         });
+        self.song_ui(ui);
         ui.horizontal(|ui| {
             ui.label("Quality:");
             egui::ComboBox::from_id_salt("video_quality").selected_text(self.video_quality.name()).show_ui(ui, |ui| {
