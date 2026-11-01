@@ -11,6 +11,7 @@ use crate::points_of_interest::{self, Coloring, PointOfInterest};
 
 /// The folder that *Open image* starts in: the user's home folder, if it is known. (Not the relative folder `saved`: the desktop portal of Linux only takes an
 /// absolute folder that exists, and Jort's file chooser refused to open with it)
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub(super) fn home_folder() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from).filter(|folder| folder.is_absolute() && folder.is_dir())
 }
@@ -88,6 +89,8 @@ impl MandelbrotApp {
     /// *Copy view*, and the field to paste a view (or the path of an image) into
     pub(super) fn sharing_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            //(Not in the Android app, which has no file chooser of rfd: views go there as text, with Copy view and Go to it)
+            #[cfg(not(target_os = "android"))]
             if ui.button("Open image...").on_hover_text("Goes to the view of an image saved by this program (or a PNG frame of one of its videos), with its colors: its view is in the image").clicked() {
                 //(The system's file chooser, modal: the window waits for it; renders go on in the background)
                 let mut dialog = rfd::FileDialog::new().set_title("Open an image saved by Mandelbrot").add_filter("PNG image", &["png"]);

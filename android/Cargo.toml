@@ -1,0 +1,30 @@
+[package]
+name = "mandelbrot-android"
+version = "0.4.0"
+edition = "2021"
+description = "The Mandelbrot app on Android (issue #219): the same app as the desktop window, built as a native activity"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+mandelbrot = { path = ".." }
+winit = { version = "0.30", features = ["android-native-activity"] }
+
+# For cargo-apk (`cargo apk build -p mandelbrot-android --release`), once the Android SDK and NDK are installed (their license is Jort's to accept)
+[package.metadata.android]
+package = "nl.jortrr.mandelbrot"
+apk_name = "mandelbrot"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "Mandelbrot"
+
+[package.metadata.android.application.activity]
+orientation = "unspecified"

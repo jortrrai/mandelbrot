@@ -26,13 +26,24 @@ naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 cpu-time = "1"
-ureq = "2"
-# The system's file chooser for Open image (on Linux through the desktop portal, so it needs no GTK and works on Wayland, where dropped files never arrive)
+
+# Not on Android (issue #219): the system's file chooser for Open image (on Linux through the desktop portal, so it needs no GTK and works on Wayland, where
+# dropped files never arrive), and the web requests of the song search
+[target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.17"
+ureq = "2"
+
+# The Android app: eframe on Android's native activity
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "android-native-activity"] }
+winit = { version = "0.30", features = ["android-native-activity"] }
 
 # Lowering the priority of the CPU workers of videos, so the threads that feed the GPU get a core first (Linux)
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[workspace]
+members = [".", "android"]
 
 [profile.release]
 lto = "fat"
