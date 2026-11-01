@@ -21,6 +21,7 @@ mod cli;
 pub use cli::command_line;
 mod cycle;
 mod depth;
+mod dive_keyframes;
 mod export;
 mod fit;
 mod flight;
@@ -208,6 +209,8 @@ pub struct MandelbrotApp {
     video_blend: bool,
     /// Motion blur of videos: the shutter angle in degrees (see `video::sample_times`)
     video_shutter: f64,
+    /// Whether dives into a fixed center are composed from keyframe images (see `dive_keyframes`)
+    video_keyframe_dives: bool,
     /// A fixed number of frames a video renders at once, for measurements (the window always lets the job choose, see `video::FrameScheduler`)
     video_at_once_fixed: Option<usize>,
     /// The saved flights (see `flight_files`): their folder (`flights`), the flights read from it (once the controls are first shown), the one chosen in the
@@ -431,6 +434,7 @@ impl MandelbrotApp {
             video_pngs: false,
             video_blend: false,
             video_shutter: 0.0,
+            video_keyframe_dives: false,
             video_at_once_fixed: None,
             flights_folder: std::path::PathBuf::from("flights"),
             saved_flights: Vec::new(),

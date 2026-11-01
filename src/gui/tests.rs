@@ -3029,6 +3029,10 @@ fn video_throughput_of_a_manifest() {
         let numbers: Vec<usize> = size.split_whitespace().map(|number| number.parse().unwrap()).collect();
         (spec.width, spec.height, spec.samples) = (numbers[0], numbers[1], u8::try_from(numbers[2]).unwrap());
     }
+    //MANDELBROT_DIVES=1: a dive composed from keyframe images (#209)
+    if let Ok(dives) = std::env::var("MANDELBROT_DIVES") {
+        spec.keyframe_dives = dives == "1";
+    }
     //MANDELBROT_BLUR=1: the blurred quality (N x + blur)
     if let Ok(blur) = std::env::var("MANDELBROT_BLUR") {
         spec.blur = blur == "1";

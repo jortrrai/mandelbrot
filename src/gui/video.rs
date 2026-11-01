@@ -354,6 +354,27 @@ pub(super) fn sample_times(samples: u8, time: Duration, interval: Duration, shut
     }).collect()
 }
 
+/// The moments a frame of a dive composed from keyframes averages with motion blur (composing is cheap, see `dive_keyframes`)
+const DIVE_MOMENTS: u8 = 8;
+
+/// The average of the colors of `frames` (all the same size)
+fn average_frames(frames: &[Vec<crate::coloring::TrueColor>]) -> Vec<crate::coloring::TrueColor> {
+    if frames.len() == 1 {
+        return frames[0].clone();
+    }
+    let count = frames.len() as f32;
+    (0..frames[0].len()).map(|index| {
+        let mut sum = [0.0_f32; 3];
+        for frame in frames {
+            let color = frame[index];
+            sum[0] += f32::from(color.red);
+            sum[1] += f32::from(color.green);
+            sum[2] += f32::from(color.blue);
+        }
+        crate::coloring::TrueColor::new((sum[0] / count).round() as u8, (sum[1] / count).round() as u8, (sum[2] / count).round() as u8)
+    }).collect()
+}
+
 /// The shutters of the *Motion blur* list: off, then quarter to whole frames
 pub(super) const SHUTTERS: [f64; 5] = [0.0, 90.0, 180.0, 270.0, 360.0];
 
@@ -449,6 +470,9 @@ pub(super) struct VideoSpec {
     /// Motion blur: the shutter angle in degrees (0: sharp frames, 180: the shutter of film), see `sample_times`
     #[serde(default)]
     pub(super) shutter: f64,
+    /// Whether a dive into a fixed center is composed from keyframe images (see `dive_keyframes`, issue #209)
+    #[serde(default)]
+    pub(super) keyframe_dives: bool,
 }
 
 /// The name of a new video of `flight` in `folder` (without extension): the time and the name of the place, with a number when a video of that name (or its
@@ -574,6 +598,7 @@ impl MandelbrotApp {
             output: None,
             music,
             shutter: self.video_shutter,
+            keyframe_dives: self.video_keyframe_dives,
         })
     }
 
@@ -595,7 +620,7 @@ impl MandelbrotApp {
         let job_name = name.clone();
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music, shutter } = spec;
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music, shutter, keyframe_dives } = spec;
         let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
@@ -616,7 +641,17 @@ impl MandelbrotApp {
         let auto_settings = auto;
         let gpu = self.gpu.clone().filter(|_| use_gpu);
         //With a GPU, one more renderer renders whole frames on the GPU alone (see the renderers below)
-        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer;
+        //A dive into a fixed center with the same colors all the way, at most 4K: composed from keyframe images (see `dive_keyframes`)
+        let dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1)
+            .then(|| super::dive_keyframes::DivePlan::of((0..total).map(|frame| clock.time(frame)), |time| {
+                let camera = path.camera_at(time);
+                ((camera.x, camera.y), camera.scale)
+            }))
+            .flatten();
+        if keyframe_dives && dive.is_none() {
+            self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
+        }
+        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none();
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
         let (sender, result) = mpsc::channel();
@@ -752,6 +787,28 @@ impl MandelbrotApp {
             //GPU-only renderer, say) stay few
             let written = AtomicUsize::new(rendered);
             let ahead = most_at_once * 2 + 2;
+            //A dive: its keyframe images first, then every frame is composed from them (see `dive_keyframes`)
+            let keyframes = match dive {
+                Some(plan) => {
+                    let set_at = |scale: f64| {
+                        let mut set = m.clone();
+                        set.palette = flight.palettes.0;
+                        if let Some(settings) = &auto_settings {
+                            set.max_iterations = limit_at(scale, &flight, settings);
+                        }
+                        set
+                    };
+                    match super::dive_keyframes::DiveKeyframes::render(plan, (width, height), samples, adaptive, coloring_function, set_at, gpu.as_deref(), fast_gpu, &thread_cancel, |_, _| {}) {
+                        Some(keyframes) => Some(keyframes),
+                        None => {
+                            let _ = sender.send(format!("Video of the flight paused before its first chunk of {} frames was finished: no frames are kept yet, and Resume starts it again from the beginning with the same settings", manifest.chunk_frames));
+                            return;
+                        }
+                    }
+                }
+                None => None,
+            };
+            let keyframes = &keyframes;
             std::thread::scope(|scope| {
                 //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
                 let (next_ref, steering_cancel) = (&next, &thread_cancel);
@@ -806,6 +863,22 @@ impl MandelbrotApp {
                             let camera = path.camera_at(time);
                             plane.set_view(&camera.view());
                             plane.set_rotation(flight.rotation_at(path, time));
+                            //A dive: the frame composed from its keyframe (with motion blur: from the moments of its shutter)
+                            if let Some(keyframes) = keyframes {
+                                let moments = if shutter > 0.0 {
+                                    let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
+                                    sample_times(DIVE_MOMENTS, time, interval, shutter, path.duration())
+                                } else {
+                                    vec![time]
+                                };
+                                let composed: Vec<Vec<crate::coloring::TrueColor>> = moments.iter().map(|moment| keyframes.compose(path.camera_at(*moment).scale, flight.rotation_at(path, *moment))).collect();
+                                let colors = average_frames(&composed);
+                                scheduler.finish_frame(true);
+                                if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
                             if let Some(limit) = path.limit_at(time) {
                                 m.max_iterations = limit; //The limits of the keyframes
                             } else if let Some(settings) = auto_settings {
@@ -1144,6 +1217,7 @@ impl MandelbrotApp {
                     ui.selectable_value(&mut self.video_shutter, shutter, shutter_text(shutter));
                 }
             }).response.on_hover_text("Motion blur: every sample of a pixel is taken at its own moment while the shutter is open, as a film camera does, so motion blurs along its direction and fine detail shimmers less, at no extra cost (the same samples). 180° is the shutter of film; more is smoother and softer at the edges of a fast zoom, whose center stays sharp. Needs 2 samples or more, without Blend frames");
+            ui.checkbox(&mut self.video_keyframe_dives, "Fast dives").on_hover_text("A dive into a fixed center (the same colors all the way, at most 4K, without Blend frames) is rendered as one large image per doubling of the zoom, and every frame is composed from the image of its depth: many times faster, a slightly different picture (each frame averages 1 to 4 keyframe pixels per pixel). Other flights render frame by frame");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
         });
         ui.horizontal(|ui| {
