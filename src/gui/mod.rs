@@ -28,6 +28,7 @@ mod flight;
 mod flight_files;
 mod flight_job;
 mod history;
+mod julia;
 mod neighborhood;
 mod pointer;
 mod points;
@@ -237,6 +238,11 @@ pub struct MandelbrotApp {
     /// Whether the depth slider is being dragged, and whether the mouse keeps the center of the view (see `depth`)
     depth_dragging: bool,
     lock_center: bool,
+    /// Whether the orbit of the point under the mouse is drawn, and the Julia map shown, its pinned point and its texture (see `julia`, issue #202)
+    show_orbit: bool,
+    show_julia: bool,
+    julia_pinned: Option<(f64, f64)>,
+    julia_map: Option<(julia::MapKey, egui::TextureHandle)>,
     /// Whether the mini-map shows in the Current view box, and its texture, the colors it was rendered with and its plane (see `status::minimap_ui`)
     show_minimap: bool,
     minimap: Option<(status::MinimapColors, egui::TextureHandle, ComplexPlane)>,
@@ -450,6 +456,10 @@ impl MandelbrotApp {
             confirm_delete: None,
             shared_view_input: String::new(),
             depth_dragging: false,
+            show_orbit: false,
+            show_julia: false,
+            julia_pinned: None,
+            julia_map: None,
             show_minimap: false,
             minimap: None,
             rotation_in_degrees: true,
@@ -656,6 +666,7 @@ impl MandelbrotApp {
         if self.show_points {
             points::draw_markers(&ui.painter_at(rect), &points::marker_positions(&self.points, self.displayed_plane(), rect));
         }
+        self.julia_overlays(ui, rect);
         self.handle_image_pointer(ui, &response, size);
         available
     }

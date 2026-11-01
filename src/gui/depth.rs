@@ -58,6 +58,17 @@ impl MandelbrotApp {
         });
     }
 
+    /// *Show orbit* and *Julia map* (issue #202, both off at first)
+    pub(super) fn julia_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.show_orbit, "Show orbit").on_hover_text("Draws the orbit of the point under the mouse over the image: 0, c, c² + c, …, the path whose escape (or not) colors that point");
+            ui.checkbox(&mut self.show_julia, "Julia map").on_hover_text("Shows the Julia set of the point under the mouse in the top right of the image, live as the mouse moves; a middle click pins the point (and unpins it)");
+            if self.julia_pinned.is_some() && ui.small_button("Unpin").clicked() {
+                self.julia_pinned = None;
+            }
+        });
+    }
+
     /// The depth slider and *Lock center*
     pub(super) fn depth_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {

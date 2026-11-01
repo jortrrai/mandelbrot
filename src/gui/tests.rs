@@ -2896,6 +2896,36 @@ fn the_youtube_preset_sets_4k60_at_32x_with_motion_blur() {
 }
 
 #[test]
+fn the_julia_map_of_a_pinned_point_is_drawn_in_the_top_right_and_both_are_off_at_first() {
+    //Issue #202
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    assert!(!app.show_orbit && !app.show_julia);
+    let ctx = egui::Context::default();
+    let draw = |app: &mut MandelbrotApp| {
+        let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() }, |ui| {
+            app.julia_overlays(ui, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
+        });
+        let id = app.julia_map.as_ref().map(|(_, texture)| texture.id());
+        let maps: Vec<egui::Rect> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Mesh(mesh) if Some(mesh.texture_id) == id => Some(mesh.calc_bounds()),
+            _ => None,
+        }).collect();
+        output.drop_without_applying_deltas();
+        maps
+    };
+    assert!(draw(&mut app).is_empty() && app.julia_map.is_none(), "off: nothing");
+    app.show_julia = true;
+    app.julia_pinned = Some((-0.8, 0.156));
+    let maps = draw(&mut app);
+    assert_eq!(maps.len(), 1, "the map of the pinned point");
+    assert!(maps[0].max.x > 700.0 && maps[0].min.y < 20.0, "in the top right: {:?}", maps[0]);
+    let key = app.julia_map.as_ref().map(|(key, _)| *key);
+    let _ = draw(&mut app);
+    assert_eq!(app.julia_map.as_ref().map(|(key, _)| *key), key, "the same point: not rendered again");
+}
+
+#[test]
 fn a_right_click_does_not_move_a_locked_center() {
     //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
     let config = Config::sized(64, 48, 50, 32);
