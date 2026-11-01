@@ -111,7 +111,8 @@ pub(super) fn join_chunks(parts: &Path, chunks: usize, video: &Path, hevc: bool)
         .status().is_ok_and(|status| status.success())
 }
 
-/// The videos in `saved` that were stopped before they were finished: their names (without `.parts`) and manifests, sorted by name
+/// The videos in `saved` that were stopped before they were finished (or whose chunks could not be joined): their names (without `.parts`) and manifests,
+/// the newest first (a name starts with the time the video was started)
 pub(super) fn unfinished(saved: &Path) -> Vec<(String, Manifest)> {
     let Ok(entries) = std::fs::read_dir(saved) else { return Vec::new() };
     let mut videos: Vec<(String, Manifest)> = entries.filter_map(|entry| {
@@ -119,6 +120,6 @@ pub(super) fn unfinished(saved: &Path) -> Vec<(String, Manifest)> {
         let name = path.file_name()?.to_str()?.strip_suffix(".parts")?.to_string();
         Some((name, read_manifest(&path)?))
     }).collect();
-    videos.sort_by(|a, b| a.0.cmp(&b.0));
+    videos.sort_by(|a, b| b.0.cmp(&a.0));
     videos
 }

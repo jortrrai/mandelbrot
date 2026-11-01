@@ -2145,6 +2145,42 @@ fn a_video_in_a_relative_folder_like_saved_joins_its_chunks() {
 }
 
 #[test]
+fn the_unfinished_videos_are_listed_newest_first_and_a_rendered_one_offers_to_join() {
+    //Found by Jort in the review of review-4: he paused a video and pressed Resume, which did nothing. The list was sorted by name, oldest first, so the top row
+    //was an older video of the same place, all of whose frames were rendered and whose join had failed (the join bug): Resume tried the join again and failed
+    let (mut app, folder) = chunked_video_app(false);
+    let saved = folder.join("saved");
+    let spec = app.video_spec().unwrap();
+    for (name, done) in [("video-2026-11-01_20-24-13-place", 2), ("video-2026-11-01_20-43-18-place", 0)] {
+        let parts = super::chunks::parts_folder(&saved, name);
+        std::fs::create_dir_all(&parts).unwrap();
+        let mut manifest = super::chunks::Manifest::new(spec.clone(), 10, 5, false);
+        manifest.chunks_done = done;
+        super::chunks::write_manifest(&parts, &manifest).unwrap();
+    }
+    let names: Vec<String> = super::chunks::unfinished(&saved).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["video-2026-11-01_20-43-18-place", "video-2026-11-01_20-24-13-place"], "the newest first");
+    app.unfinished_videos = None;
+    let texts = controls_texts(&mut app).join("\n");
+    assert!(texts.contains("Unfinished: video-2026-11-01_20-43-18-place (0 of 10 frames)") && texts.contains("Rendered, not joined: video-2026-11-01_20-24-13-place (all 10 frames)") && texts.contains("Join"), "{texts}");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_video_paused_before_its_first_chunk_says_that_nothing_is_kept_yet() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let (mut app, folder) = chunked_video_app(false);
+    app.video_chunk_frames = Some(100_000);
+    app.start_video();
+    app.video_job.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
+    let message = wait_for_video(&mut app);
+    assert!(message.contains("paused before its first chunk") && message.contains("no frames are kept yet"), "{message}");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_resumed_blended_video_warms_up_its_blend_and_has_every_frame() {
     if !ffmpeg_available() {
         return;
