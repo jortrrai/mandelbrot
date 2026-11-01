@@ -2883,6 +2883,19 @@ fn the_mini_map_is_off_at_first_and_shows_the_whole_set_with_the_view_on_it() {
 }
 
 #[test]
+fn the_youtube_preset_sets_4k60_at_32x_with_motion_blur() {
+    //Issue #213 (the quality from the measurement of #211)
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.use_youtube_preset();
+    assert_eq!(app.save_size.resolve_for_video(app.default_save_resolution(), app.view_resolution()), Ok(crate::resolution::Resolution::new(3840, 2160)));
+    assert_eq!((app.video_fps, app.image_supersampling_amount, app.image_quality_blur, app.adaptive_supersampling), (60, 32, false, true));
+    assert_eq!((app.video_shutter, app.video_blend), (180.0, false));
+    assert_eq!((app.video_quality, app.video_playback), (super::video::VideoQuality::VeryHigh, super::video::Playback::HighQuality));
+    assert!(controls_texts(&mut app).iter().any(|text| text == "YouTube 4K60"));
+}
+
+#[test]
 fn a_right_click_does_not_move_a_locked_center() {
     //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
     let config = Config::sized(64, 48, 50, 32);

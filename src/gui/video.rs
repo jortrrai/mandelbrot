@@ -1107,7 +1107,24 @@ impl MandelbrotApp {
         self.queue_ui(ui);
     }
 
+    /// Sets the video controls for a YouTube upload in 4K at 60 FPS (issue #213): the cheapest quality whose result after YouTube's re-encode measured as
+    /// good as 64x (#211: 32x adaptive), motion blur of film, HEVC in 10 bits that YouTube takes in full, the GPU on. Only these controls change
+    pub(super) fn use_youtube_preset(&mut self) {
+        self.save_size.choice = super::save_size::SaveSizeChoice::Preset(String::from("4K UHD"));
+        self.save_size.portrait = false;
+        (self.video_fps, self.image_supersampling_amount, self.image_quality_blur, self.adaptive_supersampling) = (60, 32, false, true);
+        (self.video_shutter, self.video_blend, self.video_pngs) = (180.0, false, false);
+        (self.video_quality, self.video_playback) = (VideoQuality::VeryHigh, Playback::HighQuality);
+        (self.use_gpu, self.fast_gpu) = (true, true);
+        self.log("Set the video for YouTube: 4K UHD at 60 FPS, 32x adaptive, motion blur 180°, High quality (HEVC, 10 bits) Very High, the GPU on");
+    }
+
     fn video_settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("YouTube 4K60").on_hover_text("Sets the video for a YouTube upload: 4K at 60 FPS, 32x adaptive (after YouTube's own compression it measured as good as 64x in 60% of the time), motion blur 180°, High quality format, the GPU on. Change anything afterwards").clicked() {
+                self.use_youtube_preset();
+            }
+        });
         ui.horizontal(|ui| {
             let name = self.last_flight.as_ref().map_or_else(|| String::from("no flight yet"), |flight| flight.name.clone());
             if ui.add_enabled(self.last_flight.is_some(), egui::Button::new("Render video of the last flight")).on_hover_text(format!("The last flight ({name}) as a video: every frame rendered offline at the saved image size and quality, at a fixed frame rate, written as PNG frames to saved/ (and as an .mp4 when ffmpeg is installed)")).clicked() {
