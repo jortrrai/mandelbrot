@@ -1,7 +1,8 @@
 //! Sharing a view (issues #183 and #184): *Copy view* puts the current view on the clipboard as one line of text (a point of interest file, see
 //! `points_of_interest`: the center, the scale, the iterations and the appearance), for a video description or a message; pasting such a text, or the
-//! text of a whole place file, goes there with its appearance. An image saved by this program (or a frame of a video with PNG frames) dropped on the window
-//! goes to its view too, read from its metadata (see `image_metadata`); older images have their view and iterations in theirs.
+//! text of a whole place file, goes there with its appearance. An image saved by this program (or a frame of a video with PNG frames) opened with *Open image*
+//! goes to its view too, read from its metadata (see `image_metadata`); older images have their view and iterations in theirs. Dropping an image on the
+//! window does the same where the system passes dropped files on (not on Wayland, where winit 0.30 never delivers them).
 
 use eframe::egui;
 
@@ -81,11 +82,17 @@ impl MandelbrotApp {
     /// *Copy view*, and the field to paste a view (or the path of an image) into
     pub(super) fn sharing_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if ui.button("Open image...").on_hover_text("Goes to the view of an image saved by this program (or a PNG frame of one of its videos), with its colors: its view is in the image").clicked() {
+                //(The system's file chooser, modal: the window waits for it; renders go on in the background)
+                if let Some(path) = rfd::FileDialog::new().set_title("Open an image saved by Mandelbrot").add_filter("PNG image", &["png"]).set_directory(&self.video_folder).pick_file() {
+                    self.open_image(&path);
+                }
+            }
             if ui.button("Copy view").on_hover_text("Copies the current view (center, zoom, iterations, colors) to the clipboard as one line of text, to share it, for example in a video description; pasting it below goes there").clicked() {
                 self.copy_view(ui.ctx());
             }
             let response = ui.add(egui::TextEdit::singleline(&mut self.shared_view_input).desired_width(180.0).hint_text("paste a view or an image path"))
-                .on_hover_text("A view copied with Copy view, the text of a place file, or the path of an image saved by this program; images can also be dropped on the window");
+                .on_hover_text("A view copied with Copy view, the text of a place file, or the path of an image saved by this program");
             let entered = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if (ui.add_enabled(!self.shared_view_input.trim().is_empty(), egui::Button::new("Go to it")).clicked() || entered) && !self.shared_view_input.trim().is_empty() {
                 let text = std::mem::take(&mut self.shared_view_input);

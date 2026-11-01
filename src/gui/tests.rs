@@ -2680,6 +2680,17 @@ fn a_flight_whose_colors_change_arrives_with_the_color_controls_on_the_screen() 
 }
 
 #[test]
+fn open_image_is_a_button_next_to_copy_view() {
+    //Asked by Jort in the review of review-4: dropping an image on the window did nothing (his window runs on Wayland, where winit 0.30 delivers no dropped
+    //files), so Open image is the way to go to an image's view; it opens the image with `open_image`, which the tests of the image metadata cover
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    let texts = controls_texts(&mut app);
+    let open = texts.iter().position(|text| text == "Open image...").expect("the button is there");
+    assert_eq!(texts.get(open + 1).map(String::as_str), Some("Copy view"), "{texts:?}");
+}
+
+#[test]
 fn a_right_click_does_not_move_a_locked_center() {
     //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
     let config = Config::sized(64, 48, 50, 32);
