@@ -29,7 +29,7 @@ pub(super) fn zoom_around(plane: &mut ComplexPlane, anchor: &Complex, factor: f6
 impl MandelbrotApp {
     /// A frame of a two-finger gesture: its middle at the pixel `center` (x, y) of the image, the fingers spread by `zoom` (above 1: apart, zooming in),
     /// turned by `twist` radians (clockwise on the screen) and moved by `moved` pixels. The point between the fingers stays under them while zooming
-    pub(super) fn touch_gesture(&mut self, center: &(f32, f32), zoom: f32, twist: f32, moved: egui::Vec2) {
+    pub(super) fn touch_gesture(&mut self, center: (f32, f32), zoom: f32, twist: f32, moved: egui::Vec2) {
         let mut changed = self.c.clone();
         if (zoom - 1.0).abs() > 1e-4 && zoom > 0.0 {
             let factor = 1.0 / f64::from(zoom);
@@ -77,7 +77,7 @@ impl MandelbrotApp {
         let touch = ui.input(egui::InputState::multi_touch).filter(|touch| touch.num_touches >= 2 && response.rect.contains(touch.center_pos));
         if let Some(touch) = touch {
             self.gesture_active = true;
-            self.touch_gesture(&to_buffer(touch.center_pos), touch.zoom_delta, touch.rotation_delta, touch.translation_delta / (size.x / width));
+            self.touch_gesture(to_buffer(touch.center_pos), touch.zoom_delta, touch.rotation_delta, touch.translation_delta / (size.x / width));
             return;
         }
         let dragging = response.dragged_by(egui::PointerButton::Primary);

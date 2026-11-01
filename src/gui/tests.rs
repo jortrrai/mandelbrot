@@ -2932,15 +2932,15 @@ fn two_fingers_zoom_turn_and_move_the_view() {
     let mut app = manual_app(&config);
     let (scale, center) = (app.c.get_scale(), app.c.center());
     //Spread apart around the middle: zooms in around it
-    app.touch_gesture(&(32.0, 24.0), 2.0, 0.0, egui::Vec2::ZERO);
+    app.touch_gesture((32.0, 24.0), 2.0, 0.0, egui::Vec2::ZERO);
     assert!((app.c.get_scale() - scale / 2.0).abs() < 1e-12, "{}", app.c.get_scale());
     assert!((app.c.center().x - center.x).abs() < 1e-9 && (app.c.center().y - center.y).abs() < 1e-9, "around the middle");
     //Twisted clockwise by a quarter: the image turns clockwise (a rotation of -90°)
-    app.touch_gesture(&(32.0, 24.0), 1.0, std::f32::consts::FRAC_PI_2, egui::Vec2::ZERO);
+    app.touch_gesture((32.0, 24.0), 1.0, std::f32::consts::FRAC_PI_2, egui::Vec2::ZERO);
     assert!((app.c.rotation() + std::f64::consts::FRAC_PI_2).abs() < 1e-6, "{}", app.c.rotation());
     //Moved: the view moves along
     let before = app.c.center();
-    app.touch_gesture(&(32.0, 24.0), 1.0, 0.0, egui::vec2(10.0, 0.0));
+    app.touch_gesture((32.0, 24.0), 1.0, 0.0, egui::vec2(10.0, 0.0));
     assert!((app.c.center().x - before.x).abs() + (app.c.center().y - before.y).abs() > 0.0);
     //And through egui: two touches moving apart on the image zoom in
     let ctx = egui::Context::default();
