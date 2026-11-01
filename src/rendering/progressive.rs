@@ -57,12 +57,14 @@ pub struct Render<'a> {
     sample_offset: u8,
     /// The row of the plane where the rendered rows start (see `rows_from`)
     first_row: usize,
+    /// The view of every sample, if they differ (see `sample_planes`)
+    sample_planes: Option<&'a [ComplexPlane]>,
 }
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(f64, f64) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0, sample_offset: 0, first_row: 0 }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0, sample_offset: 0, first_row: 0, sample_planes: None }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -193,6 +195,15 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// Takes sample `k` of every pixel in `planes[k]` instead of the plane of the render (each the same size): views of the camera at other moments around the
+    /// frame, for motion blur in videos (issue #210). The jitter of a sample stays the same, so with every plane the plane of the render, the image is the
+    /// image without them. A render of its own (not with `resume`, `only`, previews, `rows_from` or `colors_only`)
+    #[must_use]
+    pub const fn sample_planes(mut self, planes: &'a [ComplexPlane]) -> Self {
+        self.sample_planes = Some(planes);
+        self
+    }
+
     /// Like `colors_only`, with sample `sample` of every pixel (its jitter, see `jitter`) instead of the first: frames that are blended over time take another
     /// sample each, so the blend comes close to supersampling (see `gui::temporal`)
     #[must_use]
@@ -226,7 +237,7 @@ impl<'a> Render<'a> {
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     #[allow(clippy::too_many_lines)] // The setup of a render (its state, previews, recolor) and its loop over the layers
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset, first_row } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset, first_row, sample_planes } = self;
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
         //(The samples remember whether the fast math was asked for, see `SampleKey`)
         let fast_key = fast_gpu && gpu.is_some();
@@ -267,6 +278,7 @@ impl<'a> Render<'a> {
         let empty = prepared == Prepared::Empty;
         let mut own_state = None;
         debug_assert!(first_row == 0 || (state.is_none() && exposed.is_none() && preview.is_none() && adaptive.is_none() && keep_samples), "a strip is a plain render of its rows");
+        debug_assert!(sample_planes.is_none() || (state.is_none() && exposed.is_none() && preview.is_none() && first_row == 0 && keep_samples), "samples in their own views make a render of its own");
         let state: &mut SampleState = state.unwrap_or_else(|| {
             let mut strip = SampleState::for_one_render(width, height, region, base, adaptive.is_some());
             if first_row > 0 {
@@ -334,7 +346,7 @@ impl<'a> Render<'a> {
                 //dispatches, without waiting at the end of every pass (#212: the GPU waited at the end of each of the 62 adaptive passes of a 64x frame)
                 if let (Some((gpu, _)), Some(marked)) = (gpu.filter(|_| cpu_threads == 0 && !track && region.is_none()), marked_rows.as_deref()) {
                     let samples = (sample, supersampling_amount, sample_offset);
-                    let completed = stream_samples(&anchor, m, origin, samples, marked, width, state, &mut colors, &color_of, cancel, pixels_done, (gpu, gpu_samples, math));
+                    let completed = stream_samples(&anchor, sample_planes, m, origin, samples, marked, width, state, &mut colors, &color_of, cancel, pixels_done, (gpu, gpu_samples, math));
                     if completed {
                         on_pass(&colors, supersampling_amount);
                     }
@@ -351,7 +363,9 @@ impl<'a> Render<'a> {
             let pass_gpu = gpu.filter(|_| cpu_threads == 0 || expected.is_none_or(|expected| expected > GPU_WORTHWHILE))
                 .map(|(gpu, join_after)| (gpu, if expected.is_some() { Duration::ZERO } else { join_after }, gpu_samples, math));
             let (pass_started, gpu_before) = (Instant::now(), gpu_samples.load(Ordering::Relaxed));
-            let processed = if eligible > 0 { sample_pass(&anchor, m, sample, sample.wrapping_add(sample_offset), track, state, &mut colors, mask.as_deref(), marked_rows.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
+            //(The view of this sample, with motion blur)
+            let anchor = sample_planes.and_then(|planes| planes.get(index)).unwrap_or(&anchor);
+            let processed = if eligible > 0 { sample_pass(anchor, m, sample, sample.wrapping_add(sample_offset), track, state, &mut colors, mask.as_deref(), marked_rows.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
             //The time per sample of the CPU threads alone: the samples of the GPU do not count, so a pass that the GPU made short does not keep it out of the next one
             let on_cpu = processed.saturating_sub(gpu_samples.load(Ordering::Relaxed).saturating_sub(gpu_before));
             if on_cpu > 0 {
@@ -380,13 +394,15 @@ impl<'a> Render<'a> {
 /// averages of all their samples, as after the last pass of `sample_pass`: the sums are integers, so the order of the samples does not change them. If the GPU
 /// fails, the threads compute the samples that are left. Returns whether it completed.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The parts of `Render::run` that the samples need
-fn stream_samples(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), (first, samples, offset): (u8, u8, u8), marked: &[Vec<usize>], width: usize, state: &mut SampleState, colors: &mut [TrueColor],
+fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &MandelbrotSet, origin: (isize, isize), (first, samples, offset): (u8, u8, u8), marked: &[Vec<usize>], width: usize, state: &mut SampleState, colors: &mut [TrueColor],
     color_of: &(impl Fn(f64) -> TrueColor + Sync), cancel: &AtomicBool, pixels_done: &AtomicUsize, (gpu, gpu_samples, math): (&GpuIterator, &AtomicUsize, GpuMath)) -> bool {
     //The marked pixels as (x, y), and the batches of (sample, the range of the pixels)
     let pixels: Vec<(usize, usize)> = marked.iter().enumerate().flat_map(|(y, xs)| xs.iter().map(move |x| (*x, y))).collect();
     let count = pixels.len();
     let batches: Vec<StreamedBatch> = (first..samples).flat_map(|sample| (0..count).step_by(BATCH).map(move |start| (sample, start..(start + BATCH).min(count)))).collect();
     let fast = math != GpuMath::Exact && width <= MAX_PIXEL && marked.len() <= MAX_PIXEL;
+    //The view of sample `sample` (see `Render::sample_planes`)
+    let plane_of = |sample: u8| planes.and_then(|planes| planes.get(usize::from(sample))).unwrap_or(c);
     let sums = Mutex::new(&mut state.sums);
     let (outcomes_sender, outcomes) = std::sync::mpsc::sync_channel::<(StreamedBatch, Option<GpuOutcomes>)>(2);
     let outcomes = Mutex::new(outcomes);
@@ -403,9 +419,9 @@ fn stream_samples(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), (
                 //The positions of the batch: from the outcomes of the GPU, or computed here when it failed
                 let positions: Vec<f64> = match &outcomes {
                     Some(GpuOutcomes::Fast(all)) => all.iter().map(|outcome| outcome.position(m)).collect(),
-                    Some(GpuOutcomes::Exact(all)) => batch.iter().zip(all).map(|((x, y), outcome)| outcome.position(m, &sample_point(c, *x, *y, jitter, origin))).collect(),
+                    Some(GpuOutcomes::Exact(all)) => batch.iter().zip(all).map(|((x, y), outcome)| outcome.position(m, &sample_point(plane_of(sample), *x, *y, jitter, origin))).collect(),
                     None => {
-                        let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(c, *x, *y, jitter, origin)).collect();
+                        let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(plane_of(sample), *x, *y, jitter, origin)).collect();
                         let mut out = vec![0.0; points.len()];
                         let done = m.positions(&points, &mut out, Some(cancel));
                         out.truncate(done);
@@ -435,9 +451,9 @@ fn stream_samples(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), (
                 let batch = &pixels[range.clone()];
                 let submitted = if fast {
                     let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
-                    gpu.submit_pixels(m, c, jitter, origin, &packed, math == GpuMath::Single)
+                    gpu.submit_pixels(m, plane_of(sample), jitter, origin, &packed, math == GpuMath::Single)
                 } else {
-                    let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(c, *x, *y, jitter, origin)).collect();
+                    let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(plane_of(sample), *x, *y, jitter, origin)).collect();
                     gpu.submit(m, &points)
                 };
                 in_flight.push_back(((sample, range), submitted, batch.len()));

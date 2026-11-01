@@ -2828,6 +2828,10 @@ fn video_throughput_of_a_manifest() {
         let numbers: Vec<usize> = size.split_whitespace().map(|number| number.parse().unwrap()).collect();
         (spec.width, spec.height, spec.samples) = (numbers[0], numbers[1], u8::try_from(numbers[2]).unwrap());
     }
+    //MANDELBROT_SHUTTER: motion blur, in degrees (#210)
+    if let Some(shutter) = std::env::var("MANDELBROT_SHUTTER").ok().and_then(|shutter| shutter.parse().ok()) {
+        spec.shutter = shutter;
+    }
     let keep = std::env::var("MANDELBROT_KEEP").ok();
     if keep.is_some() {
         spec.quality = super::video::VideoQuality::Lossless;
@@ -2867,6 +2871,43 @@ fn video_throughput_of_a_manifest() {
         std::fs::copy(folder.join("saved").join("throughput.mkv"), keep).unwrap();
     }
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn motion_blur_spreads_the_samples_over_the_shutter_and_a_video_with_it_has_every_frame() {
+    //Issue #210: the moments of the samples of a frame
+    let (time, interval, duration) = (Duration::from_secs(1), Duration::from_millis(100), Duration::from_secs(10));
+    let moments = super::video::sample_times(64, time, interval, 180.0, duration);
+    assert_eq!(moments.len(), 64);
+    assert!(moments[0].abs_diff(time) < Duration::from_millis(1), "sample 0 at the frame: {:?}", moments[0]);
+    assert!(moments.iter().all(|moment| moment.abs_diff(time) <= Duration::from_millis(25)), "within half the shutter, 180° of 100 ms: 25 ms either way");
+    let mut sorted = moments.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 64, "every sample at its own moment");
+    let mean = moments.iter().map(Duration::as_secs_f64).sum::<f64>() / 64.0;
+    assert!((mean - 1.0).abs() < 1e-3, "centered on the frame: {mean}");
+    assert!(super::video::sample_times(8, time, interval, 0.0, duration).iter().all(|moment| *moment == time), "without motion blur, all at the frame");
+    assert!(super::video::sample_times(4, Duration::ZERO, interval, 360.0, duration).iter().all(|moment| *moment <= duration), "within the flight");
+    //A video with motion blur: every frame, and the frames differ from those without it
+    if !ffmpeg_available() {
+        return;
+    }
+    let render = |shutter: f64| {
+        let (mut app, folder) = chunked_video_app(false);
+        app.video_shutter = shutter;
+        app.image_supersampling_amount = 8;
+        app.start_video();
+        let message = wait_for_video(&mut app);
+        assert!(message.starts_with("Video of the flight:"), "{message}");
+        let video = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mkv")).unwrap();
+        let frames = decoded_frames(&video);
+        let _ = std::fs::remove_dir_all(folder);
+        frames
+    };
+    let (sharp, blurred) = (render(0.0), render(180.0));
+    assert_eq!(sharp.len(), blurred.len(), "every frame");
+    assert_ne!(sharp, blurred, "motion blur changes the frames");
 }
 
 #[test]

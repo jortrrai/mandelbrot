@@ -631,6 +631,32 @@ fn a_render_with_the_gpu_is_bit_for_bit_the_render_without_it() {
 }
 
 #[test]
+fn samples_in_views_of_their_own_are_the_render_when_every_view_is_its_view_and_differ_otherwise() {
+    //Issue #210 (motion blur): sample k of every pixel in planes[k]
+    let (w, h) = (64, 48);
+    let (c, m) = boundary_plane(w, h);
+    let render = |planes: Option<&[ComplexPlane]>| {
+        let mut last = Vec::new();
+        let render = Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(8).adaptive(Some(AdaptiveSampling::default()));
+        let render = match planes { Some(planes) => render.sample_planes(planes), None => render };
+        assert!(render.run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()));
+        last
+    };
+    let same: Vec<ComplexPlane> = (0..8).map(|_| c.clone()).collect();
+    assert_eq!(render(Some(&same)), render(None), "every view the view of the render: the same image");
+    //Each sample a little further zoomed in: another image, close to the first
+    let zoomed: Vec<ComplexPlane> = (0..8).map(|k| {
+        let mut plane = c.clone();
+        plane.scale(1.0 - 0.002 * f64::from(k));
+        plane
+    }).collect();
+    let (sharp, blurred) = (render(None), render(Some(&zoomed)));
+    assert_ne!(sharp, blurred);
+    let mean: f64 = sharp.iter().zip(&blurred).map(|(a, b)| f64::from(a.0.abs_diff(b.0)) + f64::from(a.1.abs_diff(b.1)) + f64::from(a.2.abs_diff(b.2))).sum::<f64>() / (3 * w * h) as f64;
+    assert!(mean < 20.0, "close to the sharp image: {mean}");
+}
+
+#[test]
 fn previews_computed_with_the_gpu_are_bit_for_bit_the_previews_of_the_cpu() {
     let gpu = match super::gpu::GpuIterator::new() {
         Ok(gpu) => gpu,

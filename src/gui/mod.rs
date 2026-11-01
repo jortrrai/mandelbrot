@@ -204,6 +204,8 @@ pub struct MandelbrotApp {
     video_pngs: bool,
     /// Whether the frames of a video are blended over time, see `video` and `temporal`
     video_blend: bool,
+    /// Motion blur of videos: the shutter angle in degrees (see `video::sample_times`)
+    video_shutter: f64,
     /// A fixed number of frames a video renders at once, for measurements (the window always lets the job choose, see `video::FrameScheduler`)
     video_at_once_fixed: Option<usize>,
     /// The saved flights (see `flight_files`): their folder (`flights`), the flights read from it (once the controls are first shown), the one chosen in the
@@ -411,6 +413,7 @@ impl MandelbrotApp {
             video_playback: video::Playback::Maximum,
             video_pngs: false,
             video_blend: false,
+            video_shutter: 0.0,
             video_at_once_fixed: None,
             flights_folder: std::path::PathBuf::from("flights"),
             saved_flights: Vec::new(),

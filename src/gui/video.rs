@@ -342,6 +342,21 @@ impl FrameClock {
     }
 }
 
+/// The moments of the `samples` samples of a frame at `time` with motion blur: spread over `shutter` degrees of the `interval` between frames (360: all of it),
+/// centered on the frame and within the flight (`duration`). The fraction of sample `k` is the radical inverse of `k` in base 2, so the first samples, which
+/// every pixel gets (the adaptive ones only where there is detail), are spread over the shutter too: sample 0 is at the frame itself, sample 1 half a shutter away
+pub(super) fn sample_times(samples: u8, time: Duration, interval: Duration, shutter: f64, duration: Duration) -> Vec<Duration> {
+    let count = f64::from(samples.max(1));
+    (0..u32::from(samples.max(1))).map(|k| {
+        let fraction = (f64::from(k.reverse_bits()) / f64::from(u32::MAX) + 0.5).fract() + 0.5 / count - 0.5;
+        let moment = time.as_secs_f64() + fraction * (shutter / 360.0) * interval.as_secs_f64();
+        Duration::from_secs_f64(moment.clamp(0.0, duration.as_secs_f64()))
+    }).collect()
+}
+
+/// The shutters of the *Motion blur* list: off, then quarter to whole frames
+pub(super) const SHUTTERS: [f64; 5] = [0.0, 90.0, 180.0, 270.0, 360.0];
+
 /// A speed in percent as the video controls and the log show it: whole percents without decimals
 pub(super) fn speed_text(speed: f64) -> String {
     if (speed - speed.round()).abs() < 0.05 { format!("{speed:.0}%") } else { format!("{speed:.1}%") }
@@ -423,6 +438,9 @@ pub(super) struct VideoSpec {
     /// The audio track the video follows and has as its sound (see `music`)
     #[serde(default)]
     pub(super) music: Option<super::music::Music>,
+    /// Motion blur: the shutter angle in degrees (0: sharp frames, 180: the shutter of film), see `sample_times`
+    #[serde(default)]
+    pub(super) shutter: f64,
 }
 
 /// The name of a new video of `flight` in `folder` (without extension): the time and the name of the place, with a number when a video of that name (or its
@@ -543,6 +561,7 @@ impl MandelbrotApp {
             fast_gpu: self.fast_gpu,
             output: None,
             music,
+            shutter: self.video_shutter,
         })
     }
 
@@ -563,7 +582,7 @@ impl MandelbrotApp {
         let name = spec.output.clone().unwrap_or_else(|| video_name(&spec.flight, &self.video_folder));
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music } = spec;
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music, shutter } = spec;
         let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
@@ -779,9 +798,21 @@ impl MandelbrotApp {
                                 m.max_iterations = limit_at(camera.scale, flight, settings);
                             }
                             m.palette = flight.palette_at(path, time);
+                            //Motion blur: every sample in the view of its own moment within the shutter (the limit and the colors stay those of the frame)
+                            let planes: Vec<ComplexPlane> = if shutter > 0.0 && samples > 1 && !blend {
+                                let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
+                                sample_times(samples, time, interval, shutter, path.duration()).into_iter().map(|moment| {
+                                    let mut sample_plane = ComplexPlane::new(width, height);
+                                    sample_plane.set_view(&path.camera_at(moment).view());
+                                    sample_plane
+                                }).collect()
+                            } else {
+                                Vec::new()
+                            };
                             let mut colors = Vec::new();
                             let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
                                 .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
+                            let render = if planes.is_empty() { render } else { render.sample_planes(&planes) };
                             //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
                             let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
                             let render = if on_the_gpu { render.on_the_gpu_only() } else { render };
@@ -1012,6 +1043,11 @@ impl MandelbrotApp {
         ui.horizontal(|ui| {
             ui.add_enabled(!self.video_fit_length, egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
             ui.checkbox(&mut self.video_blend, "Blend frames").on_hover_text("Every frame is blended into the frames before it, moved to its view, as Blend frames does in flights: with the 1x qualities every frame takes another sample, so the video gathers samples over time and moves smoothly for the cost of one sample a frame (fine with 1x + blur). With more samples it smooths the motion");
+            egui::ComboBox::from_id_salt("video_shutter").selected_text(shutter_text(self.video_shutter)).show_ui(ui, |ui| {
+                for shutter in SHUTTERS {
+                    ui.selectable_value(&mut self.video_shutter, shutter, shutter_text(shutter));
+                }
+            }).response.on_hover_text("Motion blur: every sample of a pixel is taken at its own moment while the shutter is open, as a film camera does, so motion blurs along its direction and fine detail shimmers less, at no extra cost (the same samples). 180° is the shutter of film; more is smoother and softer at the edges of a fast zoom, whose center stays sharp. Needs 2 samples or more, without Blend frames");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
         });
         ui.horizontal(|ui| {
@@ -1075,6 +1111,11 @@ impl MandelbrotApp {
             }
         }
     }
+}
+
+/// The text of a shutter in the *Motion blur* list
+fn shutter_text(shutter: f64) -> String {
+    if shutter <= 0.0 { String::from("No motion blur") } else { format!("Motion blur {shutter:.0}°") }
 }
 
 /// A size in bytes, in MB or GB

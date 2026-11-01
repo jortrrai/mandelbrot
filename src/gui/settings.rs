@@ -73,6 +73,7 @@ pub(super) struct Settings {
     video_playback: Option<String>,
     video_pngs: Option<bool>,
     video_blend: Option<bool>,
+    video_shutter: Option<f64>,
     /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
     save_size: Option<String>,
     save_width: Option<usize>,
@@ -172,6 +173,7 @@ impl MandelbrotApp {
             video_playback: Some(self.video_playback.name().to_string()),
             video_pngs: Some(self.video_pngs),
             video_blend: Some(self.video_blend),
+            video_shutter: Some(self.video_shutter),
             save_size: Some(match &self.save_size.choice {
                 SaveSizeChoice::Standard => String::from("default"),
                 SaveSizeChoice::View => String::from("view"),
@@ -307,6 +309,9 @@ impl MandelbrotApp {
         }
         set(settings.video_pngs, &mut self.video_pngs);
         set(settings.video_blend, &mut self.video_blend);
+        if let Some(shutter) = settings.video_shutter.filter(|shutter| (0.0..=360.0).contains(shutter)) {
+            self.video_shutter = shutter;
+        }
         //(A preset that no longer exists, say a deleted custom one: the default size)
         if let Some(choice) = settings.save_size.as_deref() {
             self.save_size.choice = match choice.split_once(':') {
