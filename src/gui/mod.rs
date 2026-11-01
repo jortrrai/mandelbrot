@@ -234,6 +234,9 @@ pub struct MandelbrotApp {
     /// Whether the depth slider is being dragged, and whether the mouse keeps the center of the view (see `depth`)
     depth_dragging: bool,
     lock_center: bool,
+    /// Whether the mini-map shows in the Current view box, and its texture, the colors it was rendered with and its plane (see `status::minimap_ui`)
+    show_minimap: bool,
+    minimap: Option<(status::MinimapColors, egui::TextureHandle, ComplexPlane)>,
     /// Whether the rotation is shown and typed in degrees (or in radians), see `depth::rotation_controls`
     rotation_in_degrees: bool,
     /// The center the depth control keeps, exactly (see `depth::exact_center`)
@@ -443,6 +446,8 @@ impl MandelbrotApp {
             confirm_delete: None,
             shared_view_input: String::new(),
             depth_dragging: false,
+            show_minimap: false,
+            minimap: None,
             rotation_in_degrees: true,
             lock_center: false,
             depth_center: None,

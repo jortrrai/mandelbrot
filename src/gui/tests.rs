@@ -2853,6 +2853,36 @@ fn the_status_log_has_the_time_of_every_message_and_shows_the_chosen_levels() {
 }
 
 #[test]
+fn the_mini_map_is_off_at_first_and_shows_the_whole_set_with_the_view_on_it() {
+    //Issue #206
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    assert!(!app.show_minimap && app.minimap.is_none());
+    //How many shapes draw the texture of the map
+    let draw = |app: &mut MandelbrotApp| {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 1400.0))), ..Default::default() }, |ui| app.side_panel_ui(ui));
+        let id = app.minimap.as_ref().map(|(_, texture, _)| texture.id());
+        let maps = output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::epaint::Shape::Mesh(mesh) if Some(mesh.texture_id) == id)).count();
+        output.drop_without_applying_deltas();
+        maps
+    };
+    assert_eq!(draw(&mut app), 0);
+    assert!(app.minimap.is_none(), "nothing is rendered while it is off");
+    app.show_minimap = true;
+    assert_eq!(draw(&mut app), 1, "the map is drawn");
+    assert!(app.minimap.is_some());
+    //A deep view and a turned one draw too (a cross, a turned outline); the map is rendered again only for other colors
+    app.c.scale(1e-9);
+    app.c.set_rotation(0.5);
+    let _ = draw(&mut app);
+    let key = app.minimap.as_ref().map(|(key, _, _)| key.clone());
+    app.m.palette.offset = 123.0;
+    let _ = draw(&mut app);
+    assert_ne!(app.minimap.as_ref().map(|(key, _, _)| key.clone()), key, "other colors: the map again");
+}
+
+#[test]
 fn a_right_click_does_not_move_a_locked_center() {
     //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
     let config = Config::sized(64, 48, 50, 32);

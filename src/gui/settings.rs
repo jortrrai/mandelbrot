@@ -78,6 +78,7 @@ pub(super) struct Settings {
     rotation_unit: Option<String>,
     /// The lowest level of messages the status log shows (see `status::LogLevel`)
     log_level: Option<String>,
+    show_minimap: Option<bool>,
     /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
     save_size: Option<String>,
     save_width: Option<usize>,
@@ -180,6 +181,7 @@ impl MandelbrotApp {
             video_shutter: Some(self.video_shutter),
             rotation_unit: Some(String::from(if self.rotation_in_degrees { "degrees" } else { "radians" })),
             log_level: Some(self.log_level.name().to_string()),
+            show_minimap: Some(self.show_minimap),
             save_size: Some(match &self.save_size.choice {
                 SaveSizeChoice::Standard => String::from("default"),
                 SaveSizeChoice::View => String::from("view"),
@@ -315,6 +317,7 @@ impl MandelbrotApp {
         }
         set(settings.video_pngs, &mut self.video_pngs);
         set(settings.video_blend, &mut self.video_blend);
+        set(settings.show_minimap, &mut self.show_minimap);
         if let Some(level) = settings.log_level.as_deref().and_then(|name| super::status::LogLevel::ALL.into_iter().find(|level| level.name() == name)) {
             self.log_level = level;
         }

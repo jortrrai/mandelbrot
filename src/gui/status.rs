@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use eframe::egui::{self, Color32};
 
 use crate::complex::Complex;
-use crate::complex_plane::Precision;
+use crate::complex_plane::{ComplexPlane, Precision};
 use super::render_job::RenderBars;
 use super::MandelbrotApp;
 
@@ -51,6 +51,13 @@ impl LogLevel {
         }
     }
 }
+
+/// The colors the mini-map was rendered with: the coloring, the divide and offset (as bits), stretched, and the channels
+pub type MinimapColors = (usize, u64, u64, bool, String);
+
+/// The size of the mini-map in pixels, and the iteration limit of its render (the whole set needs few)
+const MINIMAP_SIZE: (usize, usize) = (240, 160);
+const MINIMAP_ITERATIONS: u32 = 500;
 
 /// The texts of the current view: the center and the zoom, formatted for reading, without losing the precision of the numbers
 #[derive(Debug, PartialEq, Eq)]
@@ -151,13 +158,59 @@ impl MandelbrotApp {
     pub(super) fn side_panel_ui(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status_panel").resizable(true).default_size(220.0).min_size(80.0).show(ui, |ui| self.log_ui(ui));
         //Added after the status panel, so it sits above it
-        egui::Panel::bottom("current_view_panel").resizable(false).show(ui, |ui| self.current_view_ui(ui));
+        egui::Panel::bottom("current_view_panel").resizable(false).show(ui, |ui| {
+            self.current_view_ui(ui);
+            self.minimap_ui(ui);
+        });
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 let enabled = self.controls_enabled();
                 ui.add_enabled_ui(enabled, |ui| self.controls_ui(ui));
             });
         });
+    }
+
+    /// The mini-map (issue #206, off by default): the whole set, small, with where the view is on it, so you keep your bearings deep down. A view smaller
+    /// than a few pixels of the map gets a cross with a small ring around it instead of its outline
+    pub(super) fn minimap_ui(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.show_minimap, "Mini-map").on_hover_text("A small map of the whole set with the view on it, to keep your bearings deep down");
+        if !self.show_minimap {
+            return;
+        }
+        let (width, height) = MINIMAP_SIZE;
+        //The whole set in the colors of the view, rendered again when they change (a few milliseconds)
+        let key = (self.coloring_index, self.m.palette.divide.to_bits(), self.m.palette.offset.to_bits(), self.m.palette.stretch, format!("{:?}", self.p.color_channel_mapping));
+        if self.minimap.as_ref().is_none_or(|(old, _, _)| *old != key) {
+            let mut plane = ComplexPlane::new(width, height);
+            plane.set_view(&crate::complex_plane::View::new(-0.75, 0.0, 1.2));
+            let mut set = self.m.clone();
+            set.max_iterations = MINIMAP_ITERATIONS;
+            let mut buffer = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(width, height));
+            buffer.color_channel_mapping = self.p.color_channel_mapping;
+            crate::rendering::render_complex_plane_into_buffer(&mut buffer, &plane, &set, 4, self.coloring_function);
+            let rgb = crate::pixel_buffer::rgb_bytes(&buffer.colors, buffer.color_channel_mapping);
+            let texture = ui.ctx().load_texture("minimap", egui::ColorImage::from_rgb([width, height], &rgb), egui::TextureOptions::LINEAR);
+            self.minimap = Some((key, texture, plane));
+        }
+        let Some((_, texture, plane)) = &self.minimap else { return };
+        let size = egui::vec2(width as f32, height as f32);
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.image(texture.id(), rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+        //Where a point of the plane is on the map (the map is unturned: a turned view shows as a turned outline)
+        let on_map = |point: Complex| rect.min + egui::vec2(((point.x - plane.min_x) / plane.increment_x) as f32, ((-point.y - plane.min_y) / plane.increment_y) as f32);
+        let (view_width, view_height) = (self.p.pixel_plane.width as f64, self.p.pixel_plane.height as f64);
+        let corners: Vec<egui::Pos2> = [(0.0, 0.0), (view_width, 0.0), (view_width, view_height), (0.0, view_height)].iter().map(|(x, y)| on_map(self.c.complex_from_pixel_plane(*x, *y))).collect();
+        let center = on_map(self.c.center());
+        let stroke = egui::Stroke::new(1.5, Color32::WHITE);
+        let span = corners.iter().map(|corner| corner.distance(center)).fold(0.0_f32, f32::max);
+        if span >= 3.0 {
+            painter.add(egui::Shape::closed_line(corners, stroke));
+        } else {
+            painter.circle_stroke(center, 5.0, stroke);
+            painter.line_segment([center - egui::vec2(9.0, 0.0), center + egui::vec2(9.0, 0.0)], stroke);
+            painter.line_segment([center - egui::vec2(0.0, 9.0), center + egui::vec2(0.0, 9.0)], stroke);
+        }
     }
 
     /// The center and zoom of the view that is shown, read from the complex plane every frame, so it follows every move, zoom and jump at once
