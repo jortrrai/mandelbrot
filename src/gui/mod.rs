@@ -269,6 +269,10 @@ pub struct MandelbrotApp {
     view_inputs: [String; 3],
     /// Messages shown to the user in the status box
     log: Vec<String>,
+    /// When every message of `log` was logged (issue #204)
+    log_times: Vec<chrono::DateTime<chrono::Local>>,
+    /// The lowest level of the messages that the status log shows and prints (issue #205, see `status::LogLevel`)
+    log_level: status::LogLevel,
     texture: Option<TextureHandle>,
     texture_outdated: bool,
     /// The neighborhood of the view, drawn behind the image, and the job that renders it, see `neighborhood`; whether it is rendered at all
@@ -458,6 +462,8 @@ impl MandelbrotApp {
             frame_accepted: false,
             view_inputs: [String::new(), String::new(), String::new()],
             log: Vec::new(),
+            log_times: Vec::new(),
+            log_level: status::LogLevel::Info,
             texture: None,
             texture_outdated: true,
             neighborhood: None,
@@ -548,11 +554,16 @@ impl MandelbrotApp {
         }
     }
 
+    /// Adds `message` to the status log with the time, and prints it with the time if its level is shown (see `status::LogLevel`)
     pub(super) fn log(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        //(On the command line stdout is for its JSON: the log goes to stderr there, see `cli`)
-        if cli::quiet() { eprintln!("{message}") } else { println!("{message}") }
+        let (message, now) = (message.into(), chrono::Local::now());
+        if status::LogLevel::of(&message) >= self.log_level {
+            let line = format!("[{}] {message}", now.format("%H:%M:%S"));
+            //(On the command line stdout is for its JSON: the log goes to stderr there, see `cli`)
+            if cli::quiet() { eprintln!("{line}") } else { println!("{line}") }
+        }
         self.log.push(message);
+        self.log_times.push(now);
     }
 
     pub(super) fn view_description(&self) -> String {

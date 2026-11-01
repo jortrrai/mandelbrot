@@ -10,6 +10,48 @@ use super::render_job::RenderBars;
 use super::MandelbrotApp;
 
 
+/// The level of a message of the status log (issue #205): the log shows the messages of the chosen level and above
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    /// Renders, layers and moves: what the program does all the time
+    Debug,
+    /// What happened: saved, flown, set
+    Info,
+    /// What was refused or skipped
+    Warning,
+    /// What failed
+    Error,
+}
+
+impl LogLevel {
+    pub const ALL: [LogLevel; 4] = [LogLevel::Debug, LogLevel::Info, LogLevel::Warning, LogLevel::Error];
+
+    /// The name in the list and the settings
+    pub const fn name(self) -> &'static str {
+        match self {
+            LogLevel::Debug => "Debug",
+            LogLevel::Info => "Info",
+            LogLevel::Warning => "Warnings",
+            LogLevel::Error => "Errors",
+        }
+    }
+
+    /// The level of `message`, by what it says (the messages are sentences, see `MandelbrotApp::log`)
+    pub fn of(message: &str) -> LogLevel {
+        let lower = message.to_lowercase();
+        if message.starts_with("Could not") || message.starts_with("GPU error") || lower.contains(" failed") {
+            LogLevel::Error
+        } else if lower.contains("not allowed") || lower.contains("is skipped") || lower.contains("refused") || lower.contains("cannot be read") || message.starts_with("Warning") {
+            LogLevel::Warning
+        } else if message.starts_with("Rendering") || message.starts_with("Rendered") || message.starts_with("Cancelled the rendering") || message.starts_with("Moved by dragging")
+            || message.starts_with("Zoomed in with the wheel") || message.starts_with("Zoomed out with the wheel") || message.starts_with("Set the depth to") || message.starts_with("Clicked pixel") {
+            LogLevel::Debug
+        } else {
+            LogLevel::Info
+        }
+    }
+}
+
 /// The texts of the current view: the center and the zoom, formatted for reading, without losing the precision of the numbers
 #[derive(Debug, PartialEq, Eq)]
 pub struct CurrentView {
@@ -156,9 +198,14 @@ impl MandelbrotApp {
     }
 
     /// Draws the status: the render that is running with its Cancel button, the progress bar of the last render, and the scrollable log
-    pub(super) fn log_ui(&self, ui: &mut egui::Ui) {
+    pub(super) fn log_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Status");
+            egui::ComboBox::from_id_salt("log_level").selected_text(self.log_level.name()).width(80.0).show_ui(ui, |ui| {
+                for level in LogLevel::ALL {
+                    ui.selectable_value(&mut self.log_level, level, level.name());
+                }
+            }).response.on_hover_text("The messages the status log shows (and prints): every one (Debug: renders and moves too), Info (what happened), only warnings and errors, or only errors. The hidden ones are kept: a lower level shows them again");
             if self.is_busy() {
                 ui.spinner();
                 match &self.progress {
@@ -179,8 +226,9 @@ impl MandelbrotApp {
             ui.add_space(4.0);
         }
         egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-            for message in &self.log {
-                ui.add(egui::Label::new(message).wrap());
+            for (index, message) in self.log.iter().enumerate().filter(|(_, message)| LogLevel::of(message) >= self.log_level) {
+                let time = self.log_times.get(index).map_or_else(String::new, |time| time.format("%H:%M:%S ").to_string());
+                ui.add(egui::Label::new(format!("{time}{message}")).wrap());
             }
         });
     }

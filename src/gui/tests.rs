@@ -2789,6 +2789,41 @@ fn a_right_click_centers_a_turned_view_on_the_clicked_point() {
 }
 
 #[test]
+fn the_status_log_has_the_time_of_every_message_and_shows_the_chosen_levels() {
+    //Issues #204 and #205
+    use super::status::LogLevel;
+    assert_eq!(LogLevel::of("Could not save the image: disk full"), LogLevel::Error);
+    assert_eq!(LogLevel::of("3000 x 2000 is not allowed: the width and the height are from 16 to 16384 pixels"), LogLevel::Warning);
+    assert_eq!(LogLevel::of("Rendered the default view in 0.12 s: center = (-0.75, 0), scale = 1"), LogLevel::Debug);
+    assert_eq!(LogLevel::of("Saved the image to saved/x.png"), LogLevel::Info);
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    let before = app.log.len();
+    app.log("Saved the image to saved/x.png");
+    app.log("Could not join the chunks of the video");
+    assert_eq!(app.log_times.len(), app.log.len(), "every message has its time");
+    let texts = |app: &mut MandelbrotApp| {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 2000.0))), ..Default::default() }, |ui| app.log_ui(ui));
+        let texts: Vec<String> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+            _ => None,
+        }).collect();
+        output.drop_without_applying_deltas();
+        texts.join("|")
+    };
+    let shown = texts(&mut app);
+    let time = app.log_times[before].format("%H:%M:%S").to_string();
+    assert!(shown.contains(&format!("{time} Saved the image to saved/x.png")), "{shown}");
+    assert!(!shown.contains("Rendered the default view"), "Info hides the renders: {shown}");
+    app.log_level = LogLevel::Error;
+    let shown = texts(&mut app);
+    assert!(shown.contains("Could not join the chunks") && !shown.contains("Saved the image"), "{shown}");
+    app.log_level = LogLevel::Debug;
+    assert!(texts(&mut app).contains("Rendered the default view"), "kept, and shown again");
+}
+
+#[test]
 fn a_right_click_does_not_move_a_locked_center() {
     //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
     let config = Config::sized(64, 48, 50, 32);
