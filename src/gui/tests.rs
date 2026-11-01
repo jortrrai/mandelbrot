@@ -2592,6 +2592,35 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
 }
 
 #[test]
+fn cycling_the_divide_breathes_around_where_it_started_and_ends_with_a_full_render() {
+    //Issue #203
+    let ctx = egui::Context::default();
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.0, offset: 0.0, stretch: false };
+    app.render("Colors");
+    wait_for_job(&mut app);
+    app.divide_period = 0.4;
+    app.toggle_divide_cycle();
+    assert!(app.cycling());
+    let started = std::time::Instant::now();
+    let (mut lowest, mut highest) = (2.0_f64, 2.0_f64);
+    while started.elapsed() < Duration::from_millis(600) {
+        app.cycle_colors(&ctx, std::time::Instant::now());
+        (lowest, highest) = (lowest.min(app.m.palette.divide), highest.max(app.m.palette.divide));
+        app.poll_job();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(lowest < 1.5 && highest > 3.0, "it swung both ways: {lowest} .. {highest}");
+    assert!(lowest >= 0.5 - 1e-9 && highest <= 8.0 + 1e-9, "within two doublings of 2: {lowest} .. {highest}");
+    let divide = app.m.palette.divide;
+    app.toggle_divide_cycle();
+    wait_for_job(&mut app);
+    assert!(!app.cycling());
+    assert_eq!(app.m.palette.divide, divide, "stopping keeps the divide it reached");
+    assert!(app.buffer_is_complete, "and renders the view to its full quality");
+}
+
+#[test]
 fn cycling_colors_in_the_window_keeps_its_one_sample_steps_and_the_history() {
     //As the window runs every frame: the cycling step, then the settling of a gesture (which must not turn each step into a full render)
     let ctx = egui::Context::default();

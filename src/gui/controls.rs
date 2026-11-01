@@ -408,6 +408,13 @@ impl MandelbrotApp {
                 ui.add(egui::DragValue::new(&mut self.cycle_rate).range(super::cycle::CYCLE_RATES).speed(0.5).max_decimals(1).suffix(" steps/s"))
                     .on_hover_text("How fast the colors cycle, in steps of the palette per second (type a value; negative: backwards; 500 steps are the whole palette)");
             });
+            ui.horizontal(|ui| {
+                if ui.button(if self.divide_cycle.is_some() { "Stop the divide" } else { "Cycle the divide" }).on_hover_text("The iteration divide breathes by itself: it grows to four times what it is and shrinks to a quarter and back, so the bands of colors widen and narrow while the view stays where it is (with Cycle the colors too, both move)").clicked() {
+                    self.toggle_divide_cycle();
+                }
+                ui.add(egui::DragValue::new(&mut self.divide_period).range(super::cycle::DIVIDE_PERIODS).speed(0.5).max_decimals(1).suffix(" s a swing"))
+                    .on_hover_text("How long a whole swing of the divide takes, in seconds (type a value)");
+            });
         });
         ui.checkbox(&mut self.m.palette.stretch, "Stretch the palette over the limit")
             .on_hover_text("On: the palette spans the iteration counts once, from 0 to the limit, without repeating (the colors change with the limit). Off: the palette repeats every 500 steps, see Iteration divide.");

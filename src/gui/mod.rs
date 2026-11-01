@@ -288,6 +288,10 @@ pub struct MandelbrotApp {
     /// Whether the colors cycle, how fast (steps of the palette per second), and when the offset moved last, see `cycle`
     color_cycling: bool,
     cycle_rate: f64,
+    /// The cycling of the iteration divide, if it runs: the divide it started at and how far through a swing it is (see `cycle`, issue #203)
+    divide_cycle: Option<(f64, f64)>,
+    /// The time of a whole swing of the divide, in seconds
+    divide_period: f64,
     cycle_last: Option<std::time::Instant>,
     /// How many frames of a flight the flight job may render ahead of the one on the screen (0: none, it renders one frame at a time as before), see `flight_job`
     frames_ahead: usize,
@@ -474,6 +478,8 @@ impl MandelbrotApp {
             auto_blur: true,
             color_cycling: false,
             cycle_rate: cycle::CYCLE_RATE,
+            divide_cycle: None,
+            divide_period: cycle::DIVIDE_PERIOD,
             cycle_last: None,
             frames_ahead: 2,
             flight_queue: std::collections::VecDeque::new(),
@@ -627,7 +633,7 @@ impl MandelbrotApp {
         let target = transform::rect_of(self.drawn_fraction(), rect);
         //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
         self.draw_neighborhood(&ui.painter_at(rect), rect);
-        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.color_cycling || self.landing_blur)) || self.quality_blur) {
+        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.color_cycling || self.divide_cycle.is_some() || self.landing_blur)) || self.quality_blur) {
             Some(blur) => {
                 let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
