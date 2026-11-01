@@ -15,6 +15,8 @@ use super::MandelbrotApp;
 pub struct CurrentView {
     /// The real part of the center, all digits (the shortest text that reads back as the same number)
     pub real: String,
+    /// The scale of the view, all digits (issue #207)
+    pub scale: String,
     /// The imaginary part of the center, all digits
     pub imaginary: String,
     /// The zoom: the magnification relative to the starting view, `1 / scale`, see `format_zoom`. At scale 1, the view is 2.5 units wide on the real axis.
@@ -24,7 +26,7 @@ pub struct CurrentView {
 impl CurrentView {
     /// The texts for the view with the center `center` and the scale `scale`
     pub fn new(center: &Complex, scale: f64) -> CurrentView {
-        CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), zoom: format_zoom(1.0 / scale) }
+        CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), scale: format!("{scale}"), zoom: format_zoom(1.0 / scale) }
     }
 }
 
@@ -134,6 +136,9 @@ impl MandelbrotApp {
             ui.end_row();
             ui.label("Imaginary:");
             value(ui, &view.imaginary);
+            ui.end_row();
+            ui.label("Scale:").on_hover_text("The width of the view on the real axis divided by 2.5 (scale 1 is the starting view): what Copy and Go to view use");
+            value(ui, &view.scale);
             ui.end_row();
             ui.label("Zoom:").on_hover_text("The magnification relative to the starting view: 1 / scale. At scale 1 the view is 2.5 units wide on the real axis.");
             value(ui, &view.zoom);
