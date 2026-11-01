@@ -2688,6 +2688,10 @@ fn open_image_is_a_button_next_to_copy_view() {
     let texts = controls_texts(&mut app);
     let open = texts.iter().position(|text| text == "Open image...").expect("the button is there");
     assert_eq!(texts.get(open + 1).map(String::as_str), Some("Copy view"), "{texts:?}");
+    //It starts in the home folder: an absolute folder that exists (the relative folder saved/ made the file chooser fail)
+    if let Some(home) = super::sharing::home_folder() {
+        assert!(home.is_absolute() && home.is_dir(), "{}", home.display());
+    }
 }
 
 #[test]

@@ -9,6 +9,12 @@ use eframe::egui;
 use super::MandelbrotApp;
 use crate::points_of_interest::{self, Coloring, PointOfInterest};
 
+/// The folder that *Open image* starts in: the user's home folder, if it is known. (Not the relative folder `saved`: the desktop portal of Linux only takes an
+/// absolute folder that exists, and Jort's file chooser refused to open with it)
+pub(super) fn home_folder() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from).filter(|folder| folder.is_absolute() && folder.is_dir())
+}
+
 /// The text of `point` on one line
 pub(super) fn one_line(point: &PointOfInterest) -> String {
     let file: serde_json::Value = serde_json::from_str(&points_of_interest::to_json(point)).expect("a place file is JSON");
@@ -84,7 +90,11 @@ impl MandelbrotApp {
         ui.horizontal(|ui| {
             if ui.button("Open image...").on_hover_text("Goes to the view of an image saved by this program (or a PNG frame of one of its videos), with its colors: its view is in the image").clicked() {
                 //(The system's file chooser, modal: the window waits for it; renders go on in the background)
-                if let Some(path) = rfd::FileDialog::new().set_title("Open an image saved by Mandelbrot").add_filter("PNG image", &["png"]).set_directory(&self.video_folder).pick_file() {
+                let mut dialog = rfd::FileDialog::new().set_title("Open an image saved by Mandelbrot").add_filter("PNG image", &["png"]);
+                if let Some(home) = home_folder() {
+                    dialog = dialog.set_directory(home);
+                }
+                if let Some(path) = dialog.pick_file() {
                     self.open_image(&path);
                 }
             }
