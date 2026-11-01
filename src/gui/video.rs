@@ -74,7 +74,7 @@ pub(super) struct FrameScheduler {
     under_way: std::sync::Mutex<usize>,
     free: std::sync::Condvar,
     /// The frames finished by the renderers
-    finished: AtomicUsize,
+    pub(super) finished: AtomicUsize,
     /// The CPU use of the render threads in the last measurement, in percent, for the progress line
     pub(super) cpu_percent: AtomicUsize,
 }

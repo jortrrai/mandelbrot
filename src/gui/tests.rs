@@ -2814,6 +2814,62 @@ fn video_render_time_with_frames_at_once() {
 }
 
 #[test]
+#[ignore = "a measurement of the CPU and the GPU on a real video (#212), run by hand with --release"]
+fn video_throughput_of_a_manifest() {
+    //MANDELBROT_MANIFEST: the manifest of a video (its exact settings and flight); MANDELBROT_SPEED: another speed in percent (fewer frames)
+    let Ok(path) = std::env::var("MANDELBROT_MANIFEST") else { return };
+    let manifest: super::chunks::Manifest = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut spec = manifest.spec;
+    if let Some(speed) = std::env::var("MANDELBROT_SPEED").ok().and_then(|speed| speed.parse().ok()) {
+        spec.speed = speed;
+    }
+    //MANDELBROT_SIZE="width height samples": a smaller video; MANDELBROT_KEEP: a lossless video kept at that path (to compare the frames of two builds)
+    if let Ok(size) = std::env::var("MANDELBROT_SIZE") {
+        let numbers: Vec<usize> = size.split_whitespace().map(|number| number.parse().unwrap()).collect();
+        (spec.width, spec.height, spec.samples) = (numbers[0], numbers[1], u8::try_from(numbers[2]).unwrap());
+    }
+    let keep = std::env::var("MANDELBROT_KEEP").ok();
+    if keep.is_some() {
+        spec.quality = super::video::VideoQuality::Lossless;
+    }
+    let config = Config::sized(64, 48, 50, 4);
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    if app.gpu.is_none() {
+        app.gpu = rendering::gpu::GpuIterator::new().ok().map(std::sync::Arc::new);
+    }
+    //MANDELBROT_AT_ONCE: a fixed number of CPU frames at once instead of the job's own choice
+    app.video_at_once_fixed = std::env::var("MANDELBROT_AT_ONCE").ok().and_then(|at_once| at_once.parse().ok());
+    let folder = std::env::temp_dir().join(format!("mandelbrot-throughput-{}", std::process::id()));
+    app.video_folder = folder.join("saved");
+    let feed = |name: &str| -> u64 {
+        let counter = match name { "submitting" => &rendering::GPU_FEED.submitting, "waiting" => &rendering::GPU_FEED.waiting, "coloring" => &rendering::GPU_FEED.coloring, "dispatches" => &rendering::GPU_FEED.dispatches, _ => &rendering::GPU_FEED.points };
+        counter.load(Ordering::Relaxed)
+    };
+    let before: Vec<u64> = ["submitting", "waiting", "coloring", "dispatches", "points"].iter().map(|name| feed(name)).collect();
+    let started = std::time::Instant::now();
+    assert!(app.start_video_of(super::video::VideoSpec { output: Some(String::from("throughput")), ..spec }));
+    let ctx = egui::Context::default();
+    let mut last_print = started;
+    while let Some(job) = &app.video_job {
+        if last_print.elapsed() >= Duration::from_secs(5) {
+            last_print = std::time::Instant::now();
+            println!("{:6.1} s: {} frames, {} at once, CPU {}%", started.elapsed().as_secs_f64(), job.scheduler.finished.load(Ordering::Relaxed), job.scheduler.allowed(), job.scheduler.cpu_percent.load(Ordering::Relaxed));
+        }
+        app.poll_video(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let after: Vec<u64> = ["submitting", "waiting", "coloring", "dispatches", "points"].iter().map(|name| feed(name)).collect();
+    let delta: Vec<u64> = after.iter().zip(&before).map(|(a, b)| a - b).collect();
+    println!("total {:.1} s; {}", started.elapsed().as_secs_f64(), app.log.last().unwrap());
+    println!("GPU feeders: submitting {:.1} s, waiting {:.1} s, coloring {:.1} s; {} dispatches, {:.1} M points", delta[0] as f64 / 1e9, delta[1] as f64 / 1e9, delta[2] as f64 / 1e9, delta[3], delta[4] as f64 / 1e6);
+    if let Some(keep) = keep {
+        std::fs::copy(folder.join("saved").join("throughput.mkv"), keep).unwrap();
+    }
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_blended_video_has_every_frame_and_blends_the_frames_after_the_first() {
     let render = |blend: bool| {
         let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
