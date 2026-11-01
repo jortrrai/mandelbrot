@@ -2927,6 +2927,19 @@ fn the_julia_map_of_a_pinned_point_is_drawn_in_the_top_right_and_both_are_off_at
 }
 
 #[test]
+fn a_double_click_or_tap_zooms_in_twice_around_the_point() {
+    //Issue #219: the double tap of a phone
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    let scale = app.c.get_scale();
+    let point = app.displayed_plane().complex_from_pixel_plane(10.0, 7.0);
+    app.zoom_in_at(10.0, 7.0);
+    let after = app.c.complex_from_pixel_plane(10.0, 7.0);
+    assert!((app.c.get_scale() - scale / 2.0).abs() < 1e-12);
+    assert!((after.x - point.x).abs() < 1e-9 && (after.y - point.y).abs() < 1e-9, "the point stays under the finger");
+}
+
+#[test]
 fn two_fingers_zoom_turn_and_move_the_view() {
     //Issue #219: the gesture itself
     let config = Config::sized(64, 48, 50, 32);

@@ -50,7 +50,7 @@ impl MandelbrotApp {
         self.section(ui, "Benchmark", false, Self::benchmark_ui);
 
         ui.separator();
-        ui.label("Click the fractal to see a point's coordinates, right-click to center the view on it.");
+        ui.label("Click the fractal to see a point's coordinates, right-click (or a long press) to center the view on it, double-click (or double-tap) to zoom in. On a touch screen: pinch to zoom, twist to turn, drag to move.");
     }
 
     /// A section of the controls with a title that opens and closes it (`open`: open at first; every section is open in the tests, which read the controls)

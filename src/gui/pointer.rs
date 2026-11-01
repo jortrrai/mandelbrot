@@ -27,6 +27,17 @@ pub(super) fn zoom_around(plane: &mut ComplexPlane, anchor: &Complex, factor: f6
 }
 
 impl MandelbrotApp {
+    /// Zooms in twice around the pixel (`x`, `y`) of the image, which stays where it is (with Lock center: around the center), for a double click or tap
+    pub(super) fn zoom_in_at(&mut self, x: f32, y: f32) {
+        let anchor = if self.lock_center { self.c.center() } else { self.displayed_plane().complex_from_pixel_plane(f64::from(x), f64::from(y)) };
+        let mut zoomed = self.c.clone();
+        zoom_around(&mut zoomed, &anchor, 0.5);
+        if !self.zoom_refused(&zoomed) {
+            self.c = zoomed;
+            self.render("Zoomed in with a double click");
+        }
+    }
+
     /// A frame of a two-finger gesture: its middle at the pixel `center` (x, y) of the image, the fingers spread by `zoom` (above 1: apart, zooming in),
     /// turned by `twist` radians (clockwise on the screen) and moved by `moved` pixels. The point between the fingers stays under them while zooming
     pub(super) fn touch_gesture(&mut self, center: (f32, f32), zoom: f32, twist: f32, moved: egui::Vec2) {
@@ -86,7 +97,12 @@ impl MandelbrotApp {
 
         if let Some(position) = response.interact_pointer_pos() {
             let (x, y) = to_buffer(position);
-            if response.clicked() {
+            //A double click (a double tap on a touch screen) zooms in twice around the point; a long press is a right click on a touch screen: it centers there
+            if response.double_clicked() {
+                self.zoom_in_at(x, y);
+            } else if response.long_touched() {
+                self.handle_image_click(x, y, true);
+            } else if response.clicked() {
                 self.handle_image_click(x, y, false);
             } else if response.secondary_clicked() {
                 self.handle_image_click(x, y, true);
