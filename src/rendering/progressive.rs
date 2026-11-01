@@ -6,7 +6,7 @@ use super::adaptive::{mask_where, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 use super::jitter::sample_jitter;
 use super::region::ExposedRegion;
 use super::render_thread_count;
-use super::gpu::{packed_pixel, FastOutcome, GpuIterator, Outcome, BATCH, MAX_PIXEL};
+use super::gpu::{packed_pixel, FastOutcome, GpuIterator, Outcome, Submitted, BATCH, MAX_PIXEL};
 use super::state::{Prepared, SampleKey, SampleState, FOREIGN};
 use crate::{complex::Complex, complex_plane::ComplexPlane, coloring::TrueColor, mandelbrot_set::MandelbrotSet};
 
@@ -330,6 +330,17 @@ impl<'a> Render<'a> {
                 let counts = &state.counts;
                 marked_rows = Some(new_mask.chunks(width).enumerate().map(|(y, row)| row.iter().enumerate().filter(|(x, marked)| **marked && counts[y * width + x] != FOREIGN).map(|(x, _)| x).collect()).collect());
                 mask = Some(new_mask);
+                //A render on the GPU alone that keeps no samples (a frame of a video): the samples that are left go to the GPU one after the other in large
+                //dispatches, without waiting at the end of every pass (#212: the GPU waited at the end of each of the 62 adaptive passes of a 64x frame)
+                if let (Some((gpu, _)), Some(marked)) = (gpu.filter(|_| cpu_threads == 0 && !track && region.is_none()), marked_rows.as_deref()) {
+                    let samples = (sample, supersampling_amount, sample_offset);
+                    let completed = stream_samples(&anchor, m, origin, samples, marked, width, state, &mut colors, &color_of, cancel, pixels_done, (gpu, gpu_samples, math));
+                    if completed {
+                        on_pass(&colors, supersampling_amount);
+                    }
+                    state.colors = colors;
+                    return completed;
+                }
             }
             let eligible = if mask.is_some() { masked[index] } else { pending[index] };
             //The pixels that get no sample in this pass count as done
@@ -362,6 +373,119 @@ impl<'a> Render<'a> {
         true
     }
 }
+
+/// Samples `first..samples` (numbered from `offset` for their jitter, see `Render::sample_offset`) of the pixels `marked` (row by row) of a render on the GPU
+/// alone that keeps no samples: dispatched one after the other in large batches (all the marked pixels of a sample, or `BATCH` of them), a few at a time on the
+/// GPU, while `GPU_COLORING_THREADS` threads turn their outcomes into colors and add them to the sums of `state`. The colors of the marked pixels are then the
+/// averages of all their samples, as after the last pass of `sample_pass`: the sums are integers, so the order of the samples does not change them. If the GPU
+/// fails, the threads compute the samples that are left. Returns whether it completed.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The parts of `Render::run` that the samples need
+fn stream_samples(c: &ComplexPlane, m: &MandelbrotSet, origin: (isize, isize), (first, samples, offset): (u8, u8, u8), marked: &[Vec<usize>], width: usize, state: &mut SampleState, colors: &mut [TrueColor],
+    color_of: &(impl Fn(f64) -> TrueColor + Sync), cancel: &AtomicBool, pixels_done: &AtomicUsize, (gpu, gpu_samples, math): (&GpuIterator, &AtomicUsize, GpuMath)) -> bool {
+    //The marked pixels as (x, y), and the batches of (sample, the range of the pixels)
+    let pixels: Vec<(usize, usize)> = marked.iter().enumerate().flat_map(|(y, xs)| xs.iter().map(move |x| (*x, y))).collect();
+    let count = pixels.len();
+    let batches: Vec<StreamedBatch> = (first..samples).flat_map(|sample| (0..count).step_by(BATCH).map(move |start| (sample, start..(start + BATCH).min(count)))).collect();
+    let fast = math != GpuMath::Exact && width <= MAX_PIXEL && marked.len() <= MAX_PIXEL;
+    let sums = Mutex::new(&mut state.sums);
+    let (outcomes_sender, outcomes) = std::sync::mpsc::sync_channel::<(StreamedBatch, Option<GpuOutcomes>)>(2);
+    let outcomes = Mutex::new(outcomes);
+    thread::scope(|scope| {
+        for _ in 0..GPU_COLORING_THREADS {
+            scope.spawn(|| loop {
+                let next = outcomes.lock().unwrap().recv();
+                let Ok(((sample, range), outcomes)) = next else { return };
+                if cancel.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let jitter = sample.wrapping_add(offset);
+                let batch = &pixels[range];
+                //The positions of the batch: from the outcomes of the GPU, or computed here when it failed
+                let positions: Vec<f64> = match &outcomes {
+                    Some(GpuOutcomes::Fast(all)) => all.iter().map(|outcome| outcome.position(m)).collect(),
+                    Some(GpuOutcomes::Exact(all)) => batch.iter().zip(all).map(|((x, y), outcome)| outcome.position(m, &sample_point(c, *x, *y, jitter, origin))).collect(),
+                    None => {
+                        let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(c, *x, *y, jitter, origin)).collect();
+                        let mut out = vec![0.0; points.len()];
+                        let done = m.positions(&points, &mut out, Some(cancel));
+                        out.truncate(done);
+                        out
+                    }
+                };
+                let added: Vec<TrueColor> = positions.iter().map(|position| color_of(*position)).collect();
+                let mut sums = sums.lock().unwrap();
+                for ((x, y), color) in batch.iter().zip(&added) {
+                    let sum = &mut sums[y * width + x];
+                    sum[0] += u32::from(color.red);
+                    sum[1] += u32::from(color.green);
+                    sum[2] += u32::from(color.blue);
+                }
+                drop(sums);
+                pixels_done.fetch_add(added.len(), Ordering::Relaxed);
+            });
+        }
+        //This thread feeds the GPU: a few dispatches on it at a time, the oldest handed to the coloring threads when it is done
+        let mut in_flight: VecDeque<(StreamedBatch, Result<Submitted, String>, usize)> = VecDeque::new();
+        let mut gpu_works = true;
+        let mut batches = batches.into_iter();
+        loop {
+            while gpu_works && in_flight.len() < STREAMED_DISPATCHES && !cancel.load(Ordering::Relaxed) {
+                let Some((sample, range)) = batches.next() else { break };
+                let jitter = sample.wrapping_add(offset);
+                let batch = &pixels[range.clone()];
+                let submitted = if fast {
+                    let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
+                    gpu.submit_pixels(m, c, jitter, origin, &packed, math == GpuMath::Single)
+                } else {
+                    let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(c, *x, *y, jitter, origin)).collect();
+                    gpu.submit(m, &points)
+                };
+                in_flight.push_back(((sample, range), submitted, batch.len()));
+            }
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let Some((batch, submitted, count)) = in_flight.pop_front() else {
+                //Nothing on the GPU: the batches that are left (after a failure of the GPU) are computed by the coloring threads
+                match batches.next() {
+                    Some(batch) => {
+                        let _ = outcomes_sender.send((batch, None));
+                        continue;
+                    }
+                    None => break,
+                }
+            };
+            let wait_started = Instant::now();
+            let result = submitted.and_then(|submitted| if fast { gpu.finish(submitted).map(GpuOutcomes::Fast) } else { gpu.finish(submitted).map(GpuOutcomes::Exact) });
+            add_time(&GPU_FEED.waiting, wait_started);
+            gpu_works &= result.is_ok();
+            if result.is_ok() {
+                gpu_samples.fetch_add(count, Ordering::Relaxed);
+                GPU_FEED.dispatches.fetch_add(1, Ordering::Relaxed);
+                GPU_FEED.points.fetch_add(count as u64, Ordering::Relaxed);
+            }
+            let _ = outcomes_sender.send((batch, result.ok()));
+        }
+        drop(outcomes_sender);
+    });
+    if cancel.load(Ordering::Relaxed) {
+        return false;
+    }
+    //The averages of all the samples of the marked pixels, like the last pass
+    let divide = divider(u32::from(samples));
+    let sums = &state.sums;
+    for (x, y) in &pixels {
+        let sum = sums[y * width + x];
+        colors[y * width + x] = TrueColor::new(divide(sum[0]) as u8, divide(sum[1]) as u8, divide(sum[2]) as u8);
+    }
+    true
+}
+
+/// A batch of `stream_samples`: the sample and the range of its marked pixels
+type StreamedBatch = (u8, std::ops::Range<usize>);
+
+/// How many dispatches of `stream_samples` are on the GPU at a time
+const STREAMED_DISPATCHES: usize = 3;
 
 /// A render of `Render::colors_only`: one pass over every pixel with a state that has no samples to keep (its rows are empty, see `sample_pass`), in the color
 /// memory of `state` if there is one. Returns whether it completed.
