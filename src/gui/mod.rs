@@ -72,6 +72,9 @@ use crate::resolution::{self, Resolution};
 use crate::thumbnails::{self, Lru};
 use crate::{ColoringFunction, Config, InteractionVariables, COLORING_FUNCTION, COLOR_CHANNEL_MAPPING};
 
+/// Below this width in points the window counts as a phone screen: the controls slide in from a button (issue #219)
+const NARROW_SCREEN: f32 = 700.0;
+
 /// Width in points of the right side panel, used to size the initial window
 pub const SIDE_PANEL_WIDTH: f32 = 380.0;
 /// Minimum height in points of the window, so that the controls and the status log have room
@@ -243,6 +246,8 @@ pub struct MandelbrotApp {
     show_julia: bool,
     julia_pinned: Option<(f64, f64)>,
     julia_map: Option<(julia::MapKey, egui::TextureHandle)>,
+    /// On a narrow screen: whether the controls are shown over the image (see `ui`)
+    show_controls: bool,
     /// Whether the mini-map shows in the Current view box, and its texture, the colors it was rendered with and its plane (see `status::minimap_ui`)
     show_minimap: bool,
     minimap: Option<(status::MinimapColors, egui::TextureHandle, ComplexPlane)>,
@@ -460,6 +465,7 @@ impl MandelbrotApp {
             show_julia: false,
             julia_pinned: None,
             julia_map: None,
+            show_controls: false,
             show_minimap: false,
             minimap: None,
             rotation_in_degrees: true,
@@ -775,10 +781,22 @@ impl eframe::App for MandelbrotApp {
         }
         self.update_texture(&ctx);
 
-        egui::Panel::right("side_panel").default_size(SIDE_PANEL_WIDTH).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
+        //A narrow screen (a phone, issue #219): the image fills it, and the controls slide in from a button
+        let narrow = ui.available_rect_before_wrap().width() < NARROW_SCREEN;
+        if !narrow || self.show_controls {
+            egui::Panel::right("side_panel").default_size(if narrow { ui.available_rect_before_wrap().width() * 0.85 } else { SIDE_PANEL_WIDTH }).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
+        }
 
         let mut fit_area = egui::Vec2::ZERO;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| fit_area = self.image_ui(ui));
+        if narrow {
+            egui::Area::new(egui::Id::unique("controls_button")).anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0)).show(&ctx, |ui| {
+                let label = if self.show_controls { "✕ Close" } else { "☰ Controls" };
+                if ui.add(egui::Button::new(egui::RichText::new(label).size(20.0)).min_size(egui::vec2(120.0, 48.0))).clicked() {
+                    self.show_controls = !self.show_controls;
+                }
+            });
+        }
         self.fly(&ctx);
         self.keep_settings(std::time::Instant::now());
         self.step_benchmark(&ctx);

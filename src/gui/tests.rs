@@ -442,7 +442,8 @@ fn reloading_finds_files_that_were_added_and_a_missing_folder_is_reported_not_fa
     assert_eq!(app.points.len(), 2, "a user's own file appears after reloading");
     let _ = std::fs::remove_dir_all(&folder);
     app.load_points_of_interest(folder);
-    assert!(app.points.is_empty() && app.log.iter().any(|message| message.contains("Cannot read the points of interest folder")));
+    //A folder that is gone is not fatal: the places built into the program, and the log says so (#219)
+    assert!(app.points.len() == 11 && app.log.last().is_some_and(|message| message.contains("built into the program (there is no folder")));
 }
 
 /// The texts that the side panel draws, with their vertical position, in drawing order
@@ -2960,6 +2961,41 @@ fn two_fingers_zoom_turn_and_move_the_view() {
         output.drop_without_applying_deltas();
     }
     assert!(app.c.get_scale() < scale, "pinched apart: zoomed in ({scale} -> {})", app.c.get_scale());
+}
+
+#[test]
+fn without_a_folder_of_places_the_built_in_ones_load_and_a_narrow_screen_hides_the_controls_behind_a_button() {
+    //Issue #219 (the Android app has no folder of places, and a phone's screen is narrow)
+    let shipped = crate::points_of_interest::shipped();
+    assert_eq!(shipped.len(), 11);
+    assert_eq!(shipped[0].name, "Reset View", "the shallowest first");
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.load_points_of_interest(std::path::PathBuf::from("no-such-folder-of-places"));
+    assert_eq!(app.points.len(), 11);
+    assert!(app.log.last().unwrap().contains("built into the program"));
+    //A screen 600 points wide: no side panel, a Controls button; pressing it shows them
+    let ctx = egui::Context::default();
+    let texts = |app: &mut MandelbrotApp| {
+        let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 1000.0))), ..Default::default() }, |ui| {
+            let mut frame = eframe::Frame::_new_kittest();
+            eframe::App::ui(app, ui, &mut frame);
+        });
+        let texts: Vec<String> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+            _ => None,
+        }).collect();
+        output.drop_without_applying_deltas();
+        texts.join("|")
+    };
+    //(A new area is measured in its first frame and drawn from the second)
+    let _ = texts(&mut app);
+    let narrow = texts(&mut app);
+    assert!(narrow.contains("☰ Controls") && !narrow.contains("Navigation"), "{narrow}");
+    app.show_controls = true;
+    let _ = texts(&mut app);
+    let open = texts(&mut app);
+    assert!(open.contains("✕ Close") && open.contains("Navigation"), "{open}");
 }
 
 #[test]

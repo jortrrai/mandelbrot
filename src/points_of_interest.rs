@@ -234,6 +234,29 @@ pub struct LoadReport {
     pub problems: Vec<String>,
 }
 
+/// The places that come with the program, built into it: used when there is no folder of places to read (the Android app, or the program started elsewhere,
+/// issue #219)
+pub const SHIPPED: [(&str, &str); 11] = [
+    ("00-reset-view.json", include_str!("../points_of_interest/00-reset-view.json")),
+    ("01-frost-on-the-shoreline.json", include_str!("../points_of_interest/01-frost-on-the-shoreline.json")),
+    ("02-frozen-constellation.json", include_str!("../points_of_interest/02-frozen-constellation.json")),
+    ("03-harbor-of-moons.json", include_str!("../points_of_interest/03-harbor-of-moons.json")),
+    ("04-the-narrow-pass.json", include_str!("../points_of_interest/04-the-narrow-pass.json")),
+    ("05-coral-atoll.json", include_str!("../points_of_interest/05-coral-atoll.json")),
+    ("06-seahorse-embers.json", include_str!("../points_of_interest/06-seahorse-embers.json")),
+    ("07-lone-comet.json", include_str!("../points_of_interest/07-lone-comet.json")),
+    ("08-comets-crown.json", include_str!("../points_of_interest/08-comets-crown.json")),
+    ("09-the-whirlpool.json", include_str!("../points_of_interest/09-the-whirlpool.json")),
+    ("10-sunlit-reef.json", include_str!("../points_of_interest/10-sunlit-reef.json")),
+];
+
+/// The places of `SHIPPED`, shallowest first
+pub fn shipped() -> Vec<PointOfInterest> {
+    let mut points: Vec<PointOfInterest> = SHIPPED.iter().filter_map(|(name, text)| parse(text, name).ok().map(|(point, _)| point)).collect();
+    points.sort_by(|a, b| b.location.scale.total_cmp(&a.location.scale));
+    points
+}
+
 /// Loads every `.json` file of `folder`. Other files are ignored; a file that cannot be used is skipped and reported in `problems`, the rest loads.
 ///
 /// A folder that does not exist or cannot be read gives no points and a problem.
