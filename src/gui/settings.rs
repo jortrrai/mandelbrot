@@ -74,6 +74,8 @@ pub(super) struct Settings {
     video_pngs: Option<bool>,
     video_blend: Option<bool>,
     video_shutter: Option<f64>,
+    /// The unit of the rotation: "degrees" or "radians"
+    rotation_unit: Option<String>,
     /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
     save_size: Option<String>,
     save_width: Option<usize>,
@@ -174,6 +176,7 @@ impl MandelbrotApp {
             video_pngs: Some(self.video_pngs),
             video_blend: Some(self.video_blend),
             video_shutter: Some(self.video_shutter),
+            rotation_unit: Some(String::from(if self.rotation_in_degrees { "degrees" } else { "radians" })),
             save_size: Some(match &self.save_size.choice {
                 SaveSizeChoice::Standard => String::from("default"),
                 SaveSizeChoice::View => String::from("view"),
@@ -309,6 +312,9 @@ impl MandelbrotApp {
         }
         set(settings.video_pngs, &mut self.video_pngs);
         set(settings.video_blend, &mut self.video_blend);
+        if let Some(unit) = settings.rotation_unit.as_deref() {
+            self.rotation_in_degrees = unit != "radians";
+        }
         if let Some(shutter) = settings.video_shutter.filter(|shutter| (0.0..=360.0).contains(shutter)) {
             self.video_shutter = shutter;
         }

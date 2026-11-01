@@ -45,6 +45,12 @@ pub struct ComplexPlane {
     // Pixel plane width and height
     width: usize,
     height: usize,
+    /// How far the image is turned counterclockwise around the center of the view, in radians from -π to π (issue #217); 0 for most views, which are then
+    /// computed exactly as before rotation existed
+    rotation: f64,
+    /// The cosine and the sine of `rotation`
+    rotation_cos: f64,
+    rotation_sin: f64,
 }
 
 impl ComplexPlane {
@@ -75,6 +81,9 @@ impl ComplexPlane {
             increment_y,
             width,
             height,
+            rotation: 0.0,
+            rotation_cos: 1.0,
+            rotation_sin: 0.0,
         }
     }
 
@@ -85,7 +94,41 @@ impl ComplexPlane {
         let length_y = self.length_x * (float_height / float_width);
         let middle_y = self.min_y + (self.max_y - self.min_y) / 2.0; //Stored with the orientation of the screen, like the bounds
         let (min_y, max_y) = (middle_y - length_y / 2.0, middle_y + length_y / 2.0);
-        ComplexPlane { min_x: self.min_x, max_x: self.max_x, length_x: self.length_x, min_y, max_y, length_y: max_y - min_y, increment_x: self.length_x / float_width, increment_y: (max_y - min_y) / float_height, width, height }
+        ComplexPlane { min_x: self.min_x, max_x: self.max_x, length_x: self.length_x, min_y, max_y, length_y: max_y - min_y, increment_x: self.length_x / float_width, increment_y: (max_y - min_y) / float_height, width, height, ..*self }
+    }
+
+    /// How far the image is turned counterclockwise around the center, in radians from -π to π (see `set_rotation`)
+    pub const fn rotation(&self) -> f64 {
+        self.rotation
+    }
+
+    /// Turns the image counterclockwise by `radians` around the center of the view (any angle; it is kept from -π to π, so a whole turn is exactly no turn).
+    /// The center stays exactly where it is
+    pub fn set_rotation(&mut self, radians: f64) {
+        let turned = radians.rem_euclid(std::f64::consts::TAU);
+        let turned = if turned >= std::f64::consts::PI { turned - std::f64::consts::TAU } else { turned };
+        self.rotation = if turned.is_finite() { turned } else { 0.0 };
+        (self.rotation_sin, self.rotation_cos) = if self.rotation == 0.0 { (0.0, 1.0) } else { self.rotation.sin_cos() };
+    }
+
+    /// The view as it would be without its rotation, turned back around the origin of the plane: the same size and pixels, with the screen's axes as its own.
+    /// Two views with the same rotation compare as their unturned views do (how far apart in pixels, where one is in the other), so the code that shifts
+    /// buffers and draws previews works on these
+    pub fn unturned(&self) -> ComplexPlane {
+        if self.rotation == 0.0 {
+            return self.clone();
+        }
+        let center = self.center();
+        //The center turned back by the rotation: R(θ) · center, the inverse of the turn that `complex_from_pixel_plane` applies
+        let back = Complex::new(center.x * self.rotation_cos - center.y * self.rotation_sin, center.x * self.rotation_sin + center.y * self.rotation_cos);
+        let mut plane = ComplexPlane { rotation: 0.0, rotation_cos: 1.0, rotation_sin: 0.0, ..self.clone() };
+        plane.set_center(&back);
+        plane
+    }
+
+    /// The point `point` turned back like `unturned` turns the view: where it is in the unturned view
+    pub fn unturned_point(&self, point: &Complex) -> Complex {
+        Complex::new(point.x * self.rotation_cos - point.y * self.rotation_sin, point.x * self.rotation_sin + point.y * self.rotation_cos)
     }
 
     /// Translate the Complex plane by adding x to `min_x` and `max_x`, and y to `min_y` and `max_y`
@@ -100,8 +143,21 @@ impl ComplexPlane {
     pub fn complex_from_pixel_plane(&self, x: f64, y: f64) -> Complex {
         let x = x.mul_add(self.increment_x, self.min_x);
         let y = -y.mul_add(self.increment_y, self.min_y); //Negate because math plane is bottom-top, and screen plane is top-bottom
-        let c = Complex::new(x, y);
-        c
+        if self.rotation == 0.0 {
+            return Complex::new(x, y);
+        }
+        //A turned view: the image turned counterclockwise by the rotation shows at this pixel the point turned clockwise around the center, R(-θ) · offset
+        let center = self.center();
+        let (dx, dy) = (x - center.x, y - center.y);
+        Complex::new(center.x + dx.mul_add(self.rotation_cos, dy * self.rotation_sin), center.y + dy.mul_add(self.rotation_cos, -(dx * self.rotation_sin)))
+    }
+
+    /// The offset in the plane of a move of `right` and `up` (in the plane's units, along the screen's axes): turned like the view
+    pub fn screen_offset(&self, right: f64, up: f64) -> (f64, f64) {
+        if self.rotation == 0.0 {
+            return (right, up);
+        }
+        (right.mul_add(self.rotation_cos, up * self.rotation_sin), up.mul_add(self.rotation_cos, -(right * self.rotation_sin)))
     }
 
     /// Resets the total translation and scaling applied to the Complex plane by `translate` and `scale`
@@ -173,11 +229,13 @@ impl ComplexPlane {
         translation
     }
 
-    /// Set the Complex plane at Center (x,y) at the given scale, where scale == 1 => max_x-min_x=2.5
+    /// Set the Complex plane at Center (x,y) at the given scale, where scale == 1 => max_x-min_x=2.5. The rotation stays as it is
     pub fn set_view_separated(&mut self, x: f64, y: f64, scale: f64) {
+        let rotation = self.rotation;
         self.reset();
         self.set_center(&Complex::new(x, y));
         self.scale(scale);
+        self.set_rotation(rotation);
     }
 
     /// Set the Complex plane at Center (x,y) at the given scale, where scale == 1 => max_x-min_x=2.5
@@ -357,5 +415,55 @@ mod tests {
     #[test]
     fn the_text_of_a_view_is_what_is_stored_in_the_metadata_of_saved_images() {
         assert_eq!(format!("{:?}", View::new(-0.75, 0.1, 0.25)), "z = -0.75 + 0.1i, scale = 0.25");
+    }
+
+    #[test]
+    fn a_turned_view_turns_the_image_around_its_center_which_stays_exactly_where_it_is() {
+        //Issue #217
+        let mut plane = ComplexPlane::new(200, 100);
+        plane.set_view(&View::new(-0.75, 0.1, 0.01));
+        let unturned: Vec<Complex> = (0..5).map(|k| plane.complex_from_pixel_plane(f64::from(k) * 37.5, f64::from(k) * 21.0)).collect();
+        let center = plane.center();
+        plane.set_rotation(std::f64::consts::FRAC_PI_2);
+        assert_eq!((plane.center().x, plane.center().y), (center.x, center.y), "the center does not move");
+        //Turned a quarter counterclockwise: the pixel 10 to the right of the middle shows what was 10 below it
+        let right = plane.complex_from_pixel_plane(110.0, 50.0);
+        let increment = plane.increment_x;
+        assert!((right.x - center.x).abs() < 1e-12 && (right.y - (center.y - 10.0 * increment)).abs() < 1e-12, "{right:?}");
+        let middle = plane.complex_from_pixel_plane(100.0, 50.0);
+        assert!((middle.x - center.x).abs() < 1e-15 && (middle.y - center.y).abs() < 1e-15);
+        //A whole turn is exactly no turn: the pixels of the unturned view, bit for bit
+        plane.set_rotation(std::f64::consts::TAU);
+        assert_eq!(plane.rotation(), 0.0);
+        let again: Vec<Complex> = (0..5).map(|k| plane.complex_from_pixel_plane(f64::from(k) * 37.5, f64::from(k) * 21.0)).collect();
+        assert!(again.iter().zip(&unturned).all(|(a, b)| a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()));
+        //Any angle is kept from -π to π; a new view or size keeps the rotation
+        plane.set_rotation(3.0 * std::f64::consts::PI / 2.0);
+        assert!((plane.rotation() + std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        plane.set_view(&View::new(0.3, 0.0, 0.5));
+        assert!((plane.rotation() + std::f64::consts::FRAC_PI_2).abs() < 1e-12, "set_view keeps it");
+        assert_eq!(plane.resized(300, 300).rotation(), plane.rotation(), "a resize keeps it");
+    }
+
+    #[test]
+    fn a_turned_view_moves_along_the_screen_and_its_moves_are_whole_pixels() {
+        let mut plane = ComplexPlane::new(160, 120);
+        plane.set_view(&View::new(-0.75, 0.1, 0.02));
+        plane.set_rotation(0.7);
+        let mut moved = plane.clone();
+        crate::rendering::move_complex_plane_by_pixels(&mut moved, 3, -5);
+        //The same shift of the buffer as the same move of the unturned view (the buffer moves opposite to the view, see `pixel_shift`)
+        let mut unturned = plane.clone();
+        unturned.set_rotation(0.0);
+        let mut unturned_moved = unturned.clone();
+        crate::rendering::move_complex_plane_by_pixels(&mut unturned_moved, 3, -5);
+        assert_eq!(crate::rendering::pixel_shift(&plane, &moved), crate::rendering::pixel_shift(&unturned, &unturned_moved), "the move is found again, so the samples move along");
+        assert!(crate::rendering::pixel_shift(&plane, &moved).is_some());
+        //The point at a pixel of the moved view is the point 5 columns to the left and 3 rows up of the same pixel in the view before
+        let (a, b) = (moved.complex_from_pixel_plane(80.0, 60.0), plane.complex_from_pixel_plane(75.0, 57.0));
+        assert!((a.x - b.x).abs() < 1e-12 && (a.y - b.y).abs() < 1e-12, "{a:?} {b:?}");
+        let mut turned = plane.clone();
+        turned.set_rotation(0.8);
+        assert_eq!(crate::rendering::pixel_shift(&plane, &turned), None, "another rotation is not a move");
     }
 }

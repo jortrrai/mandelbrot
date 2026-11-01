@@ -85,6 +85,8 @@ pub struct Location {
     pub scale: f64,
     /// The most iterations of the escape-time iteration
     pub max_iterations: u32,
+    /// How far the view is turned counterclockwise around its center, in degrees (issue #217; a file without it is not turned)
+    pub rotation: f64,
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
@@ -135,6 +137,8 @@ struct RawLocation {
     center: RawCenter,
     scale: f64,
     max_iterations: u32,
+    #[serde(default)]
+    rotation: f64,
 }
 
 #[derive(Deserialize)]
@@ -217,7 +221,7 @@ pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String
         appearance.stretch_palette = raw.stretch_palette;
         appearance
     });
-    let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations };
+    let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations, rotation: if location.rotation.is_finite() { location.rotation } else { 0.0 } };
     Ok((PointOfInterest { name, description: raw.description, location, appearance, file_name: file_name.to_string() }, warnings))
 }
 
@@ -294,6 +298,10 @@ pub fn to_json(point: &PointOfInterest) -> String {
             "max_iterations": location.max_iterations,
         },
     });
+    //(Only a turned view has a rotation: the files of the others are as before)
+    if location.rotation != 0.0 {
+        file["location"]["rotation"] = serde_json::Value::from(location.rotation);
+    }
     if !point.description.is_empty() {
         file["description"] = serde_json::Value::from(point.description.clone());
     }
@@ -387,7 +395,7 @@ mod tests {
         let (point, warnings) = parse(VALID, "test.json").unwrap();
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(point.name, "Test Place");
-        assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200 });
+        assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200, rotation: 0.0 });
         let appearance = point.appearance.unwrap();
         assert_eq!(appearance.coloring, Some(Coloring::Hsv));
         assert_eq!(format!("{:?}", appearance.color_channels.unwrap()), "BGR");
@@ -541,7 +549,7 @@ mod tests {
             let point = PointOfInterest {
                 name: String::from("Comet's Crown"),
                 description: String::from(description),
-                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376 },
+                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376, rotation: 0.0 },
                 appearance,
                 file_name: String::new(),
             };

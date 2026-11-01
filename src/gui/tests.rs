@@ -2695,6 +2695,59 @@ fn open_image_is_a_button_next_to_copy_view() {
 }
 
 #[test]
+fn a_turned_view_is_kept_by_places_and_flights_and_its_unit_only_changes_how_it_is_shown() {
+    //Issue #217: the rotation control, places, flights
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    wait_for_job(&mut app);
+    let center = app.c.center();
+    app.c.set_rotation(std::f64::consts::FRAC_PI_2);
+    assert_eq!((app.c.center().x, app.c.center().y), (center.x, center.y), "turned around the center");
+    //The control shows the same angle in degrees and in radians
+    let texts = controls_texts(&mut app).join("|");
+    assert!(texts.contains("|90|°|rotation"), "{texts}");
+    app.rotation_in_degrees = false;
+    let texts = controls_texts(&mut app).join("|");
+    assert!(texts.contains("|1.5708| rad|rotation"), "{texts}");
+    assert!((app.c.rotation() - std::f64::consts::FRAC_PI_2).abs() < 1e-15, "switching the unit keeps the angle");
+    //A place keeps the rotation, and its file reads back the same
+    let point = app.current_point(String::from("Turned"), String::new());
+    assert!((point.location.rotation - 90.0).abs() < 1e-9);
+    let (read, _) = crate::points_of_interest::parse(&crate::points_of_interest::to_json(&point), "turned.json").unwrap();
+    assert_eq!(read.location, point.location);
+    assert!(!crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest { location: crate::points_of_interest::Location { rotation: 0.0, ..point.location.clone() }, ..point.clone() }).contains("rotation"), "an unturned place is written as before");
+    //A flight to an unturned place turns back the short way on the way, and arrives unturned
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    let flight = app.flight.as_ref().unwrap();
+    let halfway = flight.flight.duration() / 2;
+    let turning = flight.rotation_at(halfway);
+    assert!(turning > 0.0 && turning < std::f64::consts::FRAC_PI_2, "on the way: {turning}");
+    finish_flight(&mut app);
+    assert_eq!(app.c.rotation(), 0.0, "the place is unturned");
+    //And back to the turned place, which arrives turned (and its video turns with it)
+    app.go_to_shared(&crate::points_of_interest::to_json(&point));
+    finish_flight(&mut app);
+    assert!((app.c.rotation() - std::f64::consts::FRAC_PI_2).abs() < 1e-12, "{}", app.c.rotation());
+    let flight = app.last_flight.clone().unwrap();
+    let path = flight.path();
+    assert!((flight.rotation_at(&path, path.duration()) - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    assert!(super::flight::blend_angles(3.0, -3.0, 0.5).abs() > 3.0, "the short way around, through π");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_right_click_centers_a_turned_view_on_the_clicked_point() {
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.c.set_rotation(1.0);
+    let clicked = app.displayed_plane().complex_from_pixel_plane(10.0, 7.0);
+    app.handle_image_click(10.0, 7.0, true);
+    let center = app.c.center();
+    let pixel = app.c.increment_x;
+    assert!((center.x - clicked.x).abs() <= pixel && (center.y - clicked.y).abs() <= pixel, "within a pixel of the clicked point: {center:?} {clicked:?}");
+}
+
+#[test]
 fn a_right_click_does_not_move_a_locked_center() {
     //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
     let config = Config::sized(64, 48, 50, 32);

@@ -88,6 +88,7 @@ impl MandelbrotApp {
         });
         self.sharing_controls(ui);
         self.depth_controls(ui);
+        self.rotation_controls(ui);
     }
 
     /// How flights fly: the pace, the route and the rendering of their frames, frames ahead, and blending and blurring their frames

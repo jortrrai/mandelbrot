@@ -11,6 +11,13 @@ use crate::complex_plane::ComplexPlane;
 /// Where the image of the view `shown` belongs in the image of the view `wanted`, in fractions of the wanted image: from (0, 0) to (1, 1) when the views are the same.
 /// A moved view gives a shifted rectangle, a zoomed view a larger (zoomed in) or smaller (zoomed out) one. The sizes of the images in pixels do not matter, only the part of the plane they show.
 pub(super) fn shown_fraction(shown: &ComplexPlane, wanted: &ComplexPlane) -> egui::Rect {
+    //Turned views (#217): with the same rotation they compare as their unturned views; with another one the image is drawn as it is until the render replaces it
+    if shown.rotation().to_bits() != wanted.rotation().to_bits() {
+        return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    }
+    if shown.rotation() != 0.0 {
+        return shown_fraction(&shown.unturned(), &wanted.unturned());
+    }
     //The bounds are stored with the orientation of the screen, so `min_y` is the top row of both images
     let x = |value: f64| ((value - wanted.min_x) / (wanted.max_x - wanted.min_x)) as f32;
     let y = |value: f64| ((value - wanted.min_y) / (wanted.max_y - wanted.min_y)) as f32;

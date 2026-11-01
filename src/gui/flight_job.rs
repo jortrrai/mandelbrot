@@ -47,7 +47,7 @@ impl MandelbrotApp {
     pub(super) fn start_flight_job(&mut self, frame_interval: Duration) {
         self.flight_job_options = Some(self.flight_job_options());
         let Some(flight) = &mut self.flight else { return };
-        let (path, mut elapsed, limits, palettes) = (flight.flight.clone(), flight.elapsed, flight.limits.clone(), flight.palettes);
+        let (path, mut elapsed, limits, palettes, rotations) = (flight.flight.clone(), flight.elapsed, flight.limits.clone(), flight.palettes, flight.rotations);
         self.cancel_thumbnail_job();
         self.cancel_neighborhood_job();
         self.interrupt_progressive_render();
@@ -100,6 +100,8 @@ impl MandelbrotApp {
                     break; //The window stopped the job between the check and the reset
                 }
                 plane.set_view(&path.camera_at(elapsed).view());
+                //(Turned from the rotation at the start to the place's, or by the keyframes, see `points::PointFlight::rotation_at`)
+                plane.set_rotation(path.rotation_at(elapsed).unwrap_or_else(|| super::flight::blend_angles(rotations.0, rotations.1, path.share_of_path(elapsed))));
                 if let Some(limit) = path.limit_at(elapsed) {
                     m.max_iterations = limit; //The limits of the keyframes of a sequence
                 } else if let Some(settings) = &auto_settings {
@@ -117,6 +119,7 @@ impl MandelbrotApp {
                     //An Auto frame below full resolution: the same view in fewer pixels, which the window scales up (see `MandelbrotApp::shown_scaled`)
                     let mut small_plane = ComplexPlane::new(small.0, small.1);
                     small_plane.set_view(&plane.get_view());
+                    small_plane.set_rotation(plane.rotation());
                     let mut shown = false;
                     history = None; //(A blend continues only from full-resolution frames, see `temporal`)
                     Render::new(&small_plane, &m, small.0, small.1, coloring_function).gpu(gpu.as_deref().map(|gpu| (gpu, join_after))).fast_gpu(fast_gpu).f32_gpu(f32_frames).cancel_with(&thread_cancel)

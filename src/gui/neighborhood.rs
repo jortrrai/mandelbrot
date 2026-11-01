@@ -125,6 +125,7 @@ impl MandelbrotApp {
         let center = self.c.center();
         let mut plane = ComplexPlane::new(width, height);
         plane.set_view(&View::new(center.x, center.y, self.c.get_scale() * views_across(margin)));
+        plane.set_rotation(self.c.rotation()); //(Turned like the view, around the same center)
         let (m, coloring_function) = (self.m.clone(), self.coloring_function);
         let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -154,8 +155,9 @@ impl MandelbrotApp {
 /// Whether the neighborhood of `margin` percent made for the view `around` still serves the view `view`: the same zoom, and the view moved by at most half the
 /// margin, so the neighborhood still reaches at least half its margin past every side (half a view by default)
 pub(super) fn still_around(around: &ComplexPlane, view: &ComplexPlane, margin: u16) -> bool {
-    let same_zoom = (around.get_scale() / view.get_scale() - 1.0).abs() < 1e-9;
-    let ((a, b), share) = ((around.center(), view.center()), f64::from(margin) / 200.0);
+    //(Turned otherwise, the neighborhood shows other surroundings: it is rendered again)
+    let same_zoom = (around.get_scale() / view.get_scale() - 1.0).abs() < 1e-9 && around.rotation().to_bits() == view.rotation().to_bits();
+    let ((a, b), share) = ((around.unturned().center(), view.unturned().center()), f64::from(margin) / 200.0);
     same_zoom && (a.x - b.x).abs() <= around.length_x * share && (a.y - b.y).abs() <= around.length_y * share
 }
 

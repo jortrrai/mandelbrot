@@ -39,6 +39,25 @@ impl MandelbrotApp {
         true
     }
 
+    /// The rotation of the view (issue #217): a slider with a number to type, in degrees or radians. It turns the image around the center of the view, which
+    /// stays exactly where it is; switching the unit only changes how the angle is shown
+    pub(super) fn rotation_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let radians = self.c.rotation();
+            let (mut value, range, suffix) = if self.rotation_in_degrees { (radians.to_degrees(), -180.0..=180.0, "°") } else { (radians, -std::f64::consts::PI..=std::f64::consts::PI, " rad") };
+            //(Any typed angle is taken, a whole turn more or less is the same view; only a change by the user turns the view, never the slider's own rounding)
+            let response = ui.add(egui::Slider::new(&mut value, range).clamping(egui::SliderClamping::Never).max_decimals(if self.rotation_in_degrees { 2 } else { 4 }).suffix(suffix).text("rotation"))
+                .on_hover_text("Turns the image counterclockwise around the center of the view, which stays where it is (type any angle; 0 is unturned). Places, images, Copy view, keyframes and flights keep the rotation");
+            if response.changed() {
+                let turned = if self.rotation_in_degrees { value.to_radians() } else { value };
+                self.c.set_rotation(turned);
+                self.render(&format!("Turned the view to {:.2}°", self.c.rotation().to_degrees()));
+            }
+            ui.selectable_value(&mut self.rotation_in_degrees, true, "degrees").on_hover_text("Show and type the rotation in degrees (the angle stays the same)");
+            ui.selectable_value(&mut self.rotation_in_degrees, false, "radians").on_hover_text("Show and type the rotation in radians (the angle stays the same)");
+        });
+    }
+
     /// The depth slider and *Lock center*
     pub(super) fn depth_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {

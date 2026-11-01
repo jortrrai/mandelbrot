@@ -230,6 +230,8 @@ pub struct MandelbrotApp {
     /// Whether the depth slider is being dragged, and whether the mouse keeps the center of the view (see `depth`)
     depth_dragging: bool,
     lock_center: bool,
+    /// Whether the rotation is shown and typed in degrees (or in radians), see `depth::rotation_controls`
+    rotation_in_degrees: bool,
     /// The center the depth control keeps, exactly (see `depth::exact_center`)
     depth_center: Option<crate::complex::Complex>,
     /// The keyframes of the sequence being made, and the times of its transitions as typed (see `sequence`)
@@ -428,6 +430,7 @@ impl MandelbrotApp {
             unfinished_videos: None,
             shared_view_input: String::new(),
             depth_dragging: false,
+            rotation_in_degrees: true,
             lock_center: false,
             depth_center: None,
             sequence_keyframes: Vec::new(),

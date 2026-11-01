@@ -55,7 +55,7 @@ fn main() {
     println!("  with thumbnails rendering continuously in the background (no policy): {busy:.1} ms ({:+.0}%)", 100.0 * (busy / alone - 1.0));
 
     //With the policy: a thumbnail (the slowest kind: an enormous limit, capped) is running when the main render starts, so it is cancelled first
-    let slow = ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.00006400000000000002, max_iterations: 1_000_000 }, ..requests[0].1.clone() };
+    let slow = ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.00006400000000000002, max_iterations: 1_000_000, rotation: 0.0 }, ..requests[0].1.clone() };
     let slow_alone = time_ms(5, || { std::hint::black_box(thumbnails::render_thumbnail(&slow, 2.0, &AtomicBool::new(false))); });
     let mut main_times = Vec::new();
     let mut cancel_latencies = Vec::new();

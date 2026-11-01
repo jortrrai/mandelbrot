@@ -243,7 +243,9 @@ impl<'a> Render<'a> {
         let fast_key = fast_gpu && gpu.is_some();
         //(The samples remember whether the f32 loop was asked for, see `SampleKey`)
         let f32_key = f32_gpu && fast_gpu && gpu.is_some();
-        let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS && width <= MAX_PIXEL && height <= MAX_PIXEL;
+        //(The fast loops compute the points of an unturned view themselves: a turned view (#217) gets the exact loop, whose points come from the CPU)
+        let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS && width <= MAX_PIXEL && height <= MAX_PIXEL && c.rotation() == 0.0
+            && sample_planes.is_none_or(|planes| planes.iter().all(|plane| plane.rotation() == 0.0));
         let math = if !fast_gpu { GpuMath::Exact } else if f32_gpu && c.precision_steps() >= F32_GPU_STEPS { GpuMath::Single } else { GpuMath::DoubleFloat };
         debug_assert!(cpu_threads > 0 || gpu.is_some(), "a render without CPU threads needs the GPU");
         let own_gpu_samples = AtomicUsize::new(0);

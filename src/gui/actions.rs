@@ -75,6 +75,7 @@ impl MandelbrotApp {
             } else {
                 let mut image_c = ComplexPlane::new(resolution.width, resolution.height);
                 image_c.set_view(&view);
+                image_c.set_rotation(c.rotation());
                 let picture = export::Picture { plane: &image_c, size: resolution, m: &m, samples: image_supersampling_amount, coloring_function, gpu: gpu.as_deref(), blur: sigma };
                 export::save_png(&path, &picture, &metadata, STRIP_PIXELS, &cancel, &progress)
             });
@@ -156,9 +157,10 @@ impl MandelbrotApp {
             self.log(format!("Lock center is on: the view stays centered (clicked ({:.10}, {:.10}))", complex.x, complex.y));
         } else if centering {
             //Moves by whole pixels, so the samples of the pixels that stay visible are kept: the clicked point ends up within half a pixel of the center
-            let center = self.c.center();
-            let columns_right = ((complex.x - center.x) / self.c.increment_x).round() as i64;
-            let rows_up = ((complex.y - center.y) / self.c.increment_y).round() as i64;
+            //(In a turned view, along the screen's axes: the point and the center turned back, see `ComplexPlane::unturned`)
+            let (point, center) = (self.c.unturned_point(&complex), self.c.unturned_point(&self.c.center()));
+            let columns_right = ((point.x - center.x) / self.c.increment_x).round() as i64;
+            let rows_up = ((point.y - center.y) / self.c.increment_y).round() as i64;
             rendering::move_complex_plane_by_pixels(&mut self.c, rows_up, columns_right);
             self.render_moved(&format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y));
         } else {

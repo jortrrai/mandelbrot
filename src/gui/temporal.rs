@@ -77,7 +77,9 @@ pub(super) const ZOOM_WEIGHT: f32 = 0.0;
 /// `blend`, where the new frame weighs at least `MIN_WEIGHT + zoom_weight · |ln(scale / scale before)|`
 pub(super) fn blend_with(history: &mut Option<History>, plane: &ComplexPlane, colors: &[TrueColor], width: usize, height: usize, shown: &mut Vec<TrueColor>, zoom_weight: f32) {
     shown.clear();
-    let Some(before) = history.as_mut().filter(|before| before.colors.len() == width * height) else {
+    //(A view turned otherwise than the frames before starts the blend again: its pixels are not the turned image before; with the same rotation the views
+    //compare as their unturned views, see `ComplexPlane::unturned`)
+    let Some(before) = history.as_mut().filter(|before| before.colors.len() == width * height && before.plane.rotation().to_bits() == plane.rotation().to_bits()) else {
         shown.extend_from_slice(colors);
         *history = Some(History { plane: plane.clone(), colors: colors.to_vec(), frames: 1, scratch: Vec::new() });
         return;
@@ -88,8 +90,9 @@ pub(super) fn blend_with(history: &mut Option<History>, plane: &ComplexPlane, co
     //Pixel (x, y) of the view is at (x * scale_x + offset_x, y * scale_y + offset_y) in the image before (the centers of the pixels, both with the screen's y down):
     //an axis-aligned map, so the neighbors and weights are computed once per column and once per row
     let (scale_x, scale_y) = (plane.increment_x / before.plane.increment_x, plane.increment_y / before.plane.increment_y);
-    let columns = axis(width, scale_x, (plane.min_x - before.plane.min_x) / before.plane.increment_x + 0.5 * scale_x - 0.5);
-    let rows = axis(height, scale_y, (plane.min_y - before.plane.min_y) / before.plane.increment_y + 0.5 * scale_y - 0.5);
+    let (now, then) = (plane.unturned(), before.plane.unturned());
+    let columns = axis(width, scale_x, (now.min_x - then.min_x) / then.increment_x + 0.5 * scale_x - 0.5);
+    let rows = axis(height, scale_y, (now.min_y - then.min_y) / then.increment_y + 0.5 * scale_y - 0.5);
     before.scratch.resize(width * height, TrueColor::new(0, 0, 0));
     let (stride, rows_per_chunk) = (3 * width, height.div_ceil(render_thread_count()).max(1));
     let (new, old): (&[u8], &[u8]) = (bytemuck::cast_slice(colors), bytemuck::cast_slice(&before.colors));

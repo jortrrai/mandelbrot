@@ -631,6 +631,38 @@ fn a_render_with_the_gpu_is_bit_for_bit_the_render_without_it() {
 }
 
 #[test]
+fn a_turned_view_is_rendered_by_the_gpu_bit_for_bit_like_the_cpu() {
+    //Issue #217: a turned view uses the exact loop of the GPU (its points come from the CPU), also with the fast math asked for
+    let gpu = match super::gpu::GpuIterator::new() {
+        Ok(gpu) => gpu,
+        Err(reason) => {
+            println!("No GPU to test: {reason}");
+            return;
+        }
+    };
+    let (w, h) = (96, 64);
+    let (mut c, m) = boundary_plane(w, h);
+    c.set_rotation(0.6);
+    let render = |gpu: Option<&super::gpu::GpuIterator>| {
+        let mut last = Vec::new();
+        let render = Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).adaptive(Some(AdaptiveSampling::default()));
+        let render = match gpu { Some(gpu) => render.gpu(Some((gpu, std::time::Duration::ZERO))).fast_gpu(true).on_the_gpu_only(), None => render };
+        assert!(render.run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()));
+        last
+    };
+    let cpu = render(None);
+    assert_eq!(render(Some(&gpu)), cpu);
+    let mut unturned = c.clone();
+    unturned.set_rotation(0.0);
+    let straight = {
+        let mut last = Vec::new();
+        assert!(Render::new(&unturned, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).adaptive(Some(AdaptiveSampling::default())).run(|colors, _| last = colors.iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>()));
+        last
+    };
+    assert_ne!(cpu, straight, "turned, the image is another");
+}
+
+#[test]
 fn samples_in_views_of_their_own_are_the_render_when_every_view_is_its_view_and_differ_otherwise() {
     //Issue #210 (motion blur): sample k of every pixel in planes[k]
     let (w, h) = (64, 48);
