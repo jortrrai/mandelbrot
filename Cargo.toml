@@ -27,6 +27,8 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 cpu-time = "1"
 ureq = "2"
+# The system's file chooser for Open image (on Linux through the desktop portal, so it needs no GTK and works on Wayland, where dropped files never arrive)
+rfd = "0.17"
 
 [profile.release]
 lto = "fat"

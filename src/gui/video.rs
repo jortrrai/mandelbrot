@@ -855,7 +855,13 @@ impl MandelbrotApp {
             }
             manifest = chunks::read_manifest(&parts).unwrap_or(manifest);
             if manifest.chunks_done < manifest.chunks() {
-                let _ = sender.send(format!("Video of the flight paused at {} of {total} frames: {} of {} chunks are kept in {}, and Resume continues it", manifest.first_frame(), manifest.chunks_done, manifest.chunks(), parts.display()));
+                let message = if manifest.chunks_done == 0 {
+                    //(A chunk is kept once all its frames are encoded: before the first, there is nothing yet)
+                    format!("Video of the flight paused before its first chunk of {} frames was finished: no frames are kept yet, and Resume starts it again from the beginning with the same settings", manifest.chunk_frames)
+                } else {
+                    format!("Video of the flight paused at {} of {total} frames: {} of {} chunks are kept in {}, and Resume continues it", manifest.first_frame(), manifest.chunks_done, manifest.chunks(), parts.display())
+                };
+                let _ = sender.send(message);
                 return;
             }
             let hevc = arguments(quality, playback, manifest.nvenc, fps).iter().any(|argument| argument == "hevc_nvenc" || argument == "libx265");
@@ -960,10 +966,16 @@ impl MandelbrotApp {
         let mut resume = None;
         for (name, done, total) in videos.iter() {
             ui.horizontal(|ui| {
-                if ui.button("Resume").on_hover_text("Continues this video from its first unfinished chunk, with the settings it was started with").clicked() {
+                //Every frame rendered, the chunks not joined (the join failed or was interrupted): Resume only joins them
+                let (button, tooltip, label) = if done == total {
+                    ("Join", "Joins the finished chunks of this video into its file; nothing is rendered again", format!("Rendered, not joined: {name} (all {total} frames)"))
+                } else {
+                    ("Resume", "Continues this video from its first unfinished chunk, with the settings it was started with", format!("Unfinished: {name} ({done} of {total} frames)"))
+                };
+                if ui.button(button).on_hover_text(tooltip).clicked() {
                     resume = Some(name.clone());
                 }
-                ui.label(format!("Unfinished: {name} ({done} of {total} frames)"));
+                ui.label(label);
             });
         }
         if let Some(name) = resume {

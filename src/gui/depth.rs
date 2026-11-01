@@ -43,7 +43,8 @@ impl MandelbrotApp {
     pub(super) fn depth_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let mut zoom = 1.0 / self.c.get_scale();
-            let response = ui.add(egui::Slider::new(&mut zoom, DEPTH_ZOOMS).logarithmic(true).text("depth").custom_formatter(|zoom, _| format!("×{zoom:.3e}")).custom_parser(|text| text.trim().trim_start_matches(['×', 'x']).trim().parse().ok()))
+            //(Only what is dragged or typed is clamped: a view beyond the range of the slider, zoomed out further with the wheel, stays where it is)
+            let response = ui.add(egui::Slider::new(&mut zoom, DEPTH_ZOOMS).clamping(egui::SliderClamping::Edits).logarithmic(true).text("depth").custom_formatter(|zoom, _| format!("×{zoom:.3e}")).custom_parser(|text| text.trim().trim_start_matches(['×', 'x']).trim().parse().ok()))
                 .on_hover_text("Zooms in and out around the center of the view, without ever moving it: explore a dive up and down its exact path, and tune its colors at chosen depths");
             self.depth_dragging = response.dragged();
             if response.changed() {
@@ -52,7 +53,7 @@ impl MandelbrotApp {
                     self.render(&format!("Set the depth to ×{:.3e} around the center", 1.0 / self.c.get_scale()));
                 }
             }
-            ui.checkbox(&mut self.lock_center, "Lock center").on_hover_text("The mouse keeps the center of the view too: the wheel zooms around the center instead of the cursor, and dragging does not move the view");
+            ui.checkbox(&mut self.lock_center, "Lock center").on_hover_text("The mouse keeps the center of the view too: the wheel zooms around the center instead of the cursor, and dragging and right-clicking do not move the view");
         });
     }
 }

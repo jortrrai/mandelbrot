@@ -1678,6 +1678,8 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     (app.video_fit_length, app.video_length) = (true, [String::from("1"), String::new(), String::from("7.5")]);
     (app.music_path, app.follow_music, app.music_strength) = (String::from("/music/track.mp3"), true, 0.8);
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
+    //The saved image size (asked by Jort in the review of review-4)
+    (app.save_size.choice, app.save_size.portrait, app.save_size.custom_width, app.save_size.custom_height) = (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000);
     let now = std::time::Instant::now();
     app.keep_settings(now);
     assert!(!path.exists(), "not on every frame of a drag");
@@ -1695,11 +1697,14 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert_eq!((next.video_fit_length, next.target_length()), (true, Some(Duration::from_secs_f64(3607.5))));
     assert_eq!((next.music_path.as_str(), next.follow_music, next.music_strength), ("/music/track.mp3", true, 0.8));
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
+    assert_eq!((next.save_size.choice.clone(), next.save_size.portrait, next.save_size.custom_width, next.save_size.custom_height), (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000));
+    assert_eq!(next.save_size.resolve(next.default_save_resolution(), next.view_resolution()), Ok(crate::resolution::Resolution::new(17_280, 30_720)), "32K upright, as it was");
     //A file with unknown and missing values loads what it knows
-    std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
+    std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3, "save_size": "preset:A deleted preset" }"#).unwrap();
     let mut partial = manual_app(&Config::sized(64, 48, 50, 4));
     partial.use_settings_file(Some(path));
     assert_eq!((partial.pace, partial.supersampling_amount), (super::flight::Pace::Normal, defaults.clone().supersampling_for_test()));
+    assert_eq!(partial.save_size.choice, super::save_size::SaveSizeChoice::Standard, "a preset that is gone: the default size");
     //Reset
     next.reset_settings();
     assert_eq!(next.settings(), defaults);
@@ -2120,6 +2125,63 @@ fn a_chunked_mp4_joins_into_one_video_with_every_frame() {
     assert!(total > 10, "more than two chunks: {message}");
     let video = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mp4")).expect(&message);
     assert_eq!(decoded_frames(&video).len(), total * 192 * 108 * 3, "every frame, decodable: {message}");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_video_in_a_relative_folder_like_saved_joins_its_chunks() {
+    if !ffmpeg_available() {
+        return;
+    }
+    //The window's videos go to the relative folder saved/, and ffmpeg reads the paths of its list of chunks from the folder of the list: the chunks of every
+    //video in the app were not found (found by Jort in the review of review-4: "Could not join the chunks of the video")
+    let (mut app, folder) = chunked_video_app(false);
+    let relative = std::path::PathBuf::from("target").join(format!("test-relative-videos-{}", std::process::id())).join("saved");
+    let _ = std::fs::remove_dir_all(&relative);
+    app.video_folder.clone_from(&relative);
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight:") && !message.contains("(stopped"), "{message}");
+    let total: usize = message.split(" of ").nth(2).and_then(|rest| rest.split(' ').next()).and_then(|total| total.parse().ok()).expect(&message);
+    assert!(total > 10, "more than two chunks: {message}");
+    let video = std::fs::read_dir(&relative).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mkv")).expect(&message);
+    assert_eq!(decoded_frames(&video).len(), total * 48 * 32 * 3, "every frame: {message}");
+    let _ = (std::fs::remove_dir_all(relative.parent().unwrap()), std::fs::remove_dir_all(folder));
+}
+
+#[test]
+fn the_unfinished_videos_are_listed_newest_first_and_a_rendered_one_offers_to_join() {
+    //Found by Jort in the review of review-4: he paused a video and pressed Resume, which did nothing. The list was sorted by name, oldest first, so the top row
+    //was an older video of the same place, all of whose frames were rendered and whose join had failed (the join bug): Resume tried the join again and failed
+    let (mut app, folder) = chunked_video_app(false);
+    let saved = folder.join("saved");
+    let spec = app.video_spec().unwrap();
+    for (name, done) in [("video-2026-11-01_20-24-13-place", 2), ("video-2026-11-01_20-43-18-place", 0)] {
+        let parts = super::chunks::parts_folder(&saved, name);
+        std::fs::create_dir_all(&parts).unwrap();
+        let mut manifest = super::chunks::Manifest::new(spec.clone(), 10, 5, false);
+        manifest.chunks_done = done;
+        super::chunks::write_manifest(&parts, &manifest).unwrap();
+    }
+    let names: Vec<String> = super::chunks::unfinished(&saved).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["video-2026-11-01_20-43-18-place", "video-2026-11-01_20-24-13-place"], "the newest first");
+    app.unfinished_videos = None;
+    let texts = controls_texts(&mut app).join("\n");
+    assert!(texts.contains("Unfinished: video-2026-11-01_20-43-18-place (0 of 10 frames)") && texts.contains("Rendered, not joined: video-2026-11-01_20-24-13-place (all 10 frames)") && texts.contains("Join"), "{texts}");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_video_paused_before_its_first_chunk_says_that_nothing_is_kept_yet() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let (mut app, folder) = chunked_video_app(false);
+    app.video_chunk_frames = Some(100_000);
+    app.start_video();
+    app.video_job.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
+    let message = wait_for_video(&mut app);
+    assert!(message.contains("paused before its first chunk") && message.contains("no frames are kept yet"), "{message}");
     let _ = std::fs::remove_dir_all(folder);
 }
 
@@ -2582,6 +2644,85 @@ fn after_a_cancelled_dive_the_same_place_can_be_dived_to_again() {
             assert_eq!((app.c.center().x, app.c.get_scale()), (place.real, place.scale), "{rendering:?}, auto {auto_iterations}: at the place");
         }
     }
+}
+
+#[test]
+fn a_flight_whose_colors_change_arrives_with_the_color_controls_on_the_screen() {
+    //Found by Jort in the review of review-4 (#192): with Restore the saved appearance on, or a keyframe sequence whose keyframes have other colors, a flight
+    //changes the colors a little on every frame. The sliders of Iteration divide and Offset rounded those in-between values to their steps on every frame
+    //of the window (egui clamps and rounds an existing value by default), the controls took that for a change of the colors and rendered the view again,
+    //which stopped the frame the flight was waiting for: the flight never got going while the Colors section was open
+    const PLACE: &str = r#"{ "format_version": 1, "name": "Colored Place", "location": { "center": { "real": -0.7498100000000001, "imaginary": -0.020300000000000054 }, "scale": 0.00006400000000000002, "max_iterations": 321 },
+        "appearance": { "iteration_divide": 7.5, "color_offset": 311.0 } }"#;
+    for rendering in [super::flight::FlightRendering::FULL_RESOLUTION, super::flight::FlightRendering::BestEffort] {
+        let (mut app, folder) = app_with_points(&[("colored-place.json", PLACE)]);
+        (app.flight_rendering, app.pace, app.restore_appearance) = (rendering, super::flight::Pace::Fast, true);
+        let before = app.m.palette;
+        app.go_to_point_of_interest(0);
+        assert!(app.flight.is_some(), "{rendering:?}: the flight starts");
+        let ctx = egui::Context::default();
+        let started = std::time::Instant::now();
+        let mut in_between = false;
+        while app.flight.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(60), "{rendering:?}: the flight arrives: {:?}", app.log.iter().rev().take(4).collect::<Vec<_>>());
+            //The controls on the screen, as in the window, every frame (the sections are open in tests)
+            ctx.run_ui(egui::RawInput::default(), |ui| app.controls_ui(ui)).drop_without_applying_deltas();
+            app.poll_job();
+            app.fly_at(std::time::Instant::now());
+            in_between |= app.m.palette != before && app.m.palette.offset.fract() != 0.0;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(in_between, "{rendering:?}: the colors went through in-between values");
+        assert!(!app.log.iter().any(|line| line.starts_with("Set the colors to")), "{rendering:?}: the controls never took the flight's colors for a change: {:?}", app.log);
+        assert_eq!((app.m.palette.divide, app.m.palette.offset), (7.5, 311.0), "{rendering:?}: the colors of the place");
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+#[test]
+fn open_image_is_a_button_next_to_copy_view() {
+    //Asked by Jort in the review of review-4: dropping an image on the window did nothing (his window runs on Wayland, where winit 0.30 delivers no dropped
+    //files), so Open image is the way to go to an image's view; it opens the image with `open_image`, which the tests of the image metadata cover
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    let texts = controls_texts(&mut app);
+    let open = texts.iter().position(|text| text == "Open image...").expect("the button is there");
+    assert_eq!(texts.get(open + 1).map(String::as_str), Some("Copy view"), "{texts:?}");
+    //It starts in the home folder: an absolute folder that exists (the relative folder saved/ made the file chooser fail)
+    if let Some(home) = super::sharing::home_folder() {
+        assert!(home.is_absolute() && home.is_dir(), "{}", home.display());
+    }
+}
+
+#[test]
+fn a_right_click_does_not_move_a_locked_center() {
+    //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.lock_center = true;
+    let center = app.c.center();
+    app.handle_image_click(5.0, 7.0, true);
+    assert_eq!((app.c.center().x, app.c.center().y), (center.x, center.y), "the center stays");
+    assert!(app.log.last().unwrap().starts_with("Lock center is on"), "{:?}", app.log.last());
+    app.lock_center = false;
+    app.handle_image_click(5.0, 7.0, true);
+    assert_ne!(app.c.center().x, center.x, "without the lock, a right click centers the view on the point");
+}
+
+#[test]
+fn the_controls_on_the_screen_never_change_a_view_or_colors_that_nobody_touched() {
+    //A view zoomed out beyond the depth slider (×0.1) and colors between the steps of the sliders: drawing the controls leaves them as they are
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.c.scale(20.0);
+    (app.m.palette.divide, app.m.palette.offset) = (1.23456, 77.7);
+    let (view, palette, lines) = (app.c.get_view(), app.m.palette, app.log.len());
+    let ctx = egui::Context::default();
+    for _ in 0..3 {
+        ctx.run_ui(egui::RawInput::default(), |ui| app.controls_ui(ui)).drop_without_applying_deltas();
+    }
+    assert_eq!((format!("{:?}", app.c.get_view()), app.m.palette), (format!("{view:?}"), palette));
+    assert_eq!(app.log.len(), lines, "nothing was rendered: {:?}", &app.log[lines..]);
 }
 
 #[test]
