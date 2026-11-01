@@ -53,7 +53,7 @@ impl MandelbrotApp {
                     self.render(&format!("Set the depth to ×{:.3e} around the center", 1.0 / self.c.get_scale()));
                 }
             }
-            ui.checkbox(&mut self.lock_center, "Lock center").on_hover_text("The mouse keeps the center of the view too: the wheel zooms around the center instead of the cursor, and dragging does not move the view");
+            ui.checkbox(&mut self.lock_center, "Lock center").on_hover_text("The mouse keeps the center of the view too: the wheel zooms around the center instead of the cursor, and dragging and right-clicking do not move the view");
         });
     }
 }

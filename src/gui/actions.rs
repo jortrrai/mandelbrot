@@ -151,7 +151,10 @@ impl MandelbrotApp {
     pub(super) fn handle_image_click(&mut self, x: f32, y: f32, centering: bool) {
         //The point under the mouse in the view on the screen (with immersion, that can be the last complete frame while the view moves on)
         let complex = self.displayed_plane().complex_from_pixel_plane(x.into(), y.into());
-        if centering {
+        if centering && self.lock_center {
+            //Lock center keeps the center against the mouse, the right click too
+            self.log(format!("Lock center is on: the view stays centered (clicked ({:.10}, {:.10}))", complex.x, complex.y));
+        } else if centering {
             //Moves by whole pixels, so the samples of the pixels that stay visible are kept: the clicked point ends up within half a pixel of the center
             let center = self.c.center();
             let columns_right = ((complex.x - center.x) / self.c.increment_x).round() as i64;

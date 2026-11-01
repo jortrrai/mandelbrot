@@ -2639,6 +2639,21 @@ fn a_flight_whose_colors_change_arrives_with_the_color_controls_on_the_screen() 
 }
 
 #[test]
+fn a_right_click_does_not_move_a_locked_center() {
+    //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.lock_center = true;
+    let center = app.c.center();
+    app.handle_image_click(5.0, 7.0, true);
+    assert_eq!((app.c.center().x, app.c.center().y), (center.x, center.y), "the center stays");
+    assert!(app.log.last().unwrap().starts_with("Lock center is on"), "{:?}", app.log.last());
+    app.lock_center = false;
+    app.handle_image_click(5.0, 7.0, true);
+    assert_ne!(app.c.center().x, center.x, "without the lock, a right click centers the view on the point");
+}
+
+#[test]
 fn the_controls_on_the_screen_never_change_a_view_or_colors_that_nobody_touched() {
     //A view zoomed out beyond the depth slider (×0.1) and colors between the steps of the sliders: drawing the controls leaves them as they are
     let config = Config::sized(64, 48, 50, 32);
