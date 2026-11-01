@@ -4,10 +4,12 @@
 
 use crate::auto_iterations::AutoPreset;
 use crate::complex_plane::{ComplexPlane, View};
-use crate::pixel_buffer::{pixel_plane::PixelPlane, PixelBuffer};
-use crate::rendering::{self};
+use std::sync::{atomic::Ordering, Arc};
+
+use crate::pixel_buffer::PngMetadata;
+use crate::rendering::{self, strips::STRIP_PIXELS};
 use crate::resolution::Resolution;
-use super::MandelbrotApp;
+use super::{export, MandelbrotApp};
 
 
 impl MandelbrotApp {
@@ -29,9 +31,14 @@ impl MandelbrotApp {
         self.render_moved(&format!("Moved {name} {} pixels", self.vars.translation_amount));
     }
 
-    /// Saves the current view as an image on its own background thread. This does not interrupt a running render;
-    /// while one runs, the buffer only holds a partially refined image, so the image is rendered again for saving.
+    /// Saves the current view as an image on its own background thread, with a progress bar and a Cancel button (see `image_save`). This does not interrupt a
+    /// running render; while one runs, the buffer only holds a partially refined image, so the image is rendered again for saving. An image of another size
+    /// than the view is rendered and written in strips, so its memory stays bounded up to 32K (see `export`).
     pub(super) fn save_image(&mut self) {
+        if self.image_save.is_some() {
+            self.log("Could not save the image: another image is still being saved");
+            return;
+        }
         let resolution = match self.save_size.resolve(self.default_save_resolution(), self.view_resolution()) {
             Ok(resolution) => resolution,
             Err(reason) => {
@@ -48,34 +55,38 @@ impl MandelbrotApp {
         let gpu = self.gpu.clone().filter(|_| self.use_gpu);
         //The view in the image's metadata, so it can be opened again (see `image_metadata`)
         let place = crate::points_of_interest::to_json(&self.current_point(file_name.clone(), String::new()));
+        let save = export::ImageSave { size: resolution, passes: usize::from(image_supersampling_amount.clamp(1, 64)), progress: Arc::default(), cancel: Arc::default(), ended: Arc::default(), started: std::time::Instant::now() };
+        let (progress, cancel, ended) = (Arc::clone(&save.progress), Arc::clone(&save.cancel), Arc::clone(&save.ended));
+        self.image_save = Some(save);
         std::thread::spawn(move || {
             let view = c.get_view();
             let (view_width, view_height) = (p.pixel_plane.width, p.pixel_plane.height);
             let same_size_as_view = resolution == Resolution::new(view_width, view_height); //Only then is the image in the buffer the image that is saved
-            let mut image_p = if same_size_as_view && buffer_is_complete {
-                p
+            //The blur preset: the blur of a frame of this many samples, as on the screen (see `blur::blur_sigma`)
+            let sigma = blur.then(|| super::blur::blur_sigma(1, image_supersampling_amount));
+            let path = std::path::PathBuf::from("saved").join(format!("{file_name}.png"));
+            let metadata = PngMetadata { view: &view, m: &m, supersampling_amount: image_supersampling_amount, color_channel_mapping: p.color_channel_mapping, place: Some(&place) };
+            let saved = std::fs::create_dir_all("saved").and_then(|()| if same_size_as_view && buffer_is_complete {
+                let mut image_p = p;
+                if let Some(sigma) = sigma {
+                    image_p.colors = super::blur::blurred(&image_p.colors, view_width, view_height, sigma);
+                }
+                image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount, Some(&place)).map(|()| true)
             } else {
-                let mut image_p = PixelBuffer::new(PixelPlane::new(resolution.width, resolution.height));
                 let mut image_c = ComplexPlane::new(resolution.width, resolution.height);
-                image_p.color_channel_mapping = p.color_channel_mapping;
                 image_c.set_view(&view);
-                rendering::render_complex_plane_into_buffer_with_gpu(&mut image_p, &image_c, &m, image_supersampling_amount, coloring_function, gpu.as_deref());
-                image_p
-            };
-            if blur {
-                //The blur preset: the blur of a frame of this many samples, as on the screen (see `blur::blur_sigma`)
-                let (width, height) = (image_p.pixel_plane.width, image_p.pixel_plane.height);
-                image_p.colors = super::blur::blurred(&image_p.colors, width, height, super::blur::blur_sigma(1, image_supersampling_amount));
-                image_p.update_pixels();
-            }
-            let saved = image_p.save_as_png(&time_stamp, &view, &m, image_supersampling_amount, Some(&place));
+                let picture = export::Picture { plane: &image_c, size: resolution, m: &m, samples: image_supersampling_amount, coloring_function, gpu: gpu.as_deref(), blur: sigma };
+                export::save_png(&path, &picture, &metadata, STRIP_PIXELS, &cancel, &progress)
+            });
             let message = match saved {
-                Ok(()) => format!("Saved the image to saved/{file_name}.png"),
+                Ok(true) => format!("Saved the image to saved/{file_name}.png"),
+                Ok(false) => format!("Cancelled saving the image of {resolution}"),
                 Err(err) => format!("Could not save the image to saved/{file_name}.png: {err}"),
             };
+            ended.store(true, Ordering::Relaxed);
             let _ = sender.send(message);
         });
-        self.log("Saving the image...");
+        self.log(format!("Saving the image of {resolution}..."));
     }
 
     /// Goes back to the view that was shown before this one, if there is one

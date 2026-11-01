@@ -55,12 +55,14 @@ pub struct Render<'a> {
     colors_sample: u8,
     /// The number of the first sample of a pixel (see `sample_offset`)
     sample_offset: u8,
+    /// The row of the plane where the rendered rows start (see `rows_from`)
+    first_row: usize,
 }
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(f64, f64) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0, sample_offset: 0 }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0, sample_offset: 0, first_row: 0 }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -182,6 +184,15 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// Renders the `height` rows of the plane from row `first_row` instead of from its top: a strip of a larger image (see `strips`). Its samples are placed in the
+    /// plane at the rows they have there, with the jitter of those rows, so the strips of an image together are bit for bit the image rendered in one go.
+    /// Not combined with `resume`, `only`, previews, adaptive supersampling or `colors_only`.
+    #[must_use]
+    pub const fn rows_from(mut self, first_row: usize) -> Self {
+        self.first_row = first_row;
+        self
+    }
+
     /// Like `colors_only`, with sample `sample` of every pixel (its jitter, see `jitter`) instead of the first: frames that are blended over time take another
     /// sample each, so the blend comes close to supersampling (see `gui::temporal`)
     #[must_use]
@@ -215,7 +226,7 @@ impl<'a> Render<'a> {
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     #[allow(clippy::too_many_lines)] // The setup of a render (its state, previews, recolor) and its loop over the layers
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset, first_row } = self;
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
         //(The samples remember whether the fast math was asked for, see `SampleKey`)
         let fast_key = fast_gpu && gpu.is_some();
@@ -255,7 +266,15 @@ impl<'a> Render<'a> {
         }
         let empty = prepared == Prepared::Empty;
         let mut own_state = None;
-        let state: &mut SampleState = state.unwrap_or_else(|| own_state.insert(SampleState::for_one_render(width, height, region, base, adaptive.is_some())));
+        debug_assert!(first_row == 0 || (state.is_none() && exposed.is_none() && preview.is_none() && adaptive.is_none() && keep_samples), "a strip is a plain render of its rows");
+        let state: &mut SampleState = state.unwrap_or_else(|| {
+            let mut strip = SampleState::for_one_render(width, height, region, base, adaptive.is_some());
+            if first_row > 0 {
+                //(Pixel `(x, y)` of the strip is pixel `(x, y + first_row)` of the plane)
+                (strip.anchor, strip.origin) = (Some(c.clone()), (0, first_row.cast_signed()));
+            }
+            own_state.insert(strip)
+        });
         //Where the samples are placed: the view where the samples of the state started, or this view
         let (anchor, origin) = (state.anchor.clone().unwrap_or_else(|| c.clone()), state.origin);
         let mut colors = std::mem::take(&mut state.colors);

@@ -28,6 +28,8 @@ pub(super) struct SaveSize {
     pub custom_height: usize,
     /// The typed-in name for a new preset
     pub preset_name: String,
+    /// Whether the presets and the default size are turned upright (taller than wide, see `Resolution::oriented`): for phone wallpapers
+    pub portrait: bool,
     /// The presets of the user, see `resolution`
     pub custom_presets: Vec<ResolutionPreset>,
     /// The file the custom presets are kept in, if the configuration folder of the user is known
@@ -39,7 +41,7 @@ impl SaveSize {
     /// Returns the messages about presets that could not be used.
     pub fn new(default_size: Resolution, presets_path: Option<PathBuf>) -> (SaveSize, Vec<String>) {
         let (custom_presets, warnings) = presets_path.as_deref().map_or((Vec::new(), Vec::new()), resolution::load_custom_presets);
-        let size = SaveSize { choice: SaveSizeChoice::Standard, custom_width: default_size.width, custom_height: default_size.height, preset_name: String::new(), custom_presets, presets_path };
+        let size = SaveSize { choice: SaveSizeChoice::Standard, custom_width: default_size.width, custom_height: default_size.height, preset_name: String::new(), portrait: false, custom_presets, presets_path };
         (size, warnings)
     }
 
@@ -55,25 +57,46 @@ impl SaveSize {
         self.custom_presets.iter().any(|preset| preset.name == name)
     }
 
-    /// The resolution that the choice stands for, given the default size and the size of the view. A preset that has disappeared, or a size that is not allowed, is an error.
+    /// The size that the choice stands for, given the default size and the size of the view, not yet checked: a preset and the default size turned upright when
+    /// `portrait` is set (the size of the view and a typed-in size are exactly what they are)
+    /// # Errors
+    /// The preset has disappeared
+    fn size(&self, default_size: Resolution, view: Resolution) -> Result<Resolution, String> {
+        Ok(match &self.choice {
+            SaveSizeChoice::Standard => default_size.oriented(self.portrait),
+            SaveSizeChoice::View => view,
+            SaveSizeChoice::Preset(name) => self.all_presets().into_iter().find(|preset| &preset.name == name).map(|preset| preset.resolution.oriented(self.portrait)).ok_or_else(|| format!("The resolution preset \"{name}\" does not exist"))?,
+            SaveSizeChoice::Custom => Resolution::new(self.custom_width, self.custom_height),
+        })
+    }
+
+    /// The size of a saved image that the choice stands for (see `size`). A preset that has disappeared, or a size beyond the limits of an image (32K, see
+    /// `Resolution::validate_image`), is an error.
     /// # Errors
     /// The reason, as a sentence for the status log
     pub fn resolve(&self, default_size: Resolution, view: Resolution) -> Result<Resolution, String> {
-        let resolution = match &self.choice {
-            SaveSizeChoice::Standard => default_size,
-            SaveSizeChoice::View => view,
-            SaveSizeChoice::Preset(name) => self.all_presets().into_iter().find(|preset| &preset.name == name).map(|preset| preset.resolution).ok_or_else(|| format!("The resolution preset \"{name}\" does not exist"))?,
-            SaveSizeChoice::Custom => Resolution::new(self.custom_width, self.custom_height),
-        };
-        resolution.validate()
+        self.size(default_size, view)?.validate_image()
+    }
+
+    /// The size of a video that the choice stands for: like `resolve`, within the smaller limits of a video frame (see `Resolution::validate`)
+    /// # Errors
+    /// The reason, as a sentence for the status log
+    pub fn resolve_for_video(&self, default_size: Resolution, view: Resolution) -> Result<Resolution, String> {
+        let size = self.size(default_size, view)?;
+        size.validate().map_err(|reason| if size.validate_image().is_ok() { format!("{size} is for images only: a video is at most {} pixels a side and {} megapixels", resolution::MAX_SIDE, resolution::MAX_PIXELS / 1_000_000) } else { reason })
+    }
+
+    /// The label of `preset` in the list: its name and its size, upright when `portrait` is set
+    pub fn label(&self, preset: &ResolutionPreset) -> String {
+        format!("{} ({})", preset.name, preset.resolution.oriented(self.portrait))
     }
 
     /// The text of the closed list: what is selected, with its size
     pub fn selected_text(&self, default_size: Resolution, view: Resolution) -> String {
         match &self.choice {
-            SaveSizeChoice::Standard => format!("Default ({default_size})"),
+            SaveSizeChoice::Standard => format!("Default ({})", default_size.oriented(self.portrait)),
             SaveSizeChoice::View => format!("Same as the view ({view})"),
-            SaveSizeChoice::Preset(name) => self.all_presets().iter().find(|preset| &preset.name == name).map_or_else(|| format!("{name} (missing)"), ResolutionPreset::label),
+            SaveSizeChoice::Preset(name) => self.all_presets().iter().find(|preset| &preset.name == name).map_or_else(|| format!("{name} (missing)"), |preset| self.label(preset)),
             SaveSizeChoice::Custom => format!("Custom ({})", Resolution::new(self.custom_width, self.custom_height)),
         }
     }
@@ -149,6 +172,32 @@ mod tests {
     }
 
     #[test]
+    fn portrait_turns_the_presets_upright_and_large_sizes_are_for_images_only() {
+        let (mut size, _) = SaveSize::new(DEFAULT_SIZE, None);
+        size.portrait = true;
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(800, 1200)), "the default size upright");
+        size.choice = SaveSizeChoice::Preset(String::from("32K"));
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(17_280, 30_720)));
+        assert_eq!(size.selected_text(DEFAULT_SIZE, VIEW), "32K (17280 x 30720)");
+        assert!(size.resolve_for_video(DEFAULT_SIZE, VIEW).unwrap_err().contains("17280 x 30720 is for images only: a video is at most 16384 pixels a side and 100 megapixels"));
+        size.choice = SaveSizeChoice::Preset(String::from("Phone 1080 x 2400"));
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(1080, 2400)), "a phone preset is upright either way");
+        size.portrait = false;
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(1080, 2400)));
+        size.choice = SaveSizeChoice::Preset(String::from("8K UHD"));
+        assert_eq!(size.resolve_for_video(DEFAULT_SIZE, VIEW), Ok(Resolution::new(7680, 4320)));
+        //The view and a typed-in size are what they are
+        size.portrait = true;
+        size.choice = SaveSizeChoice::View;
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(VIEW));
+        size.choice = SaveSizeChoice::Custom;
+        (size.custom_width, size.custom_height) = (30_720, 17_280);
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(30_720, 17_280)));
+        size.custom_height = 17_281;
+        assert!(size.resolve(DEFAULT_SIZE, VIEW).unwrap_err().contains("of the largest image (32K)"));
+    }
+
+    #[test]
     fn a_custom_preset_is_added_selected_kept_in_the_file_and_loaded_by_the_next_run() {
         let path = temporary_path("add");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -158,7 +207,7 @@ mod tests {
         assert!(message.starts_with("Saved the resolution preset \"Poster\" (6000 x 4000) in "), "{message}");
         assert_eq!(size.choice, SaveSizeChoice::Preset(String::from("Poster")));
         assert!(size.preset_name.is_empty() && size.is_custom_preset("Poster") && !size.is_custom_preset("4K UHD"));
-        assert_eq!(size.all_presets().len(), 11);
+        assert_eq!(size.all_presets().len(), 15);
         let (next_run, warnings) = SaveSize::new(DEFAULT_SIZE, Some(path.clone()));
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(next_run.custom_presets, size.custom_presets);

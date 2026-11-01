@@ -5,6 +5,7 @@
 //! * `region`: the pixels exposed by a move (`ExposedRegion`) and moving the complex plane by whole pixels.
 //! * `buffer`: rendering a whole buffer at once, for saving images.
 //! * `jitter`: the deterministic offsets of the samples.
+//! * `strips`: rendering a large image in strips of rows, with bounded memory, for saving it.
 
 mod adaptive;
 mod buffer;
@@ -13,6 +14,7 @@ mod jitter;
 mod progressive;
 mod region;
 mod state;
+pub mod strips;
 
 pub use adaptive::{adaptive_mask, AdaptiveSampling, ADAPTIVE_UNIFORM_SAMPLES};
 pub use buffer::{render_complex_plane_into_buffer, render_complex_plane_into_buffer_with_gpu};

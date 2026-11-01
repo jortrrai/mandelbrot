@@ -19,6 +19,7 @@ mod music;
 mod controls;
 mod cycle;
 mod depth;
+mod export;
 mod fit;
 mod flight;
 mod flight_files;
@@ -132,6 +133,8 @@ pub struct MandelbrotApp {
     fit: Fit,
     /// The size of the saved image, see `save_size`
     save_size: SaveSize,
+    /// The save of an image that is running, if any (see `export`)
+    image_save: Option<export::ImageSave>,
     /// Edited values of the max iterations field, applied when editing ends
     max_iterations_input: u32,
     /// Whether the maximum iterations are chosen automatically for the zoom of every render, see `auto_iterations`
@@ -371,6 +374,7 @@ impl MandelbrotApp {
             history: ViewHistory::default(),
             fit: Fit::new(config.fit_window),
             save_size,
+            image_save: None,
             points: Vec::new(),
             thumbs: Lru::new(thumbnails::MAX_CACHED),
             thumb_job: None,

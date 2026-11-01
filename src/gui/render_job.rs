@@ -204,6 +204,10 @@ impl MandelbrotApp {
         while let Ok(notice) = self.notices.try_recv() {
             self.log(notice);
         }
+        //(Its thread sets `ended` before it sends its message, so the message is in the log by now)
+        if self.image_save.as_ref().is_some_and(|save| save.ended.load(Ordering::Relaxed)) {
+            self.image_save = None;
+        }
         if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
             self.gpu_opening = None;
             match opened {

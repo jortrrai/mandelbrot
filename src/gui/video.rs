@@ -348,7 +348,7 @@ pub(super) fn speed_text(speed: f64) -> String {
 }
 
 /// A length as hours, minutes and seconds (`1:02:03`, or `2:03` under an hour)
-fn length_text(length: Duration) -> String {
+pub(super) fn length_text(length: Duration) -> String {
     let seconds = length.as_secs_f64().round() as u64;
     let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
     if hours > 0 { format!("{hours}:{minutes:02}:{seconds:02}") } else { format!("{minutes}:{seconds:02}") }
@@ -518,7 +518,7 @@ impl MandelbrotApp {
     /// What a video of the last flight with the current settings would be (see `VideoSpec`), or why there is none
     pub(super) fn video_spec(&self) -> Result<VideoSpec, String> {
         let flight = self.last_flight.clone().ok_or_else(|| String::from("there is no flight yet"))?;
-        let resolution = self.save_size.resolve(self.default_save_resolution(), self.view_resolution())?;
+        let resolution = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution())?;
         let path = flight.path();
         let music = self.followed_music();
         let speed = if music.is_some() { 100.0 } else { self.video_speed_for(path.duration())? }; //(A video that follows music lasts as long as the track)
@@ -1042,15 +1042,15 @@ impl MandelbrotApp {
         //What the video will be: its length and frames are exact, its size an estimate (an upper end: measured on a busy view)
         if let Some(flight) = &self.last_flight {
             let path = flight.path();
-            let size = self.save_size.resolve(self.default_save_resolution(), self.view_resolution()).map_or((0, 0), |resolution| (resolution.width, resolution.height));
+            let size = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution()).map(|resolution| (resolution.width, resolution.height));
             let music_length = self.followed_music_length();
-            let speed = match (self.followed_music(), music_length) {
+            let speed = size.clone().and_then(|_| match (self.followed_music(), music_length) {
                 (Some(_), Some(length)) => Ok(path.duration().as_secs_f64() * 100.0 / length.as_secs_f64()), //(The average speed: the video lasts as long as the track)
                 (Some(music), None) => Err(format!("The music {} cannot be read", music.path)),
                 (None, _) => self.video_speed_for(path.duration()),
-            };
-            match speed {
-                Ok(speed) => {
+            });
+            match speed.and_then(|speed| Ok((speed, size?))) {
+                Ok((speed, size)) => {
                     let (frames, length, bytes) = estimate(path.duration(), self.video_fps, speed, size, self.video_quality, self.video_playback);
                     let png = if self.video_pngs { format!(" + PNG frames about {}", megabytes(frames as f64 * (size.0 * size.1) as f64 * 3.0 / 2.0)) } else { String::new() };
                     let fitted = if music_length.is_some() && self.follow_music { String::from(", following the music") } else if self.video_fit_length { format!(" at {} speed", speed_text(speed)) } else { String::new() };
