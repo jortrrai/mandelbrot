@@ -850,3 +850,117 @@ fn another_palette_recolors_the_first_samples_at_once_and_ends_in_the_image_of_a
         assert_eq!(render(&mut state, &deeper, 2, adaptive).last(), render(&mut SampleState::new(), &deeper, 2, adaptive).last());
     }
 }
+
+#[test]
+#[ignore = "a measurement of the GPU alone (#212), run by hand with --release"]
+fn gpu_alone_frame_time() {
+    let Ok(gpu) = super::gpu::GpuIterator::new() else { return };
+    let (w, h) = (1920, 1080);
+    for (name, scale, fast, limit) in [("shallow fast", 0.01, true, 1000), ("shallow exact", 0.01, false, 1000), ("deep exact", 1e-9, false, 8000)] {
+        let mut c = ComplexPlane::new(w, h);
+        c.set_view(&crate::complex_plane::View::new(-0.743_643_887_037_151, 0.131_825_904_205_33, scale));
+        let m = MandelbrotSet::new(limit, 2.0);
+        let started = std::time::Instant::now();
+        assert!(Render::new(&c, &m, w, h, TrueColor::new_from_bernstein_polynomials).supersampling(4).gpu(Some((&gpu, std::time::Duration::ZERO))).fast_gpu(fast).on_the_gpu_only().run(|_, _| {}));
+        println!("{name}: {:.3} s", started.elapsed().as_secs_f64());
+    }
+}
+
+#[test]
+#[ignore = "an experiment (#218), run by hand with --release"]
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::too_many_lines)] // Pixel coordinates of small images, in an experiment
+fn reconstruction_filter_experiment() {
+    //A fast zoom of 48 frames of 240 x 135, each from 4 x 4 subpixels of one jittered sample (16 samples per pixel), reduced with the box filter of today
+    //(the average of a pixel's own 16) or with a Gaussian that reaches into the neighbors; against a reference of 16 x 16 subpixels (256 samples) per pixel
+    let (w, h, frames) = (240_usize, 135_usize, 48_usize);
+    let m = MandelbrotSet::new(1500, 2.0);
+    let coloring = TrueColor::new_from_bernstein_polynomials;
+    let render = |sub: usize, scale: f64| -> Vec<[f32; 3]> {
+        let mut c = ComplexPlane::new(w * sub, h * sub);
+        c.set_view(&crate::complex_plane::View::new(-0.7498, 0.0203, scale));
+        let mut colors = Vec::new();
+        assert!(Render::new(&c, &m, w * sub, h * sub, coloring).run(|layer, _| colors = layer.to_vec()));
+        colors.iter().map(|color| [f32::from(color.red), f32::from(color.green), f32::from(color.blue)]).collect()
+    };
+    //The output pixels from subpixels: weights over the subpixels within `reach` output pixels of the pixel's middle
+    let reduce = |sub: &[[f32; 3]], factor: usize, weight: &dyn Fn(f64, f64) -> f64, reach: f64| -> Vec<[f32; 3]> {
+        let (sw, sh) = (w * factor, h * factor);
+        let mut out = vec![[0.0_f32; 3]; w * h];
+        let r = (reach * factor as f64).ceil() as isize;
+        for y in 0..h {
+            for x in 0..w {
+                let (cx, cy) = ((x as f64 + 0.5) * factor as f64, (y as f64 + 0.5) * factor as f64);
+                let (mut sum, mut total) = ([0.0_f64; 3], 0.0);
+                for sy in (cy as isize - r).max(0)..(cy as isize + r).min(sh as isize) {
+                    for sx in (cx as isize - r).max(0)..(cx as isize + r).min(sw as isize) {
+                        let (dx, dy) = (((sx as f64 + 0.5) - cx) / factor as f64, ((sy as f64 + 0.5) - cy) / factor as f64);
+                        let weight = weight(dx, dy);
+                        if weight <= 0.0 {
+                            continue;
+                        }
+                        let color = sub[sy as usize * sw + sx as usize];
+                        for channel in 0..3 {
+                            sum[channel] += f64::from(color[channel]) * weight;
+                        }
+                        total += weight;
+                    }
+                }
+                out[y * w + x] = [(sum[0] / total) as f32, (sum[1] / total) as f32, (sum[2] / total) as f32];
+            }
+        }
+        out
+    };
+    let boxed = |dx: f64, dy: f64| if dx.abs() < 0.5 && dy.abs() < 0.5 { 1.0 } else { 0.0 };
+    let gauss = |sigma: f64| move |dx: f64, dy: f64| (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+    let mut references = Vec::new();
+    let mut variants: Vec<(String, Vec<Vec<[f32; 3]>>)> = vec![(String::from("box 16"), Vec::new()), (String::from("gauss 0.40"), Vec::new()), (String::from("gauss 0.50"), Vec::new()), (String::from("gauss 0.60"), Vec::new()), (String::from("box + blur"), Vec::new())];
+    //The "+ blur" presets: the box, then a Gaussian of blur_sigma(1, 16) = 0.8 · (100 / 400)^0.6 pixels over the output
+    let blur_output = |image: &[[f32; 3]], sigma: f64| -> Vec<[f32; 3]> {
+        let r = (2.5 * sigma).ceil() as isize;
+        let weights: Vec<f64> = (-r..=r).map(|i| (-(i * i) as f64 / (2.0 * sigma * sigma)).exp()).collect();
+        let pass = |source: &[[f32; 3]], horizontal: bool| -> Vec<[f32; 3]> {
+            let mut out = vec![[0.0_f32; 3]; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let (mut sum, mut total) = ([0.0_f64; 3], 0.0);
+                    for (offset, weight) in (-r..=r).zip(&weights) {
+                        let (sx, sy) = if horizontal { ((x as isize + offset).clamp(0, w as isize - 1) as usize, y) } else { (x, (y as isize + offset).clamp(0, h as isize - 1) as usize) };
+                        for channel in 0..3 {
+                            sum[channel] += f64::from(source[sy * w + sx][channel]) * weight;
+                        }
+                        total += weight;
+                    }
+                    out[y * w + x] = [(sum[0] / total) as f32, (sum[1] / total) as f32, (sum[2] / total) as f32];
+                }
+            }
+            out
+        };
+        pass(&pass(image, true), false)
+    };
+    for frame in 0..frames {
+        let scale = 0.002 * 0.5_f64.powf(frame as f64 / frames as f64 * 3.0);
+        let reference = render(16, scale);
+        references.push(reduce(&reference, 16, &boxed, 0.5));
+        let sub = render(4, scale);
+        variants[0].1.push(reduce(&sub, 4, &boxed, 0.5));
+        for (index, sigma) in [0.40, 0.50, 0.60].into_iter().enumerate() {
+            variants[index + 1].1.push(reduce(&sub, 4, &gauss(sigma), 3.0 * sigma));
+        }
+        let boxed_frame = variants[0].1.last().unwrap().clone();
+        variants[4].1.push(blur_output(&boxed_frame, 0.8 * 0.25_f64.powf(0.6)));
+    }
+    let difference = |a: &[[f32; 3]], b: &[[f32; 3]]| a.iter().zip(b).map(|(a, b)| (0..3).map(|channel| f64::from((a[channel] - b[channel]).abs())).sum::<f64>()).sum::<f64>() / (3 * w * h) as f64;
+    for (name, frames_of) in &variants {
+        let error: f64 = frames_of.iter().zip(&references).map(|(a, b)| difference(a, b)).sum::<f64>() / frames as f64;
+        //Shimmer: how much the change from frame to frame differs from the reference's change
+        let shimmer: f64 = (1..frames).map(|t| {
+            let changed: Vec<[f32; 3]> = frames_of[t].iter().zip(&frames_of[t - 1]).map(|(a, b)| [a[0] - b[0], a[1] - b[1], a[2] - b[2]]).collect();
+            let reference: Vec<[f32; 3]> = references[t].iter().zip(&references[t - 1]).map(|(a, b)| [a[0] - b[0], a[1] - b[1], a[2] - b[2]]).collect();
+            difference(&changed, &reference)
+        }).sum::<f64>() / (frames - 1) as f64;
+        //Sharpness: the mean gradient over the reference's
+        let gradient = |image: &[[f32; 3]]| (0..h).flat_map(|y| (1..w).map(move |x| (y, x))).map(|(y, x)| (0..3).map(|channel| f64::from((image[y * w + x][channel] - image[y * w + x - 1][channel]).abs())).sum::<f64>()).sum::<f64>();
+        let sharpness: f64 = frames_of.iter().zip(&references).map(|(a, b)| gradient(a) / gradient(b).max(1.0)).sum::<f64>() / frames as f64;
+        println!("{name:12} error {error:.2}, shimmer {shimmer:.2}, sharpness {sharpness:.2}");
+    }
+}
