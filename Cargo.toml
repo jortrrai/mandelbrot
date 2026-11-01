@@ -30,6 +30,10 @@ ureq = "2"
 # The system's file chooser for Open image (on Linux through the desktop portal, so it needs no GTK and works on Wayland, where dropped files never arrive)
 rfd = "0.17"
 
+# Lowering the priority of the CPU workers of videos, so the threads that feed the GPU get a core first (Linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

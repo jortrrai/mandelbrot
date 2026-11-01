@@ -830,8 +830,15 @@ impl MandelbrotApp {
                             let render = if planes.is_empty() { render } else { render.sample_planes(&planes) };
                             //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
                             let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
-                            let render = if on_the_gpu { render.on_the_gpu_only() } else { render };
-                            let completed = render.run(|layer, _| colors = layer.to_vec());
+                            //(The CPU workers below the threads that feed the GPU, see `Render::in_the_background`)
+                            let render = if on_the_gpu { render.on_the_gpu_only() } else { render.in_the_background() };
+                            //Only the last pass is kept: copying the whole frame after each of its passes cost 64 copies of 25 MB per 4K frame at 64x (#212)
+                            let last_pass = if blend && samples <= 1 { 1 } else { samples.clamp(1, 64) };
+                            let completed = render.run(|layer, pass| {
+                                if pass >= last_pass {
+                                    colors = layer.to_vec();
+                                }
+                            });
                             if on_the_gpu {
                                 scheduler.finished.fetch_add(usize::from(completed), Ordering::Relaxed);
                             } else {

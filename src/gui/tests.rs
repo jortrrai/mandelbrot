@@ -3016,6 +3016,10 @@ fn video_throughput_of_a_manifest() {
         let numbers: Vec<usize> = size.split_whitespace().map(|number| number.parse().unwrap()).collect();
         (spec.width, spec.height, spec.samples) = (numbers[0], numbers[1], u8::try_from(numbers[2]).unwrap());
     }
+    //MANDELBROT_BLUR=1: the blurred quality (N x + blur)
+    if let Ok(blur) = std::env::var("MANDELBROT_BLUR") {
+        spec.blur = blur == "1";
+    }
     //MANDELBROT_SHUTTER: motion blur, in degrees (#210)
     if let Some(shutter) = std::env::var("MANDELBROT_SHUTTER").ok().and_then(|shutter| shutter.parse().ok()) {
         spec.shutter = shutter;

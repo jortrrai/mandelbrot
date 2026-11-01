@@ -28,6 +28,7 @@ pub const PREVIEW_BLOCKS: [usize; 3] = [8, 4, 2];
 ///     .cancel_with(&cancel)
 ///     .run(|colors, pass| { /* show the colors of the pass */ });
 /// ```
+#[allow(clippy::struct_excessive_bools)] // The independent options of a render, set one by one
 pub struct Render<'a> {
     plane: &'a ComplexPlane,
     set: &'a MandelbrotSet,
@@ -59,12 +60,14 @@ pub struct Render<'a> {
     first_row: usize,
     /// The view of every sample, if they differ (see `sample_planes`)
     sample_planes: Option<&'a [ComplexPlane]>,
+    /// Whether the CPU threads run at a lower priority (see `in_the_background`)
+    background: bool,
 }
 
 impl<'a> Render<'a> {
     /// A render of the whole `width` x `height` image of `plane`, with one sample per pixel, colored by `coloring_function` (iterations and maximum iterations to a color)
     pub fn new(plane: &'a ComplexPlane, set: &'a MandelbrotSet, width: usize, height: usize, coloring_function: fn(f64, f64) -> TrueColor) -> Self {
-        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0, sample_offset: 0, first_row: 0, sample_planes: None }
+        Render { plane, set, width, height, coloring_function, supersampling_amount: 1, adaptive: None, exposed: None, cancel: None, pixels_done: None, preview: None, preview_blocks: &PREVIEW_BLOCKS, state: None, gpu: None, gpu_samples: None, fast_gpu: false, f32_gpu: false, cpu_threads: render_thread_count(), keep_samples: true, colors_sample: 0, sample_offset: 0, first_row: 0, sample_planes: None, background: false }
     }
 
     /// Takes `amount` samples per pixel (limited to 1 to 64), each at its own deterministic jitter inside the pixel
@@ -195,6 +198,14 @@ impl<'a> Render<'a> {
         self
     }
 
+    /// Runs the CPU threads of the passes at a lower priority (Linux; elsewhere as before): for the frames of a video, so the threads that feed the GPU and
+    /// color its outcomes, and the window, get a core first (#212: with the CPU fully used, a feeder waited behind the workers and the GPU idled)
+    #[must_use]
+    pub const fn in_the_background(mut self) -> Self {
+        self.background = true;
+        self
+    }
+
     /// Takes sample `k` of every pixel in `planes[k]` instead of the plane of the render (each the same size): views of the camera at other moments around the
     /// frame, for motion blur in videos (issue #210). The jitter of a sample stays the same, so with every plane the plane of the render, the image is the
     /// image without them. A render of its own (not with `resume`, `only`, previews, `rows_from` or `colors_only`)
@@ -237,7 +248,7 @@ impl<'a> Render<'a> {
     /// If `base` does not have `width * height` colors, or if a thread of the render panics.
     #[allow(clippy::too_many_lines)] // The setup of a render (its state, previews, recolor) and its loop over the layers
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
-        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset, first_row, sample_planes } = self;
+        let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset, first_row, sample_planes, background } = self;
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
         //(The samples remember whether the fast math was asked for, see `SampleKey`)
         let fast_key = fast_gpu && gpu.is_some();
@@ -367,7 +378,7 @@ impl<'a> Render<'a> {
             let (pass_started, gpu_before) = (Instant::now(), gpu_samples.load(Ordering::Relaxed));
             //(The view of this sample, with motion blur)
             let anchor = sample_planes.and_then(|planes| planes.get(index)).unwrap_or(&anchor);
-            let processed = if eligible > 0 { sample_pass(anchor, m, sample, sample.wrapping_add(sample_offset), track, state, &mut colors, mask.as_deref(), marked_rows.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
+            let processed = if eligible > 0 { sample_pass(background, anchor, m, sample, sample.wrapping_add(sample_offset), track, state, &mut colors, mask.as_deref(), marked_rows.as_deref(), &has_first, &color_of, cancel, pixels_done, pass_gpu, cpu_threads) } else { 0 };
             //The time per sample of the CPU threads alone: the samples of the GPU do not count, so a pass that the GPU made short does not keep it out of the next one
             let on_cpu = processed.saturating_sub(gpu_samples.load(Ordering::Relaxed).saturating_sub(gpu_before));
             if on_cpu > 0 {
@@ -514,7 +525,7 @@ fn colors_only(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, width: usize, he
     let mut colors = state.as_mut().map_or_else(Vec::new, |state| std::mem::take(&mut state.colors));
     colors.clear();
     colors.resize(width * height, TrueColor::new(0, 0, 0));
-    sample_pass(c, m, sample, sample, false, &mut SampleState::without_samples(width, height), &mut colors, None, None, &[], color_of, cancel, pixels_done, gpu, cpu_threads);
+    sample_pass(false, c, m, sample, sample, false, &mut SampleState::without_samples(width, height), &mut colors, None, None, &[], color_of, cancel, pixels_done, gpu, cpu_threads);
     let completed = !cancel.load(Ordering::Relaxed);
     if completed {
         on_pass(&colors, 1);
@@ -536,7 +547,7 @@ fn colors_only(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, width: usize, he
 /// bit for bit (see `gpu`); the CPU threads turn its outcomes into positions and apply them with the same code as their own rows, so the worker only feeds the GPU.
 /// If the GPU fails, its rows are computed on the CPU and the GPU is not used for the rest of the pass.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The state of `Render::run` that a pass shares; the CPU threads and the GPU worker share its closures
-fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, jitter: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, marked_rows: Option<&[Vec<usize>]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
+fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8, jitter: u8, track: bool, state: &mut SampleState, colors: &mut [TrueColor], mask: Option<&[bool]>, marked_rows: Option<&[Vec<usize>]>, has_first: &[bool], color_of: &(impl Fn(f64) -> TrueColor + Sync),
     cancel: &AtomicBool, pixels_done: &AtomicUsize, gpu: Option<(&GpuIterator, Duration, &AtomicUsize, GpuMath)>, cpu_threads: usize) -> usize {
     let (width, height, origin) = (state.width, state.height, state.origin);
     let started = Instant::now();
@@ -647,6 +658,9 @@ fn sample_pass(c: &ComplexPlane, m: &MandelbrotSet, sample: u8, jitter: u8, trac
     thread::scope(|scope| {
         for _ in 0..cpu_threads {
             scope.spawn(|| loop {
+                if background {
+                    lower_this_threads_priority();
+                }
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -836,6 +850,26 @@ pub(super) enum GpuMath {
     Exact,
     DoubleFloat,
     Single,
+}
+
+/// Lowers the priority of the calling thread (a nice of 10 on Linux, which any user may set for their own threads; nothing elsewhere), see
+/// `Render::in_the_background`. Once per thread: a thread's niceness only goes up
+fn lower_this_threads_priority() {
+    thread_local! {
+        static LOWERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if LOWERED.with(std::cell::Cell::get) {
+        return;
+    }
+    LOWERED.with(|lowered| lowered.set(true));
+    #[cfg(target_os = "linux")]
+    //SAFETY: setpriority and gettid on the calling thread only; a failure leaves the priority as it was
+    unsafe {
+        //(Only with a valid thread id: 0 would lower the whole process)
+        if let Ok(thread) = u32::try_from(libc::gettid()).map_err(|_| ()).and_then(|thread| if thread == 0 { Err(()) } else { Ok(thread) }) {
+            let _ = libc::setpriority(libc::PRIO_PROCESS, thread, 10);
+        }
+    }
 }
 
 /// Sets its flag when it is dropped
@@ -1132,7 +1166,7 @@ fn sample_level_like_a_pass(c: &ComplexPlane, m: &MandelbrotSet, block: usize, t
         }
     });
     //(Without the flags of the first samples: the pixels to sample have none yet, and the colors of the others are filled in after the level)
-    let sampled = sample_pass(c, m, 0, 0, track, state, colors, Some(&to_sample), None, &[], color_of, cancel, pixels_done, Some(gpu), cpu_threads);
+    let sampled = sample_pass(false, c, m, 0, 0, track, state, colors, Some(&to_sample), None, &[], color_of, cancel, pixels_done, Some(gpu), cpu_threads);
     if cancel.load(Ordering::Relaxed) {
         return None;
     }
