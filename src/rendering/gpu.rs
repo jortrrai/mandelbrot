@@ -110,8 +110,11 @@ const PARAMS_CAPACITY: u64 = 96;
 
 /// A GPU that iterates points exactly like the CPU, see the module
 pub struct GpuIterator {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// The device and its queue are never dropped: dropping the last of them destroys the Vulkan instance, and NVIDIA's driver crashed doing that on a
+    /// thread while other threads or other instances still worked with it (issue #200: a video job that let go of the GPU after the window had, and tests
+    /// that each open a GPU, in parallel). A GPU is opened once per program (and once per test), so the memory is negligible
+    device: std::mem::ManuallyDrop<wgpu::Device>,
+    queue: std::mem::ManuallyDrop<wgpu::Queue>,
     /// The exact loop (`gpu.wgsl`) and the fast double-float loop (`gpu_fast.wgsl`)
     exact: wgpu::ComputePipeline,
     fast: wgpu::ComputePipeline,
@@ -159,6 +162,7 @@ impl GpuIterator {
             Ok(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mandelbrot"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }))
         };
         let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?, pipeline(include_str!("gpu_f32.wgsl"))?);
+        let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
         let gpu = GpuIterator { device, queue, exact, fast, single, layout, name, spare: std::sync::Mutex::new(Vec::new()) };
         gpu.self_test()?;
         Ok(gpu)
