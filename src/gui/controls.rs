@@ -383,19 +383,21 @@ impl MandelbrotApp {
                 }
             });
         });
-        //The color cycle (see `ColorCycle`): how the iteration counts map onto the palette, the same with a manual and an automatic limit
+        //The color cycle (see `ColorCycle`): how the iteration counts map onto the palette, the same with a manual and an automatic limit.
+        //The sliders only clamp and round what is typed or dragged (`SliderClamping::Edits`): by default egui rounds the value to the slider's step on every
+        //frame, which turned the in-between colors of a flight (or of a place) into a change of the colors, and the render of it stopped the flight (#192)
         let before = self.m.palette;
         ui.add_enabled_ui(!self.m.palette.stretch, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Iteration divide:");
                 //Logarithmic: 0.1, 1, 10, 100 and 1000 are equally far apart; the number next to it can be typed
-                ui.add(egui::Slider::new(&mut self.m.palette.divide, MIN_DIVIDE..=MAX_DIVIDE).logarithmic(true).max_decimals(3))
+                ui.add(egui::Slider::new(&mut self.m.palette.divide, MIN_DIVIDE..=MAX_DIVIDE).logarithmic(true).max_decimals(3).clamping(egui::SliderClamping::Edits))
                     .on_hover_text("How many iterations one step of the palette takes (0.1 to 1000; type a value in the box): below 1 the colors change several times per iteration, more gives broader, calmer bands. Deep views, whose iteration counts are high and far apart, often look best with more. A point keeps its color however far you zoom and whatever the iteration limit.");
             });
             ui.horizontal(|ui| {
                 ui.label("Offset:");
                 //(To 499: 500 steps are the whole palette, the same colors as 0)
-                ui.add(egui::Slider::new(&mut self.m.palette.offset, 0.0..=PALETTE_LENGTH - 1.0).step_by(1.0).max_decimals(0))
+                ui.add(egui::Slider::new(&mut self.m.palette.offset, 0.0..=PALETTE_LENGTH - 1.0).step_by(1.0).max_decimals(0).clamping(egui::SliderClamping::Edits))
                     .on_hover_text("Where the palette starts, in steps (0 to 499 of 500): shifts every color along the palette; the colors change at once while you drag");
             });
             ui.horizontal(|ui| {

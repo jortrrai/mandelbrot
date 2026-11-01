@@ -2606,6 +2606,55 @@ fn after_a_cancelled_dive_the_same_place_can_be_dived_to_again() {
 }
 
 #[test]
+fn a_flight_whose_colors_change_arrives_with_the_color_controls_on_the_screen() {
+    //Found by Jort in the review of review-4 (#192): with Restore the saved appearance on, or a keyframe sequence whose keyframes have other colors, a flight
+    //changes the colors a little on every frame. The sliders of Iteration divide and Offset rounded those in-between values to their steps on every frame
+    //of the window (egui clamps and rounds an existing value by default), the controls took that for a change of the colors and rendered the view again,
+    //which stopped the frame the flight was waiting for: the flight never got going while the Colors section was open
+    const PLACE: &str = r#"{ "format_version": 1, "name": "Colored Place", "location": { "center": { "real": -0.7498100000000001, "imaginary": -0.020300000000000054 }, "scale": 0.00006400000000000002, "max_iterations": 321 },
+        "appearance": { "iteration_divide": 7.5, "color_offset": 311.0 } }"#;
+    for rendering in [super::flight::FlightRendering::FULL_RESOLUTION, super::flight::FlightRendering::BestEffort] {
+        let (mut app, folder) = app_with_points(&[("colored-place.json", PLACE)]);
+        (app.flight_rendering, app.pace, app.restore_appearance) = (rendering, super::flight::Pace::Fast, true);
+        let before = app.m.palette;
+        app.go_to_point_of_interest(0);
+        assert!(app.flight.is_some(), "{rendering:?}: the flight starts");
+        let ctx = egui::Context::default();
+        let started = std::time::Instant::now();
+        let mut in_between = false;
+        while app.flight.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(60), "{rendering:?}: the flight arrives: {:?}", app.log.iter().rev().take(4).collect::<Vec<_>>());
+            //The controls on the screen, as in the window, every frame (the sections are open in tests)
+            ctx.run_ui(egui::RawInput::default(), |ui| app.controls_ui(ui)).drop_without_applying_deltas();
+            app.poll_job();
+            app.fly_at(std::time::Instant::now());
+            in_between |= app.m.palette != before && app.m.palette.offset.fract() != 0.0;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(in_between, "{rendering:?}: the colors went through in-between values");
+        assert!(!app.log.iter().any(|line| line.starts_with("Set the colors to")), "{rendering:?}: the controls never took the flight's colors for a change: {:?}", app.log);
+        assert_eq!((app.m.palette.divide, app.m.palette.offset), (7.5, 311.0), "{rendering:?}: the colors of the place");
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+#[test]
+fn the_controls_on_the_screen_never_change_a_view_or_colors_that_nobody_touched() {
+    //A view zoomed out beyond the depth slider (×0.1) and colors between the steps of the sliders: drawing the controls leaves them as they are
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.c.scale(20.0);
+    (app.m.palette.divide, app.m.palette.offset) = (1.23456, 77.7);
+    let (view, palette, lines) = (app.c.get_view(), app.m.palette, app.log.len());
+    let ctx = egui::Context::default();
+    for _ in 0..3 {
+        ctx.run_ui(egui::RawInput::default(), |ui| app.controls_ui(ui)).drop_without_applying_deltas();
+    }
+    assert_eq!((format!("{:?}", app.c.get_view()), app.m.palette), (format!("{view:?}"), palette));
+    assert_eq!(app.log.len(), lines, "nothing was rendered: {:?}", &app.log[lines..]);
+}
+
+#[test]
 fn flight_settings_take_effect_during_a_flight_and_a_new_speed_keeps_the_camera_where_it_is() {
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     (app.flight_rendering, app.pace) = (super::flight::FlightRendering::FULL_RESOLUTION, super::flight::Pace::Cinematic);
