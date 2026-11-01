@@ -562,9 +562,9 @@ impl MandelbrotApp {
         self.render("Restored your settings");
     }
 
-    /// Prepares what needs the OpenGL context of the window: the blur of flights (see `blur`)
-    pub fn use_gl(&mut self, gl: Option<&eframe::glow::Context>) {
-        self.blur = gl.and_then(blur::Blur::new);
+    /// Prepares what needs the wgpu device of the window: the blur of flights (see `blur`)
+    pub fn use_wgpu(&mut self, render_state: Option<&eframe::egui_wgpu::RenderState>) {
+        self.blur = render_state.map(blur::Blur::new);
     }
 
     pub(super) fn update_texture(&mut self, ctx: &egui::Context) {

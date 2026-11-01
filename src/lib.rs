@@ -88,10 +88,11 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Mandelbrot set viewer")
             .with_inner_size([config.window_width as f32 + gui::SIDE_PANEL_WIDTH, (config.window_height as f32).max(gui::MIN_WINDOW_HEIGHT)]),
+        renderer: eframe::Renderer::Wgpu, //(Issue #140: the window draws with wgpu, the API the GPU renderer computes with)
         ..Default::default()
     };
     eframe::run_native("Mandelbrot set viewer", options, Box::new(|creation_context| {
-        app.use_gl(creation_context.gl.as_deref());
+        app.use_wgpu(creation_context.wgpu_render_state.as_ref());
         Ok(Box::new(app))
     }))?;
     Ok(())
