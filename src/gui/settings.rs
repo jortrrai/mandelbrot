@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
 use super::video::{Playback, VideoQuality, FRAME_RATES, SPEEDS};
 use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
+use super::save_size::SaveSizeChoice;
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
@@ -72,6 +73,11 @@ pub(super) struct Settings {
     video_playback: Option<String>,
     video_pngs: Option<bool>,
     video_blend: Option<bool>,
+    /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
+    save_size: Option<String>,
+    save_width: Option<usize>,
+    save_height: Option<usize>,
+    save_portrait: Option<bool>,
 }
 
 /// The auto iterations presets, to find one by its name
@@ -166,6 +172,15 @@ impl MandelbrotApp {
             video_playback: Some(self.video_playback.name().to_string()),
             video_pngs: Some(self.video_pngs),
             video_blend: Some(self.video_blend),
+            save_size: Some(match &self.save_size.choice {
+                SaveSizeChoice::Standard => String::from("default"),
+                SaveSizeChoice::View => String::from("view"),
+                SaveSizeChoice::Custom => String::from("custom"),
+                SaveSizeChoice::Preset(name) => format!("preset:{name}"),
+            }),
+            save_width: Some(self.save_size.custom_width),
+            save_height: Some(self.save_size.custom_height),
+            save_portrait: Some(self.save_size.portrait),
         }
     }
 
@@ -292,6 +307,23 @@ impl MandelbrotApp {
         }
         set(settings.video_pngs, &mut self.video_pngs);
         set(settings.video_blend, &mut self.video_blend);
+        //(A preset that no longer exists, say a deleted custom one: the default size)
+        if let Some(choice) = settings.save_size.as_deref() {
+            self.save_size.choice = match choice.split_once(':') {
+                Some(("preset", name)) if self.save_size.all_presets().iter().any(|preset| preset.name == name) => SaveSizeChoice::Preset(name.to_string()),
+                _ if choice == "view" => SaveSizeChoice::View,
+                _ if choice == "custom" => SaveSizeChoice::Custom,
+                _ => SaveSizeChoice::Standard,
+            };
+        }
+        let sides = crate::resolution::MIN_SIDE..=crate::resolution::MAX_IMAGE_SIDE;
+        if let Some(width) = settings.save_width.filter(|width| sides.contains(width)) {
+            self.save_size.custom_width = width;
+        }
+        if let Some(height) = settings.save_height.filter(|height| sides.contains(height)) {
+            self.save_size.custom_height = height;
+        }
+        set(settings.save_portrait, &mut self.save_size.portrait);
     }
 
     /// Keeps the settings in the file `path` from now on: the settings as they are now are the defaults (for Reset settings), and those of the file are applied.

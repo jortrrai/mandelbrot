@@ -1678,6 +1678,8 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     (app.video_fit_length, app.video_length) = (true, [String::from("1"), String::new(), String::from("7.5")]);
     (app.music_path, app.follow_music, app.music_strength) = (String::from("/music/track.mp3"), true, 0.8);
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
+    //The saved image size (asked by Jort in the review of review-4)
+    (app.save_size.choice, app.save_size.portrait, app.save_size.custom_width, app.save_size.custom_height) = (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000);
     let now = std::time::Instant::now();
     app.keep_settings(now);
     assert!(!path.exists(), "not on every frame of a drag");
@@ -1695,11 +1697,14 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert_eq!((next.video_fit_length, next.target_length()), (true, Some(Duration::from_secs_f64(3607.5))));
     assert_eq!((next.music_path.as_str(), next.follow_music, next.music_strength), ("/music/track.mp3", true, 0.8));
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
+    assert_eq!((next.save_size.choice.clone(), next.save_size.portrait, next.save_size.custom_width, next.save_size.custom_height), (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000));
+    assert_eq!(next.save_size.resolve(next.default_save_resolution(), next.view_resolution()), Ok(crate::resolution::Resolution::new(17_280, 30_720)), "32K upright, as it was");
     //A file with unknown and missing values loads what it knows
-    std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3 }"#).unwrap();
+    std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3, "save_size": "preset:A deleted preset" }"#).unwrap();
     let mut partial = manual_app(&Config::sized(64, 48, 50, 4));
     partial.use_settings_file(Some(path));
     assert_eq!((partial.pace, partial.supersampling_amount), (super::flight::Pace::Normal, defaults.clone().supersampling_for_test()));
+    assert_eq!(partial.save_size.choice, super::save_size::SaveSizeChoice::Standard, "a preset that is gone: the default size");
     //Reset
     next.reset_settings();
     assert_eq!(next.settings(), defaults);
