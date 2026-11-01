@@ -26,6 +26,36 @@ pub(super) fn zoom_around(plane: &mut ComplexPlane, anchor: &Complex, factor: f6
     plane.set_center(&new_center);
 }
 
+impl MandelbrotApp {
+    /// A frame of a two-finger gesture: its middle at the pixel `center` (x, y) of the image, the fingers spread by `zoom` (above 1: apart, zooming in),
+    /// turned by `twist` radians (clockwise on the screen) and moved by `moved` pixels. The point between the fingers stays under them while zooming
+    pub(super) fn touch_gesture(&mut self, center: &(f32, f32), zoom: f32, twist: f32, moved: egui::Vec2) {
+        let mut changed = self.c.clone();
+        if (zoom - 1.0).abs() > 1e-4 && zoom > 0.0 {
+            let factor = 1.0 / f64::from(zoom);
+            let zooming_in = factor < 1.0;
+            let anchor = self.displayed_plane().complex_from_pixel_plane(f64::from(center.0), f64::from(center.1));
+            let anchor = if self.lock_center { changed.center() } else { anchor };
+            zoom_around(&mut changed, &anchor, factor);
+            if zooming_in && self.zoom_refused(&changed) {
+                changed = self.c.clone();
+            }
+        }
+        if twist.abs() > 1e-5 {
+            //(The image follows the fingers: a clockwise twist turns it clockwise, which is a smaller counterclockwise rotation)
+            changed.set_rotation(changed.rotation() - f64::from(twist));
+        }
+        let (columns, rows_up) = ((-moved.x).round() as i64, moved.y.round() as i64);
+        if !self.lock_center && (columns != 0 || rows_up != 0) {
+            crate::rendering::move_complex_plane_by_pixels(&mut changed, rows_up, columns);
+        }
+        if format!("{:?}", changed.get_view()) != format!("{:?}", self.c.get_view()) || changed.rotation().to_bits() != self.c.rotation().to_bits() {
+            self.c = changed;
+            self.render("Moved with two fingers");
+        }
+    }
+}
+
 /// The whole pixels to move by for a drag of `delta_points`, when a pixel of the image is `points_per_pixel` points wide on the screen.
 /// What is left of a fraction of a pixel is kept in `remainder` for the next frame, so a slow drag still moves.
 pub(super) fn whole_pixels(delta_points: f32, remainder: &mut f32, points_per_pixel: f32) -> i64 {
@@ -43,6 +73,13 @@ impl MandelbrotApp {
             let relative = (position - response.rect.min) / size;
             (relative.x * width, relative.y * height)
         };
+        //Two fingers on a touch screen (issue #219): pinch to zoom around them, twist to turn, move them to pan. A one-finger touch is a mouse drag below
+        let touch = ui.input(egui::InputState::multi_touch).filter(|touch| touch.num_touches >= 2 && response.rect.contains(touch.center_pos));
+        if let Some(touch) = touch {
+            self.gesture_active = true;
+            self.touch_gesture(&to_buffer(touch.center_pos), touch.zoom_delta, touch.rotation_delta, touch.translation_delta / (size.x / width));
+            return;
+        }
         let dragging = response.dragged_by(egui::PointerButton::Primary);
         let scroll = if response.hovered() { ui.input(|input| input.smooth_scroll_delta.y) } else { 0.0 };
         self.gesture_active = dragging || scroll.abs() >= 1.0 || self.depth_dragging;

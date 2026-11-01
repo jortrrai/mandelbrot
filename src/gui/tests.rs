@@ -2926,6 +2926,43 @@ fn the_julia_map_of_a_pinned_point_is_drawn_in_the_top_right_and_both_are_off_at
 }
 
 #[test]
+fn two_fingers_zoom_turn_and_move_the_view() {
+    //Issue #219: the gesture itself
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    let (scale, center) = (app.c.get_scale(), app.c.center());
+    //Spread apart around the middle: zooms in around it
+    app.touch_gesture(&(32.0, 24.0), 2.0, 0.0, egui::Vec2::ZERO);
+    assert!((app.c.get_scale() - scale / 2.0).abs() < 1e-12, "{}", app.c.get_scale());
+    assert!((app.c.center().x - center.x).abs() < 1e-9 && (app.c.center().y - center.y).abs() < 1e-9, "around the middle");
+    //Twisted clockwise by a quarter: the image turns clockwise (a rotation of -90°)
+    app.touch_gesture(&(32.0, 24.0), 1.0, std::f32::consts::FRAC_PI_2, egui::Vec2::ZERO);
+    assert!((app.c.rotation() + std::f64::consts::FRAC_PI_2).abs() < 1e-6, "{}", app.c.rotation());
+    //Moved: the view moves along
+    let before = app.c.center();
+    app.touch_gesture(&(32.0, 24.0), 1.0, 0.0, egui::vec2(10.0, 0.0));
+    assert!((app.c.center().x - before.x).abs() + (app.c.center().y - before.y).abs() > 0.0);
+    //And through egui: two touches moving apart on the image zoom in
+    let ctx = egui::Context::default();
+    app.texture = Some(ctx.load_texture("image", egui::ColorImage::from_rgb([64, 48], &vec![0_u8; 64 * 48 * 3]), egui::TextureOptions::LINEAR));
+    let scale = app.c.get_scale();
+    let touch = |id: u64, phase: egui::TouchPhase, x: f32| egui::Event::Touch { device_id: egui::TouchDeviceId(1), id: egui::TouchId(id), phase, pos: egui::pos2(x, 300.0), force: None };
+    //(Touch screens also move the pointer with the first finger, which egui needs to start a gesture)
+    let frames = [
+        vec![egui::Event::PointerMoved(egui::pos2(380.0, 300.0)), touch(1, egui::TouchPhase::Start, 380.0), touch(2, egui::TouchPhase::Start, 420.0)],
+        vec![touch(1, egui::TouchPhase::Move, 360.0), touch(2, egui::TouchPhase::Move, 440.0)],
+        vec![touch(1, egui::TouchPhase::Move, 330.0), touch(2, egui::TouchPhase::Move, 470.0)],
+    ];
+    for events in frames {
+        let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), events, ..Default::default() }, |ui| {
+            app.image_ui(ui);
+        });
+        output.drop_without_applying_deltas();
+    }
+    assert!(app.c.get_scale() < scale, "pinched apart: zoomed in ({scale} -> {})", app.c.get_scale());
+}
+
+#[test]
 fn a_right_click_does_not_move_a_locked_center() {
     //Found by Jort in the review of review-4 (#193): Lock center kept the center against dragging and the wheel, not against a right click
     let config = Config::sized(64, 48, 50, 32);
