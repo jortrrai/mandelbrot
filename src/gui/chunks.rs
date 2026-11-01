@@ -85,8 +85,11 @@ pub(super) fn write_manifest(parts: &Path, manifest: &Manifest) -> std::io::Resu
 /// Joins the chunks `0..chunks` of `parts` into `video` (an .mp4 or an .mkv) without encoding them again (`hevc`: they are HEVC); true if ffmpeg did
 pub(super) fn join_chunks(parts: &Path, chunks: usize, video: &Path, hevc: bool) -> bool {
     let list = (0..chunks).fold(String::new(), |mut list, chunk| {
-        //(Forward slashes: the concat format reads a backslash, as in the paths of Windows, as an escape)
-        let _ = writeln!(list, "file '{}'", chunk_path(parts, chunk, CHUNK_EXTENSION).display().to_string().replace('\\', "/").replace('\'', "'\\''"));
+        //Only the name of the file: ffmpeg reads a relative path in the list from the folder of the list, which is `parts` itself, so the folder in front
+        //of a relative `parts` (such as saved/<name>.parts) would be there twice
+        let path = chunk_path(parts, chunk, CHUNK_EXTENSION);
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let _ = writeln!(list, "file '{}'", name.replace('\'', "'\\''"));
         list
     });
     let list_path = parts.join("chunks.txt");

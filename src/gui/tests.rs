@@ -2124,6 +2124,27 @@ fn a_chunked_mp4_joins_into_one_video_with_every_frame() {
 }
 
 #[test]
+fn a_video_in_a_relative_folder_like_saved_joins_its_chunks() {
+    if !ffmpeg_available() {
+        return;
+    }
+    //The window's videos go to the relative folder saved/, and ffmpeg reads the paths of its list of chunks from the folder of the list: the chunks of every
+    //video in the app were not found (found by Jort in the review of review-4: "Could not join the chunks of the video")
+    let (mut app, folder) = chunked_video_app(false);
+    let relative = std::path::PathBuf::from("target").join(format!("test-relative-videos-{}", std::process::id())).join("saved");
+    let _ = std::fs::remove_dir_all(&relative);
+    app.video_folder.clone_from(&relative);
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight:") && !message.contains("(stopped"), "{message}");
+    let total: usize = message.split(" of ").nth(2).and_then(|rest| rest.split(' ').next()).and_then(|total| total.parse().ok()).expect(&message);
+    assert!(total > 10, "more than two chunks: {message}");
+    let video = std::fs::read_dir(&relative).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mkv")).expect(&message);
+    assert_eq!(decoded_frames(&video).len(), total * 48 * 32 * 3, "every frame: {message}");
+    let _ = (std::fs::remove_dir_all(relative.parent().unwrap()), std::fs::remove_dir_all(folder));
+}
+
+#[test]
 fn a_resumed_blended_video_warms_up_its_blend_and_has_every_frame() {
     if !ffmpeg_available() {
         return;
