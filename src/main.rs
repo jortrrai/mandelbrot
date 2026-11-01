@@ -5,8 +5,10 @@ use std::process;
 use mandelbrot::{Config, self};
 
 fn main() {
-    if std::env::args().len() > 1 {
-        eprintln!("The command-line arguments are no longer used: the window has controls for the size, the iterations and the quality. Starting with the defaults.");
+    //With arguments, the command line (see `gui::cli`: mandelbrot video …); without, the window
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if !arguments.is_empty() {
+        process::exit(mandelbrot::gui::command_line(&arguments));
     }
     if let Err(err) = mandelbrot::run(&Config::default()) {
         eprintln!("Application error: {}", err);

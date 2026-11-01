@@ -446,7 +446,7 @@ impl MandelbrotApp {
                         let _ = sender.send(JobMessage::Limit { max_iterations: result.limit });
                         m.max_iterations = result.limit;
                         message = format!("{message} (auto iterations: limit {}, {} rounds, {:?}, {:.2} s)", result.limit, result.rounds.len(), result.stop, started.elapsed().as_secs_f64());
-                        println!("{result:?}");
+                        if super::cli::quiet() { eprintln!("{result:?}") } else { println!("{result:?}") }
                     }
                     None => {
                         let _ = samples_sender.send(samples);
@@ -470,7 +470,8 @@ impl MandelbrotApp {
                     return;
                 }
                 let layer_time = layer_started.elapsed();
-                println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
+                let text = format!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
+                if super::cli::quiet() { eprintln!("{text}") } else { println!("{text}") }
                 let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: c.clone(), pass, total: supersampling_amount, layer_time, whole });
                 layer_started = Instant::now();
             });

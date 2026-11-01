@@ -259,7 +259,7 @@ impl Playback {
 }
 
 /// The extension of the file of a video of `quality`
-const fn extension(quality: VideoQuality) -> &'static str {
+pub(super) const fn extension(quality: VideoQuality) -> &'static str {
     match quality {
         VideoQuality::Lossless => "mkv",
         _ => "mp4",
@@ -480,10 +480,10 @@ mod mapping_text {
 
 /// A video job: its progress (frames written of all) and cancel flag, and the receiver of its final message
 pub(super) struct VideoJob {
-    done: Arc<AtomicUsize>,
+    pub(super) done: Arc<AtomicUsize>,
     /// How many frames render at once, and the CPU use (see `FrameScheduler`)
     pub(super) scheduler: Arc<FrameScheduler>,
-    total: usize,
+    pub(super) total: usize,
     pub(super) cancel: Arc<AtomicBool>,
     started: Instant,
     result: mpsc::Receiver<String>,

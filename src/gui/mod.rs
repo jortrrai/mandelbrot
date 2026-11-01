@@ -17,6 +17,8 @@ mod blur;
 mod chunks;
 mod music;
 mod controls;
+mod cli;
+pub use cli::command_line;
 mod cycle;
 mod depth;
 mod export;
@@ -545,7 +547,8 @@ impl MandelbrotApp {
 
     pub(super) fn log(&mut self, message: impl Into<String>) {
         let message = message.into();
-        println!("{message}");
+        //(On the command line stdout is for its JSON: the log goes to stderr there, see `cli`)
+        if cli::quiet() { eprintln!("{message}") } else { println!("{message}") }
         self.log.push(message);
     }
 
