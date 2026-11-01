@@ -111,6 +111,11 @@ pub(super) fn join_chunks(parts: &Path, chunks: usize, video: &Path, hevc: bool)
         .status().is_ok_and(|status| status.success())
 }
 
+/// The bytes of the files in `folder` (not in folders inside it)
+pub(super) fn folder_size(folder: &Path) -> u64 {
+    std::fs::read_dir(folder).map_or(0, |entries| entries.filter_map(Result::ok).filter_map(|entry| entry.metadata().ok()).filter(std::fs::Metadata::is_file).map(|metadata| metadata.len()).sum())
+}
+
 /// The videos in `saved` that were stopped before they were finished (or whose chunks could not be joined): their names (without `.parts`) and manifests,
 /// the newest first (a name starts with the time the video was started)
 pub(super) fn unfinished(saved: &Path) -> Vec<(String, Manifest)> {

@@ -480,6 +480,10 @@ mod mapping_text {
 
 /// A video job: its progress (frames written of all) and cancel flag, and the receiver of its final message
 pub(super) struct VideoJob {
+    /// The name of the video (its file and its chunks, see `chunks`)
+    pub(super) name: String,
+    /// Set by *Cancel video*: the chunks are deleted when the job has stopped (see `poll_video`)
+    pub(super) discard: bool,
     pub(super) done: Arc<AtomicUsize>,
     /// How many frames render at once, and the CPU use (see `FrameScheduler`)
     pub(super) scheduler: Arc<FrameScheduler>,
@@ -588,6 +592,7 @@ impl MandelbrotApp {
     #[allow(clippy::too_many_lines)] // The settings of the job, its two writers and its loop over the frames
     pub(super) fn start_video_of(&mut self, spec: VideoSpec) -> bool {
         let name = spec.output.clone().unwrap_or_else(|| video_name(&spec.flight, &self.video_folder));
+        let job_name = name.clone();
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
         let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music, shutter } = spec;
@@ -922,7 +927,7 @@ impl MandelbrotApp {
             let _ = sender.send(format!("Video of the flight: {total} of {total} frames at {fps} FPS, {speed} speed{resumed}{written} as {}{with_music}", video.display()));
         });
         self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {} speed, {}, {}", speed_text(speed), quality.name(), playback.name()));
-        self.video_job = Some(VideoJob { done, scheduler, total, cancel, started: Instant::now(), result });
+        self.video_job = Some(VideoJob { name: job_name, discard: false, done, scheduler, total, cancel, started: Instant::now(), result });
         true
     }
 
@@ -934,15 +939,32 @@ impl MandelbrotApp {
             //A video that was cancelled, stopped or could not start has not finished (for the queue)
             //(By the result, not by Pause video: pressed while the chunks are joined, the video is still finished)
             let finished = message.starts_with("Video of the flight:") && !message.contains("(stopped");
+            let discard = (job.discard && !finished).then(|| job.name.clone());
             self.video_job = None;
             self.log(message);
+            if let Some(name) = discard {
+                //Cancel video: nothing of it is kept (issue #215)
+                self.delete_unfinished(&name);
+            }
             self.unfinished_videos = None; //Read again (see `unfinished_ui`)
             self.queue_video_ended(finished);
         }
     }
 
     /// The progress of a video under way, with its button to cancel it
-    pub(super) fn video_progress_ui(&self, ui: &mut egui::Ui) {
+    pub(super) fn video_progress_ui(&mut self, ui: &mut egui::Ui) {
+        let mut cancel_video = false;
+        self.video_progress_row(ui, &mut cancel_video);
+        if cancel_video {
+            if let Some(job) = &mut self.video_job {
+                job.discard = true;
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The row of `video_progress_ui`; `cancel_video` is set when *Cancel video* is pressed
+    fn video_progress_row(&self, ui: &mut egui::Ui, cancel_video: &mut bool) {
         let Some(job) = &self.video_job else { return };
         ui.horizontal(|ui| {
             let done = job.done.load(Ordering::Relaxed);
@@ -950,6 +972,9 @@ impl MandelbrotApp {
             let left = if done > 0 { elapsed / done as f64 * (job.total - done) as f64 } else { 0.0 };
             if ui.button("Pause video").on_hover_text("Stops the video: its finished chunks (10 seconds of video each) are kept, and Resume continues it later, also after the program was closed").clicked() {
                 job.cancel.store(true, Ordering::Relaxed);
+            }
+            if ui.button("Cancel video").on_hover_text("Stops the video and deletes what it rendered so far (Pause video keeps it)").clicked() {
+                *cancel_video = true;
             }
             let (at_once, cpu) = (job.scheduler.allowed(), job.scheduler.cpu_percent.load(Ordering::Relaxed));
             ui.add(egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!("Video: {done} of {} frames, {left:.0} s left ({at_once} at once, CPU {cpu}%)", job.total)))
@@ -1004,9 +1029,24 @@ impl MandelbrotApp {
     /// The videos that were stopped before they were finished, each with *Resume* (the list is read again when a video ends)
     fn unfinished_ui(&mut self, ui: &mut egui::Ui) {
         let videos = self.unfinished_videos.get_or_insert_with(|| super::chunks::unfinished(&self.video_folder).into_iter().map(|(name, manifest)| (name, manifest.first_frame(), manifest.total)).collect());
-        let mut resume = None;
+        let (mut resume, mut delete, mut confirm) = (None, None, self.confirm_delete.clone());
         for (name, done, total) in videos.iter() {
             ui.horizontal(|ui| {
+                //Delete, after a second click that says how much it frees (issue #215)
+                if confirm.as_deref() == Some(name.as_str()) {
+                    let size = super::chunks::folder_size(&super::chunks::parts_folder(&self.video_folder, name));
+                    ui.label(format!("Delete {name} and its {}?", megabytes(size as f64)));
+                    if ui.button("Delete").clicked() {
+                        delete = Some(name.clone());
+                    }
+                    if ui.button("Keep").clicked() {
+                        confirm = None;
+                    }
+                    return;
+                }
+                if ui.small_button("Delete…").on_hover_text("Deletes what was rendered of this video (its chunks); asks first").clicked() {
+                    confirm = Some(name.clone());
+                }
                 //Every frame rendered, the chunks not joined (the join failed or was interrupted): Resume only joins them
                 let (button, tooltip, label) = if done == total {
                     ("Join", "Joins the finished chunks of this video into its file; nothing is rendered again", format!("Rendered, not joined: {name} (all {total} frames)"))
@@ -1019,9 +1059,31 @@ impl MandelbrotApp {
                 ui.label(label);
             });
         }
+        self.confirm_delete = confirm;
+        if let Some(name) = delete {
+            self.confirm_delete = None;
+            self.delete_unfinished(&name);
+        }
         if let Some(name) = resume {
             self.resume_video(&name);
         }
+    }
+
+    /// Deletes the chunks of the unfinished video `name` (its `.parts` folder, nothing else) and takes it out of the queue
+    pub(super) fn delete_unfinished(&mut self, name: &str) {
+        let parts = super::chunks::parts_folder(&self.video_folder, name);
+        match std::fs::remove_dir_all(&parts) {
+            Ok(()) => self.log(format!("Deleted the unfinished video {name} ({})", parts.display())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => self.log(format!("Could not delete {}: {err}", parts.display())),
+        }
+        let queued = self.video_queue.len();
+        self.video_queue.retain(|spec| spec.output.as_deref() != Some(name));
+        if self.video_queue.len() != queued {
+            self.log(format!("Took {name} out of the queue"));
+            self.save_queue();
+        }
+        self.unfinished_videos = None;
     }
 
     /// The video controls: the button, the frame rate, the speed, the format and the PNG frames (the progress of a video under way is at the top, see

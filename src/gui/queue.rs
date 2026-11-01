@@ -34,7 +34,7 @@ impl MandelbrotApp {
     }
 
     /// Writes the queue file (the video under way first), or removes it when the queue is empty
-    fn save_queue(&mut self) {
+    pub(super) fn save_queue(&mut self) {
         let Some(path) = self.queue_path() else { return };
         let videos: Vec<VideoSpec> = self.queue_current.iter().chain(&self.video_queue).cloned().collect();
         let written = if videos.is_empty() {

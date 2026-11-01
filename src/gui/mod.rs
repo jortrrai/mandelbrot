@@ -227,6 +227,8 @@ pub struct MandelbrotApp {
     video_chunk_frames: Option<usize>,
     /// The unfinished videos of the videos folder (name, frames done, frames), read when the video controls are shown and again when a video ends
     unfinished_videos: Option<Vec<(String, usize, usize)>>,
+    /// The unfinished video whose *Delete* asks to be confirmed (see `video::unfinished_ui`)
+    confirm_delete: Option<String>,
     /// The text of the field to paste a view into (see `sharing`)
     shared_view_input: String,
     /// Whether the depth slider is being dragged, and whether the mouse keeps the center of the view (see `depth`)
@@ -430,6 +432,7 @@ impl MandelbrotApp {
             video_gpu_renderer: true,
             video_chunk_frames: None,
             unfinished_videos: None,
+            confirm_delete: None,
             shared_view_input: String::new(),
             depth_dragging: false,
             rotation_in_degrees: true,

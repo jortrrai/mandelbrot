@@ -2172,6 +2172,47 @@ fn the_unfinished_videos_are_listed_newest_first_and_a_rendered_one_offers_to_jo
 }
 
 #[test]
+fn an_unfinished_video_is_deleted_after_a_confirmation_and_cancel_video_keeps_nothing() {
+    //Issue #215
+    let (mut app, folder) = chunked_video_app(false);
+    let saved = folder.join("saved");
+    let spec = app.video_spec().unwrap();
+    let parts = super::chunks::parts_folder(&saved, "video-2026-11-01_20-24-13-place");
+    std::fs::create_dir_all(&parts).unwrap();
+    super::chunks::write_manifest(&parts, &super::chunks::Manifest::new(spec.clone(), 10, 5, false)).unwrap();
+    std::fs::write(parts.join("part-00000.mkv"), vec![0_u8; 1000]).unwrap();
+    let finished = saved.join("video-2026-11-01_20-00-00-place.mkv");
+    std::fs::write(&finished, b"a finished video").unwrap();
+    app.video_queue.push(super::video::VideoSpec { output: Some(String::from("video-2026-11-01_20-24-13-place")), ..spec });
+    assert!(super::chunks::folder_size(&parts) >= 1000);
+    //The first click asks, the second deletes
+    app.unfinished_videos = None;
+    app.confirm_delete = Some(String::from("video-2026-11-01_20-24-13-place"));
+    let texts = controls_texts(&mut app).join("|");
+    assert!(texts.contains("Delete video-2026-11-01_20-24-13-place and its"), "{texts}");
+    app.delete_unfinished("video-2026-11-01_20-24-13-place");
+    assert!(!parts.exists() && finished.exists(), "only the chunks of that video");
+    assert!(app.video_queue.is_empty(), "and it left the queue");
+    //Cancel video: the chunks of the video under way are gone when it stops
+    if ffmpeg_available() {
+        app.video_chunk_frames = Some(2);
+        app.start_video();
+        let name = app.video_job.as_ref().unwrap().name.clone();
+        let started = std::time::Instant::now();
+        while super::chunks::read_manifest(&super::chunks::parts_folder(&saved, &name)).is_none_or(|manifest| manifest.chunks_done < 1) {
+            assert!(started.elapsed() < Duration::from_secs(60) && app.video_job.is_some(), "a chunk is done");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let job = app.video_job.as_mut().unwrap();
+        job.discard = true;
+        job.cancel.store(true, Ordering::Relaxed);
+        let _ = wait_for_video(&mut app);
+        assert!(!super::chunks::parts_folder(&saved, &name).exists(), "nothing is kept");
+    }
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_video_paused_before_its_first_chunk_says_that_nothing_is_kept_yet() {
     if !ffmpeg_available() {
         return;
