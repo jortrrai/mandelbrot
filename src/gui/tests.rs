@@ -2338,6 +2338,51 @@ fn the_depth_control_changes_only_the_zoom_and_renders_like_a_gesture_while_drag
 }
 
 #[test]
+fn a_sequence_made_in_a_julia_set_stays_in_it_when_flown_rendered_and_saved() {
+    //Issue #229: at the end of the sequence the window switched back to the Mandelbrot set
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    app.flights_folder = folder.join("flights");
+    app.c.set_view(&crate::complex_plane::View::new(-0.5, 0.2, 0.3));
+    app.enter_julia((-0.8, 0.156));
+    for scale in [1.0, 0.25] {
+        app.c.set_view(&crate::complex_plane::View::new(0.1, 0.05, scale));
+        app.add_keyframe();
+    }
+    app.sequence_seconds = vec![String::from("0.5")];
+    assert!(app.sequence_keyframes.iter().all(|keyframe| keyframe.julia == Some((-0.8, 0.156))));
+    app.fly_sequence();
+    assert_eq!(app.m.julia, Some((-0.8, 0.156)), "flown in the Julia set");
+    app.skip_flight();
+    assert_eq!(app.m.julia, Some((-0.8, 0.156)), "and still in it at the end");
+    assert_eq!(app.c.get_scale(), 0.25);
+    app.leave_julia();
+    assert!((app.c.get_scale() - 0.3).abs() < 1e-12, "Back returns to the Mandelbrot view before");
+    //Saved and loaded again: the flight file keeps the Julia set; its video renders it even from the Mandelbrot set
+    let flight = app.last_flight.clone().unwrap();
+    assert_eq!(flight.julia, Some((-0.8, 0.156)));
+    let saved = super::flight_files::parse(&super::flight_files::to_json(&flight, None), "julia.json").unwrap();
+    assert_eq!(saved.flight, flight, "a flight file keeps the Julia set");
+    assert!(!super::flight_files::to_json(&super::video::VideoFlight { julia: None, sequence: None, ..flight.clone() }, None).contains("julia"), "a Mandelbrot flight is written as before");
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs) = (48, 32, 1, 24, true);
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight: 13 of 13 frames"), "{message}");
+    let frames_folder = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&frames_folder).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    frames.sort();
+    let last = crate::image_metadata::view_of_png(frames.last().unwrap()).unwrap();
+    assert_eq!(last.location.julia, Some((-0.8, 0.156)), "the frames are of the Julia set");
+    //Keyframes in different sets don't make one sequence
+    app.sequence_keyframes[0].julia = None;
+    app.flight = None;
+    app.fly_sequence();
+    assert!(app.flight.is_none() && app.log.last().unwrap().starts_with("A sequence stays in one set"), "{:?}", app.log.last());
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_dive_made_of_keyframes_flies_renders_and_saves_with_the_colors_of_each_keyframe() {
     //Issue #194 with #193: keyframes at three depths of one center, each with its own divide, then the sequence flown, rendered and saved
     let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);

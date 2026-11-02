@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn a_sequence_passes_every_keyframe_at_its_time_and_a_dive_never_moves_sideways() {
         use super::super::sequence::{Keyframe, Sequence};
-        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false, rotation: 0.0 };
+        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { julia: None, real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false, rotation: 0.0 };
         let sequence = Sequence { keyframes: vec![keyframe(1.0, 1.0, 300), keyframe(1e-3, 0.5, 1000), keyframe(1e-6, 4.0, 5000)], seconds: vec![4.0, 6.0] };
         let flight = Flight::of_sequence(sequence.clone(), (3.0, 1.0));
         assert_eq!(flight.duration(), Duration::from_secs(10));

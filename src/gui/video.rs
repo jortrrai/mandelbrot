@@ -412,6 +412,9 @@ pub(super) struct VideoFlight {
     /// The rotation at the start and at the place, in radians, turned the short way on the way (issue #217)
     #[serde(default)]
     pub(super) rotations: (f64, f64),
+    /// The Julia set the whole flight is in, by its parameter c (issue #229: a sequence made in a Julia set); none: the Mandelbrot set
+    #[serde(default)]
+    pub(super) julia: Option<(f64, f64)>,
 }
 
 impl VideoFlight {
@@ -585,6 +588,7 @@ impl MandelbrotApp {
     /// What a video of the last flight with the current settings would be (see `VideoSpec`), or why there is none
     pub(super) fn video_spec(&self) -> Result<VideoSpec, String> {
         let flight = self.last_flight.clone().ok_or_else(|| String::from("there is no flight yet"))?;
+        let julia = flight.julia;
         let resolution = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution())?;
         let path = flight.path();
         let music = self.followed_music();
@@ -604,7 +608,8 @@ impl MandelbrotApp {
             blur: self.image_quality_blur,
             coloring_index: self.coloring_index,
             mapping: self.p.color_channel_mapping,
-            set: self.m.clone(),
+            //(The set of the flight: a flight made in a Julia set renders it, also when the window has left it since)
+            set: crate::mandelbrot_set::MandelbrotSet { julia, ..self.m.clone() },
             auto: self.auto_iterations.then(|| self.auto_settings.clone()),
             use_gpu: self.use_gpu,
             fast_gpu: self.fast_gpu,
@@ -717,7 +722,7 @@ impl MandelbrotApp {
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
                             description: format!("Frame {} of {total} of the video {name}", frame + 1),
-                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))), rotation: flight.rotation_at(&path, time).to_degrees(), julia: None },
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))), rotation: flight.rotation_at(&path, time).to_degrees(), julia: flight.julia },
                             appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
                             file_name: String::new(),
                         });
@@ -1322,7 +1327,7 @@ mod tests {
     #[test]
     fn the_limit_of_a_video_frame_goes_from_the_limit_at_the_start_to_that_of_the_place() {
         let settings = crate::auto_iterations::AutoPreset::Balanced.settings();
-        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, rotations: (0.0, 0.0) };
+        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, rotations: (0.0, 0.0), julia: None };
         assert_eq!(limit_at(1.0, &flight, &settings), 300);
         assert_eq!(limit_at(6.4e-5, &flight, &settings), 5000);
         let middle = limit_at(8e-3, &flight, &settings);
