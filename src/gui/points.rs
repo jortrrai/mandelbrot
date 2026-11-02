@@ -332,7 +332,7 @@ impl MandelbrotApp {
 
     /// Loads the points of interest of `folder`, and logs how many were found and every problem (a skipped file, an ignored appearance)
     pub(super) fn load_points_of_interest(&mut self, folder: std::path::PathBuf) {
-        //(No folder to read, as in the Android app or when the program starts elsewhere: the places built into it)
+        //(No folder to read, as when the program starts elsewhere: the places built into it)
         if !folder.is_dir() {
             self.points = points_of_interest::shipped();
             self.log(format!("Points of interest: {} built into the program (there is no folder {})", self.points.len(), folder.display()));

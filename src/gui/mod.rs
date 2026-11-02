@@ -18,7 +18,6 @@ mod chunks;
 mod music;
 mod controls;
 mod cli;
-#[cfg(not(target_os = "android"))]
 mod youtube;
 pub use cli::command_line;
 mod cycle;

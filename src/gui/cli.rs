@@ -76,7 +76,6 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         [group, command, rest @ ..] => (group.as_str(), command.as_str(), rest),
         _ => return Err(usage("usage: mandelbrot video <new|start|pause|resume|cancel|status|list|output|delete|credit|upload> … (or mandelbrot youtube auth)")),
     };
-    #[cfg(not(target_os = "android"))]
     if group == "youtube" {
         return match command {
             "auth" => {
@@ -100,9 +99,7 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         "status" => print(&status(&jobs, id_of(rest)?)?),
         "output" => print(&output(&jobs, id_of(rest)?)?),
         "delete" => print(&delete(&jobs, id_of(rest)?, rest.iter().any(|argument| argument == "--video"))?),
-        #[cfg(not(target_os = "android"))]
         "credit" => print(&credit(&jobs, id_of(rest)?, &options(&rest[1..])?)?),
-        #[cfg(not(target_os = "android"))]
         "upload" => print(&upload(&jobs, id_of(rest)?, &options(&rest[1..])?)?),
         _ => Err(usage(format!("unknown video command {command:?}"))),
     }
@@ -417,21 +414,18 @@ fn delete(jobs: &Path, id: &str, with_video: bool) -> Result<Value, Failure> {
 }
 
 /// The whole file of job `id` (its spec, credit and uploads)
-#[cfg(not(target_os = "android"))]
 fn read_job_file(jobs: &Path, id: &str) -> Result<Value, Failure> {
     read_job(jobs, id)?;
     let path = job_path(jobs, id);
     std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str(&text).ok()).ok_or_else(|| failed(format!("{} cannot be read", path.display())))
 }
 
-#[cfg(not(target_os = "android"))]
 fn write_job_file(jobs: &Path, id: &str, file: &Value) -> Result<(), Failure> {
     let path = job_path(jobs, id);
     std::fs::write(&path, serde_json::to_string_pretty(file).unwrap_or_default()).map_err(|err| failed(format!("{}: {err}", path.display())))
 }
 
 /// `video credit`: records the exact credit of the music of job `id` (see `youtube::credit_job`)
-#[cfg(not(target_os = "android"))]
 fn credit(jobs: &Path, id: &str, options: &[(String, String)]) -> Result<Value, Failure> {
     let kind = option(options, "kind").ok_or_else(|| usage(format!("video credit needs --kind ({})", super::youtube::CREDIT_KINDS.join(", "))))?;
     let text = match (option(options, "text-file"), option(options, "text")) {
@@ -450,7 +444,6 @@ fn credit(jobs: &Path, id: &str, options: &[(String, String)]) -> Result<Value, 
 }
 
 /// `video upload`: uploads the finished video of job `id`, private, with its credit under the description; the upload is kept with the job
-#[cfg(not(target_os = "android"))]
 fn upload(jobs: &Path, id: &str, options: &[(String, String)]) -> Result<Value, Failure> {
     let spec = read_job(jobs, id)?;
     let mut file = read_job_file(jobs, id)?;
