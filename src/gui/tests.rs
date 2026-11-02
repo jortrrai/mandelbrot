@@ -3704,3 +3704,37 @@ fn a_view_of_a_julia_set_keeps_its_parameter_in_places_shared_text_and_images() 
     app.leave_julia();
     assert!((app.c.get_scale() - 0.3).abs() < 1e-12, "back at the Mandelbrot view before");
 }
+
+
+#[test]
+#[ignore = "a measurement of Fast dives on a saved flight (#236), run by hand with --release"]
+fn fast_dives_against_frame_by_frame_on_a_saved_flight() {
+    //MANDELBROT_FLIGHT: the flight file; MANDELBROT_SIZE="width height samples" (default 1280 720 8); MANDELBROT_SETTINGS: a copy of a settings file
+    let Ok(path) = std::env::var("MANDELBROT_FLIGHT") else { return };
+    let size = std::env::var("MANDELBROT_SIZE").unwrap_or_else(|_| String::from("1280 720 8"));
+    let numbers: Vec<usize> = size.split_whitespace().map(|number| number.parse().unwrap()).collect();
+    let saved = super::flight_files::parse(&std::fs::read_to_string(&path).unwrap(), "flight.json").unwrap();
+    for keyframe_dives in [false, true] {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        if let Ok(settings) = std::env::var("MANDELBROT_SETTINGS") {
+            app.use_settings_file(Some(std::path::PathBuf::from(settings)));
+        }
+        app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount) = (numbers[0], numbers[1], u8::try_from(numbers[2]).unwrap());
+        app.video_keyframe_dives = keyframe_dives;
+        app.saved_flights = vec![saved.clone()];
+        app.use_saved_flight(0);
+        let feed = || rendering::GPU_FEED.points.load(Ordering::Relaxed);
+        let (points, started) = (feed(), std::time::Instant::now());
+        app.start_video();
+        let ctx = egui::Context::default();
+        while app.video_job.is_some() {
+            app.poll_video(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        println!("Fast dives {keyframe_dives}: {:.2} s, {} GPU points; {}", started.elapsed().as_secs_f64(), feed() - points, app.log.iter().rev().take(4).cloned().collect::<Vec<_>>().join(" | "));
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
