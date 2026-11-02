@@ -1762,6 +1762,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     app.video_blend = true;
     (app.video_fit_length, app.video_length) = (true, [String::from("1"), String::new(), String::from("7.5")]);
     (app.music_path, app.follow_music, app.music_strength) = (String::from("/music/track.mp3"), true, 0.8);
+    (app.beat_pulse, app.pulse_strength) = (true, 0.12);
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     //The saved image size (asked by Jort in the review of review-4)
     (app.save_size.choice, app.save_size.portrait, app.save_size.custom_width, app.save_size.custom_height) = (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000);
@@ -1783,6 +1784,8 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert!(next.video_blend);
     assert_eq!((next.video_fit_length, next.target_length()), (true, Some(Duration::from_secs_f64(3607.5))));
     assert_eq!((next.music_path.as_str(), next.follow_music, next.music_strength), ("/music/track.mp3", true, 0.8));
+    assert_eq!((next.beat_pulse, next.pulse_strength), (true, 0.12), "issue #221");
+    assert_eq!(next.followed_music().map(|music| music.pulse), Some(0.12), "the pulse goes with the music of a video");
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     assert_eq!((next.save_size.choice.clone(), next.save_size.portrait, next.save_size.custom_width, next.save_size.custom_height), (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000));
     assert_eq!(next.save_size.resolve(next.default_save_resolution(), next.view_resolution()), Ok(crate::resolution::Resolution::new(17_280, 30_720)), "32K upright, as it was");
@@ -2545,6 +2548,44 @@ fn a_video_that_follows_music_lasts_as_long_as_the_track_slows_down_in_its_quiet
     let middle = crate::image_metadata::view_of_png(&frames_folder.join("frame-00049.png")).unwrap();
     let path = app.last_flight.as_ref().unwrap().path();
     assert!(middle.location.scale > path.camera_at(path.duration() / 2).scale * 1.5, "still further out than the middle of the flight: {}", middle.location.scale);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn a_video_that_pulses_on_the_beat_zooms_in_on_every_kick_and_is_at_rest_between_them() {
+    if !ffmpeg_available() {
+        return;
+    }
+    //Issue #221: 2 s of a kick drum (60 Hz, decaying) every half second, at an even speed (strength 0), with a pulse of 20%
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    std::fs::create_dir_all(&folder).unwrap();
+    let track = folder.join("kicks.wav");
+    let made = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "aevalsrc=0.8*exp(-mod(t\\,0.5)/0.1)*sin(2*PI*60*t):d=2:s=8000"]).arg(&track).status().unwrap();
+    assert!(made.success());
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs) = (48, 32, 1, 24, true);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    app.use_music_file(&track);
+    assert_eq!(app.video_length, [String::new(), String::from("0"), String::from("2")], "the length boxes show the song's length");
+    (app.music_strength, app.beat_pulse, app.pulse_strength) = (0.0, true, 0.2);
+    app.start_video();
+    assert!(app.log.iter().any(|line| line.contains("Pulse on the beat: 4 kicks")), "{:?}", app.log.iter().rev().take(3).collect::<Vec<_>>());
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight: 49 of 49 frames"), "{message}");
+    let saved = folder.join("saved");
+    let frames_folder = std::fs::read_dir(&saved).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+    let path = app.last_flight.as_ref().unwrap().path();
+    //How far frame `frame` is zoomed in beyond the flight's own camera at its moment (an even speed: the moment is its share of the 2 s)
+    let zoom = |frame: usize| {
+        let view = crate::image_metadata::view_of_png(&frames_folder.join(format!("frame-{:05}.png", frame + 1))).unwrap();
+        path.camera_at(path.duration().mul_f64(frame as f64 / 48.0)).scale / view.location.scale - 1.0
+    };
+    //The kick at 0.5 s is frame 12; at frame 13 (42 ms later) the pulse is near its top, at frame 11 the one before has settled
+    assert!(zoom(13) > 0.12, "zoomed in on the kick: {}", zoom(13));
+    assert!(zoom(11).abs() < 0.01 && zoom(23).abs() < 0.01, "at rest between the kicks: {} {}", zoom(11), zoom(23));
     let _ = std::fs::remove_dir_all(folder);
 }
 

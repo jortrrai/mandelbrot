@@ -342,12 +342,24 @@ pub(super) struct FrameClock {
     speed: f64,
     music: Option<Arc<super::music::MusicClock>>,
     duration: Duration,
+    /// The kicks of the music and the strength of their pulse, with *Pulse on the beat* (see `music::BeatPulse`)
+    pulse: Option<(Arc<super::music::BeatPulse>, f64)>,
 }
 
 impl FrameClock {
     /// The time along the flight of frame `frame`
     fn time(&self, frame: usize) -> Duration {
         self.music.as_ref().map_or_else(|| frame_time(frame, self.fps, self.speed), |music| self.duration.mul_f64(music.share_at(frame as f64 / f64::from(self.fps))))
+    }
+
+    /// The camera of frame `frame` at the moment `time` of the flight `path` (the frame's own moment, or one within its shutter): the camera of the flight,
+    /// zoomed in by the pulse of the music on the frame (issue #221)
+    fn camera(&self, path: &super::flight::Flight, frame: usize, time: Duration) -> super::flight::Camera {
+        let camera = path.camera_at(time);
+        match &self.pulse {
+            Some((pulse, strength)) => super::flight::Camera { scale: camera.scale / (1.0 + pulse.zoom_at(frame as f64 / f64::from(self.fps), *strength)), ..camera },
+            None => camera,
+        }
     }
 
     /// The frames of the video, from the start to the place, both included
@@ -670,7 +682,17 @@ impl MandelbrotApp {
                 return false;
             }
         };
-        let clock = FrameClock { fps, speed, music: music_clock, duration: path.duration() };
+        let pulse = match music.as_ref().filter(|music| music.pulse > 0.0).map(|music| super::music::pulse_of_track(std::path::Path::new(&music.path)).map(|pulse| (Arc::new(pulse), music.pulse))).transpose() {
+            Ok(pulse) => pulse,
+            Err(reason) => {
+                self.log(format!("Could not render the video: {reason}"));
+                return false;
+            }
+        };
+        if let Some((kicks, _)) = &pulse {
+            self.log(format!("Pulse on the beat: {} kicks in the music", kicks.moments().len()));
+        }
+        let clock = FrameClock { fps, speed, music: music_clock, duration: path.duration(), pulse };
         let total = clock.frames();
         let coloring_function = super::COLORING_FUNCTIONS[coloring_index.min(super::COLORING_FUNCTIONS.len() - 1)].1;
         let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
@@ -678,7 +700,8 @@ impl MandelbrotApp {
         let gpu = self.gpu.clone().filter(|_| use_gpu);
         //With a GPU, one more renderer renders whole frames on the GPU alone (see the renderers below)
         //A dive into a fixed center with the same colors all the way, at most 4K: composed from keyframe images (see `dive_keyframes`)
-        let dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1)
+        //(The pulse of the music zooms every frame on its own: not a dive along one path of scales)
+        let dive = (keyframe_dives && !blend && clock.pulse.is_none() && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1)
             .then(|| super::dive_keyframes::DivePlan::of((0..total).map(|frame| clock.time(frame)), |time| {
                 let camera = path.camera_at(time);
                 ((camera.x, camera.y), camera.scale)
@@ -739,7 +762,7 @@ impl MandelbrotApp {
                 std::thread::spawn(move || {
                     for (frame, rgb) in png_receiver {
                         let time = png_clock.time(frame);
-                        let camera = path.camera_at(time);
+                        let camera = png_clock.camera(&path, frame, time);
                         let palette = flight.palette_at(&path, time);
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
@@ -900,8 +923,9 @@ impl MandelbrotApp {
                                 return;
                             }
                             let time = clock.time(frame);
+                            //(The limit follows the flight's own camera, so a pulse does not change it)
                             let camera = path.camera_at(time);
-                            plane.set_view(&camera.view());
+                            plane.set_view(&clock.camera(path, frame, time).view());
                             plane.set_rotation(flight.rotation_at(path, time));
                             //A dive: the frame composed from its keyframe (with motion blur: from the moments of its shutter)
                             if let Some(keyframes) = keyframes {
@@ -930,7 +954,7 @@ impl MandelbrotApp {
                                 let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
                                 sample_times(samples, time, interval, shutter, path.duration()).into_iter().map(|moment| {
                                     let mut sample_plane = ComplexPlane::new(width, height);
-                                    sample_plane.set_view(&path.camera_at(moment).view());
+                                    sample_plane.set_view(&clock.camera(path, frame, moment).view());
                                     sample_plane.set_rotation(flight.rotation_at(path, moment));
                                     sample_plane
                                 }).collect()
