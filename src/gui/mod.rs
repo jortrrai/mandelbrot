@@ -770,6 +770,17 @@ impl MandelbrotApp {
     }
 }
 
+impl MandelbrotApp {
+    /// The Back button of a phone (and of a mouse): closes the controls of a narrow screen, or leaves a Julia set
+    fn back_button(&mut self, narrow: bool) {
+        if narrow && self.show_controls {
+            self.show_controls = false;
+        } else {
+            self.leave_julia();
+        }
+    }
+}
+
 impl eframe::App for MandelbrotApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -788,13 +799,8 @@ impl eframe::App for MandelbrotApp {
 
         //A narrow screen (a phone, issue #219): the image fills it, and the controls slide in from a button
         let narrow = ui.available_rect_before_wrap().width() < NARROW_SCREEN;
-        //The Back button of a phone (and of a mouse): closes the controls of a narrow screen, or leaves a Julia set
         if ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
-            if narrow && self.show_controls {
-                self.show_controls = false;
-            } else {
-                self.leave_julia();
-            }
+            self.back_button(narrow);
         }
         if !narrow || self.show_controls {
             egui::Panel::right("side_panel").default_size(if narrow { ui.available_rect_before_wrap().width() * 0.85 } else { SIDE_PANEL_WIDTH }).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
