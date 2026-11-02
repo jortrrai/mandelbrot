@@ -427,6 +427,8 @@ impl MandelbrotApp {
         let preview = (!layer_on_screen && !levels.is_empty() && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
         //Frames that move (a drag, a flight) may use the f32 loop; the image the view settles on never does
         let (gpu, fast_gpu, f32_frames) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu, self.f32_frames && during_gesture);
+        //The samples of pixels that a move takes out of the view are kept within the neighborhood, so a move back continues them (see `SampleState::keep_around`)
+        let keep_around = self.neighborhood_margin;
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let pixels_done = Arc::new(AtomicUsize::new(0));
@@ -458,6 +460,7 @@ impl MandelbrotApp {
             }
             //A frame of a drag that keeps exact samples (every layer of the view it moves) computes its exposed strip with them instead of the f32 loop: samples of
             //the f32 loop make a render start over, so the frame would discard every layer, and the render the drag settles on would discard the frame
+            samples.keep_around(keep_around);
             let f32_frames = f32_frames && !samples.would_keep(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), false);
             let kept = samples.prepare_for(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), f32_frames && fast_gpu && gpu.is_some());
             let whole = kept == 0;

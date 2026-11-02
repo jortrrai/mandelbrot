@@ -992,6 +992,36 @@ fn a_drag_keeps_every_supersampling_layer_of_the_pixels_that_stay_visible() {
 }
 
 #[test]
+fn a_move_back_keeps_the_supersampling_layers_of_the_pixels_it_brings_back_from_the_neighborhood() {
+    //Review 6: a drag kept the layers of the pixels that stayed visible, but a move back rendered the pixels that had left the view again. Now every pixel
+    //within the neighborhood keeps them: a move back renders nothing, and the image is the image before, bit for bit
+    let config = Config::sized(120, 80, 100, 4);
+    let mut app = manual_app(&config);
+    app.render("Four layers");
+    wait_for_job(&mut app);
+    let old = app.p.pixels.clone();
+    for (columns, label) in [(5, "a few columns"), (-150, "more than a view the other way")] {
+        crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, columns);
+        app.render_moved("Moved away");
+        wait_for_job(&mut app);
+        crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, -columns);
+        app.render_moved("Moved back");
+        wait_for_job(&mut app);
+        assert!(app.log.last().unwrap().starts_with(&format!("Moved back (continued the samples of {} pixels) in ", 120 * 80)), "{label}: {:?}", app.log.last());
+        assert_eq!(app.p.pixels, old, "{label}: the image before");
+    }
+    //Beyond the neighborhood nothing is kept
+    app.neighborhood_margin = 10;
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, 140);
+    app.render_moved("Moved away");
+    wait_for_job(&mut app);
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, -140);
+    app.render_moved("Moved back");
+    wait_for_job(&mut app);
+    assert!(!app.log.last().unwrap().contains("continued"), "{:?}", app.log.last());
+}
+
+#[test]
 fn a_coarse_preview_is_uploaded_with_one_texel_per_block_centered_on_its_pixel() {
     let (width, height, block) = (10, 6, 4);
     let colors: Vec<TrueColor> = (0..width * height).map(|i| TrueColor::new(i as u8, 0, 0)).collect();
