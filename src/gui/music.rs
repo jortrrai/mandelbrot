@@ -102,8 +102,7 @@ impl super::MandelbrotApp {
             ui.checkbox(&mut self.follow_music, "Music:").on_hover_text("The video has the track as its sound and lasts as long as it, at an even speed (or as long as a length typed in Fit to length: the track is then cut there or repeated)");
             ui.add(eframe::egui::TextEdit::singleline(&mut self.music_path).desired_width(160.0).hint_text("audio file (or drop it here)"))
                 .on_hover_text("The path of an audio file (MP3, WAV, FLAC, ...); an audio file dropped on the window lands here");
-            //(The system's file chooser, modal: the window waits for it. Not in the Android app, which has no file chooser of rfd)
-            #[cfg(not(target_os = "android"))]
+            //(The system's file chooser, modal: the window waits for it)
             if ui.button("Open song...").on_hover_text("Chooses an audio file as the music of videos: they get it as their sound and last exactly as long as it").clicked() {
                 let mut dialog = rfd::FileDialog::new().set_title("Open a song for videos").add_filter("Audio", &AUDIO_EXTENSIONS);
                 if let Some(home) = super::sharing::home_folder() {

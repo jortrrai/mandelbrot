@@ -262,8 +262,7 @@ pub struct LoadReport {
     pub problems: Vec<String>,
 }
 
-/// The places that come with the program, built into it: used when there is no folder of places to read (the Android app, or the program started elsewhere,
-/// issue #219)
+/// The places that come with the program, built into it: used when there is no folder of places to read (the program started elsewhere, issue #219)
 pub const SHIPPED: [(&str, &str); 11] = [
     ("00-reset-view.json", include_str!("../points_of_interest/00-reset-view.json")),
     ("01-frost-on-the-shoreline.json", include_str!("../points_of_interest/01-frost-on-the-shoreline.json")),

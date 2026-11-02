@@ -3885,7 +3885,7 @@ fn two_fingers_zoom_turn_and_move_the_view() {
 
 #[test]
 fn without_a_folder_of_places_the_built_in_ones_load_and_a_narrow_screen_hides_the_controls_behind_a_button() {
-    //Issue #219 (the Android app has no folder of places, and a phone's screen is narrow)
+    //Issue #219 (a program started without its folder of places, and a narrow screen)
     let shipped = crate::points_of_interest::shipped();
     assert_eq!(shipped.len(), 11);
     assert_eq!(shipped[0].name, "Reset View", "the shallowest first");
