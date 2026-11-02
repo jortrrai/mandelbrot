@@ -218,6 +218,37 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "issue #225's quality test: a place (MANDELBROT_PLACE, a place file) at 4K at every quality preset, into MANDELBROT_EXPORT_DIR, run by hand with --release"]
+    fn a_place_at_every_quality_preset() {
+        let file = std::env::var("MANDELBROT_PLACE").expect("MANDELBROT_PLACE");
+        let (point, _) = crate::points_of_interest::parse(&std::fs::read_to_string(&file).unwrap(), &file).unwrap();
+        let folder = PathBuf::from(std::env::var("MANDELBROT_EXPORT_DIR").expect("MANDELBROT_EXPORT_DIR"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let size = Resolution::new(3840, 2160);
+        let mut c = ComplexPlane::new(size.width, size.height);
+        c.set_view(&View::new(point.location.real, point.location.imaginary, point.location.scale));
+        c.set_rotation(point.location.rotation.to_radians());
+        let mut m = MandelbrotSet::new(point.location.max_iterations, 2.0);
+        m.julia = point.location.julia;
+        let appearance = point.appearance.unwrap_or_default();
+        m.palette = appearance.palette_over(m.palette);
+        let coloring = if appearance.coloring == Some(crate::points_of_interest::Coloring::Hsv) { TrueColor::new_from_hsv_colors } else { TrueColor::new_from_bernstein_polynomials };
+        let mapping = appearance.color_channels.unwrap_or(ColorChannelMapping::RGB);
+        let gpu = crate::rendering::gpu::GpuIterator::new().ok();
+        let view = c.get_view();
+        for quality in super::super::blur::Quality::PRESETS {
+            let sigma = quality.blurred.then(|| super::super::blur::blur_sigma(1, quality.samples));
+            let metadata = PngMetadata { view: &view, m: &m, supersampling_amount: quality.samples, color_channel_mapping: mapping, place: None };
+            let picture = Picture { plane: &c, size, m: &m, samples: quality.samples, coloring_function: coloring, gpu: gpu.as_ref(), blur: sigma };
+            let path = folder.join(format!("{:02}x{}.png", quality.samples, if quality.blurred { "-blur" } else { "" }));
+            let started = Instant::now();
+            let (cancel, progress) = (AtomicBool::new(false), StripProgress::default());
+            assert!(save_png(&path, &picture, &metadata, crate::rendering::strips::STRIP_PIXELS, &cancel, &progress).unwrap());
+            println!("{}\t{:.1} s\t{:.1} MB", quality.name(), started.elapsed().as_secs_f64(), std::fs::metadata(&path).unwrap().len() as f64 / 1e6);
+        }
+    }
+
+    #[test]
     #[ignore = "a measurement: renders a 32K image (MANDELBROT_EXPORT=\"width height samples [gpu]\" for another, MANDELBROT_EXPORT_DIR for a folder on disk instead of the temporary one), run by hand with --release"]
     fn a_32k_image_is_saved_with_bounded_memory() {
         let setting = std::env::var("MANDELBROT_EXPORT").unwrap_or_else(|_| String::from("30720 17280 1"));
