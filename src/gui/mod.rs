@@ -475,7 +475,7 @@ impl MandelbrotApp {
             shared_view_input: String::new(),
             depth_dragging: false,
             show_orbit: false,
-            show_julia: true,
+            show_julia: false,
             julia_pinned: None,
             mandelbrot_view: None,
             julia_map: None,

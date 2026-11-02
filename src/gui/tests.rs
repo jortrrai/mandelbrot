@@ -3098,12 +3098,11 @@ fn the_youtube_preset_sets_4k60_at_32x_with_motion_blur() {
 }
 
 #[test]
-fn the_julia_map_is_on_at_first_and_draws_the_pinned_point_or_the_center_in_the_top_right_in_layers_after_the_view() {
-    //Issue #202, and #229: on at first (Show orbit off), the view's quality, in layers on its own thread once the view is finished, the center without the mouse
+fn the_julia_map_is_off_at_first_and_draws_the_pinned_point_or_the_center_in_the_top_right_in_layers_after_the_view() {
+    //Issue #202, and #229: off at first (like Show orbit; review 6), the view's quality, in layers on its own thread once the view is finished, the center without the mouse
     let config = Config::sized(64, 48, 50, 4);
     let mut app = manual_app(&config);
-    assert!(!app.show_orbit && app.show_julia);
-    app.show_julia = false;
+    assert!(!app.show_orbit && !app.show_julia);
     let ctx = egui::Context::default();
     let draw = |app: &mut MandelbrotApp| {
         let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() }, |ui| {
