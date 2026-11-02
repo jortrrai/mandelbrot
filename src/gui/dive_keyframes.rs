@@ -65,6 +65,8 @@ pub(super) struct DiveKeyframes {
     height: usize,
     scales: Vec<f64>,
     images: Vec<Vec<TrueColor>>,
+    /// The images on the GPU, which then composes the unturned frames (see `compose_moments`)
+    on_gpu: Option<rendering::gpu::ComposeImages>,
 }
 
 impl DiveKeyframes {
@@ -96,22 +98,35 @@ impl DiveKeyframes {
             }
             images.push(colors);
         }
-        Some(DiveKeyframes { width, height, scales, images })
+        //(Without room on the GPU the CPU composes every frame)
+        let on_gpu = gpu.and_then(|gpu| gpu.upload_images(&images, big_width, big_height).ok());
+        Some(DiveKeyframes { width, height, scales, images, on_gpu })
     }
 
     /// The frame at `scale`, turned counterclockwise by `rotation` (radians), composed from the keyframe of its depth (see the module)
     #[cfg(test)]
     pub(super) fn compose(&self, scale: f64, rotation: f64) -> Vec<TrueColor> {
-        self.compose_moments(&[(scale, rotation)])
+        self.compose_moments(&[(scale, rotation)], None)
     }
 
     /// The frame that averages the frames at the `(scale, rotation)` of every moment (motion blur), each composed from the keyframe of its depth (see the module)
-    /// and rounded to 8 bits before the average, in one pass over the pixels on all CPU threads
-    pub(super) fn compose_moments(&self, moments: &[(f64, f64)]) -> Vec<TrueColor> {
+    /// and rounded to 8 bits before the average, in one pass over the pixels: on `gpu` when every moment is unturned and the images are there, else on all
+    /// CPU threads, bit for bit the same
+    pub(super) fn compose_moments(&self, moments: &[(f64, f64)], gpu: Option<&rendering::gpu::GpuIterator>) -> Vec<TrueColor> {
         let (width, height) = (self.width, self.height);
         let (big_width, big_height) = (width * 2, height * 2);
         let moments: Vec<Moment> = moments.iter().map(|&(scale, rotation)| Moment::new(self, scale, rotation)).collect();
         let count = moments.len() as f32;
+        let average = |sum: u32| (sum as f32 / count).round() as u8;
+        if let (Some(gpu), Some(images)) = (gpu, &self.on_gpu) {
+            let unturned: Option<Vec<(usize, Vec<Tap>)>> = moments.iter().map(|moment| moment.columns.as_ref().map(|columns| {
+                let rows = TAPS_Y.map(|tap_y| (0..height).map(move |y| Tap::at((y as f64 + tap_y - height as f64 / 2.0) * moment.footprint + big_height as f64 / 2.0, big_height)));
+                (moment.index, columns.iter().flatten().copied().chain(rows.into_iter().flatten()).collect())
+            })).collect();
+            if let Some(sums) = unturned.and_then(|unturned| gpu.compose_sums(images, (width, height), &unturned).ok()) {
+                return sums.iter().map(|[red_green, blue]| TrueColor::new(average(red_green & 0xffff), average(red_green >> 16), average(*blue))).collect();
+            }
+        }
         let mut frame = vec![TrueColor::new(0, 0, 0); width * height];
         let rows_per_chunk = height.div_ceil(rendering::render_thread_count()).max(1);
         std::thread::scope(|scope| {
@@ -170,6 +185,7 @@ const TAPS_Y: [f64; 2] = [0.25, 0.75];
 /// One moment of a composed frame: its keyframe, the size of a frame pixel in keyframe pixels and the turn; for an unturned moment the columns of the keyframe
 /// that the two taps of every column read, worked out once (the rows are worked out per row)
 struct Moment<'a> {
+    index: usize,
     image: &'a [TrueColor],
     footprint: f64,
     sin: f64,
@@ -187,23 +203,23 @@ impl<'a> Moment<'a> {
         let (sin, cos) = rotation.sin_cos();
         //Unturned, a tap's column depends on its column only (dx · 1 - dy · 0 is dx exactly), so the taps read the same pixels as when worked out each time
         let columns = (sin.to_bits() == 0.0_f64.to_bits() && cos.to_bits() == 1.0_f64.to_bits()).then(|| TAPS_X.map(|tap_x| (0..width).map(|x| Tap::at((x as f64 + tap_x - width as f64 / 2.0) * footprint + big_width as f64 / 2.0, big_width)).collect()));
-        Moment { image: &keyframes.images[index], footprint, sin, cos, columns }
+        Moment { index, image: &keyframes.images[index], footprint, sin, cos, columns }
     }
 }
 
-/// Where a tap falls along one side of a keyframe: the two pixels it is between and its share of the second, as `bilinear` works them out
-#[derive(Clone, Copy)]
-struct Tap {
-    first: usize,
-    second: usize,
-    share: f32,
+/// Where a tap falls along one side of a keyframe: the two pixels it is between and its share of the second, as `bilinear` works them out (the GPU's type, see
+/// `compose_sums`)
+type Tap = rendering::gpu::ComposeTap;
+
+trait TapAt {
+    fn at(position: f64, length: usize) -> Tap;
 }
 
-impl Tap {
+impl TapAt for Tap {
     fn at(position: f64, length: usize) -> Tap {
         let position = (position - 0.5).clamp(0.0, (length - 1) as f64);
         let first = position.floor() as usize;
-        Tap { first, second: (first + 1).min(length - 1), share: (position - first as f64) as f32 }
+        Tap { first: first as u32, second: (first + 1).min(length - 1) as u32, share: (position - first as f64) as f32 }
     }
 }
 
@@ -213,7 +229,8 @@ fn bilinear_at(image: &[TrueColor], width: usize, column: Tap, row: Tap) -> [f32
         let color = image[y * width + x];
         [f32::from(color.red), f32::from(color.green), f32::from(color.blue)]
     };
-    let (a, b, c, d) = (at(column.first, row.first), at(column.second, row.first), at(column.first, row.second), at(column.second, row.second));
+    let (left, right, top, bottom) = (column.first as usize, column.second as usize, row.first as usize, row.second as usize);
+    let (a, b, c, d) = (at(left, top), at(right, top), at(left, bottom), at(right, bottom));
     let mut out = [0.0; 3];
     for channel in 0..3 {
         let upper = a[channel] + (b[channel] - a[channel]) * column.share;
@@ -301,9 +318,28 @@ mod tests {
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let keyframes = DiveKeyframes::render(plan, (width, height), 4, None, TrueColor::new_from_bernstein_polynomials, |_| MandelbrotSet::new(400, 2.0), None, false, &cancel, |_, _| {}).unwrap();
         for moments in [vec![(0.008, 0.0)], vec![(0.0049, 0.0), (0.0052, 0.0), (0.0061, 0.0), (0.0099, 0.0)], vec![(0.007, 0.3)], vec![(0.006, 0.0), (0.0062, 0.01), (0.0064, 0.02)]] {
-            let one_pass = keyframes.compose_moments(&moments);
+            let one_pass = keyframes.compose_moments(&moments, None);
             let reference = composed_frame_by_frame(&keyframes, &moments);
             assert!(one_pass.iter().zip(&reference).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "{moments:?}");
+        }
+    }
+
+    #[test]
+    fn the_gpu_composes_bit_for_bit_the_frames_of_the_cpu() {
+        //#236: the GPU composes the unturned frames of a dive; it gives exactly the colors of the CPU (and a turned moment goes to the CPU)
+        let Ok(gpu) = GpuIterator::new() else {
+            eprintln!("no suitable GPU: skipped");
+            return;
+        };
+        let (width, height) = (90, 50);
+        let plan = DivePlan { center: (-0.7498, 0.0203), shallowest: 0.01, deepest: 0.002 };
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let keyframes = DiveKeyframes::render(plan, (width, height), 4, None, TrueColor::new_from_bernstein_polynomials, |_| MandelbrotSet::new(400, 2.0), Some(&gpu), false, &cancel, |_, _| {}).unwrap();
+        assert!(keyframes.on_gpu.is_some(), "the keyframes are on the GPU");
+        for moments in [vec![(0.008, 0.0)], vec![(0.0021, 0.0), (0.0035, 0.0), (0.0049, 0.0), (0.0052, 0.0), (0.0061, 0.0), (0.0074, 0.0), (0.0088, 0.0), (0.0099, 0.0)], vec![(0.006, 0.0), (0.0062, 0.01)]] {
+            let (gpu_frame, cpu_frame) = (keyframes.compose_moments(&moments, Some(&gpu)), keyframes.compose_moments(&moments, None));
+            let differ = gpu_frame.iter().zip(&cpu_frame).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+            assert_eq!(differ, 0, "{moments:?}");
         }
     }
 
