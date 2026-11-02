@@ -69,48 +69,34 @@ pub(super) struct DiveKeyframes {
 
 impl DiveKeyframes {
     /// Renders the keyframes of `plan` for frames of `width` x `height` with `samples` samples per pixel of a keyframe (adaptive or not), in the set that
-    /// `set_at(scale)` gives for a keyframe's deepest frame. Two renderers take the next keyframe as they finish one: one on all CPU threads, and with a GPU
-    /// one on the GPU alone, so both are busy all the time (issue #209 feedback: sharing each keyframe, the CPU threads took most rows and the GPU sat idle).
-    /// `on_keyframe(done, count)` is told after each finished keyframe. Returns `None` when cancelled.
+    /// `set_at(scale)` gives for a keyframe's deepest frame, on all CPU threads with the GPU. `on_keyframe(k, count)` is told before keyframe `k`. Returns
+    /// `None` when cancelled.
     #[allow(clippy::too_many_arguments)] // The dive, the frames, the quality and how to render
     pub(super) fn render(plan: DivePlan, (width, height): (usize, usize), samples: u8, adaptive: Option<AdaptiveSampling>, coloring_function: fn(f64, f64) -> TrueColor,
-        set_at: impl Fn(f64) -> MandelbrotSet + Sync, gpu: Option<&GpuIterator>, fast_gpu: bool, cancel: &std::sync::atomic::AtomicBool, on_keyframe: impl Fn(usize, usize) + Sync) -> Option<DiveKeyframes> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        set_at: impl Fn(f64) -> MandelbrotSet, gpu: Option<&GpuIterator>, fast_gpu: bool, cancel: &std::sync::atomic::AtomicBool, mut on_keyframe: impl FnMut(usize, usize)) -> Option<DiveKeyframes> {
         let scales = plan.scales();
         let (big_width, big_height) = (width * 2, height * 2);
-        let images: Vec<std::sync::Mutex<Option<Vec<TrueColor>>>> = scales.iter().map(|_| std::sync::Mutex::new(None)).collect();
-        let (next, finished) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let renderer = |on_the_gpu: bool| {
-            loop {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(scale) = scales.get(index) else { return };
-                let mut plane = ComplexPlane::new(big_width, big_height);
-                plane.set_view(&View::new(plan.center.0, plan.center.1, *scale));
-                //(The limit of the deepest frame this keyframe serves)
-                let m = set_at(scale / 2.0);
-                let mut colors = Vec::new();
-                let render = Render::new(&plane, &m, big_width, big_height, coloring_function).supersampling(samples).adaptive(adaptive).cancel_with(cancel);
-                let render = if on_the_gpu { render.gpu(gpu.map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).on_the_gpu_only() } else { render };
-                let completed = render.run(|layer, pass| {
+        let mut images = Vec::with_capacity(scales.len());
+        for (index, scale) in scales.iter().enumerate() {
+            on_keyframe(index, scales.len());
+            let mut plane = ComplexPlane::new(big_width, big_height);
+            plane.set_view(&View::new(plan.center.0, plan.center.1, *scale));
+            //(The limit of the deepest frame this keyframe serves)
+            let m = set_at(scale / 2.0);
+            let mut colors = Vec::new();
+            let completed = Render::new(&plane, &m, big_width, big_height, coloring_function).supersampling(samples).adaptive(adaptive)
+                .gpu(gpu.map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(cancel)
+                .run(|layer, pass| {
                     if pass >= samples.clamp(1, 64) {
                         colors = layer.to_vec();
                     }
                 });
-                if !completed {
-                    return;
-                }
-                *images[index].lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(colors);
-                on_keyframe(finished.fetch_add(1, Ordering::Relaxed) + 1, scales.len());
+            if !completed {
+                return None;
             }
-        };
-        std::thread::scope(|scope| {
-            if gpu.is_some() {
-                scope.spawn(|| renderer(true));
-            }
-            renderer(false);
-        });
-        let images: Option<Vec<Vec<TrueColor>>> = images.into_iter().map(|image| image.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)).collect();
-        images.filter(|_| !cancel.load(Ordering::Relaxed)).map(|images| DiveKeyframes { width, height, scales, images })
+            images.push(colors);
+        }
+        Some(DiveKeyframes { width, height, scales, images })
     }
 
     /// The frame at `scale`, turned counterclockwise by `rotation` (radians), composed from the keyframe of its depth (see the module)
@@ -190,28 +176,6 @@ mod tests {
         assert!(scales.len() >= 10 && *scales.last().unwrap() <= plan.deepest && scales.windows(2).all(|pair| (pair[0] / pair[1] - 2.0).abs() < 1e-12), "{scales:?}");
         assert!(DivePlan::of(times.clone(), |time| ((-0.75 + time.as_secs_f64(), 0.0), 0.5)).is_none(), "a flight that moves sideways");
         assert!(DivePlan::of(times, |_| (center, 0.5)).is_none(), "no zoom");
-    }
-
-    #[test]
-    fn the_keyframes_rendered_by_the_cpu_and_the_gpu_at_once_are_the_cpus() {
-        //Issue #209 feedback: the GPU renders whole keyframes alongside the CPU; its samples are the CPU's, so the keyframes are the same either way
-        let Ok(gpu) = crate::rendering::gpu::GpuIterator::new() else {
-            eprintln!("no suitable GPU: skipped");
-            return;
-        };
-        let (width, height) = (96, 64);
-        let plan = DivePlan { center: (-0.7498, 0.0203), shallowest: 0.01, deepest: 0.0004 };
-        let set_at = |_| MandelbrotSet::new(800, 2.0);
-        let cancel = std::sync::atomic::AtomicBool::new(false);
-        let coloring = TrueColor::new_from_bernstein_polynomials;
-        let done = std::sync::atomic::AtomicUsize::new(0);
-        let both = DiveKeyframes::render(plan, (width, height), 4, None, coloring, set_at, Some(&gpu), false, &cancel, |_, _| { done.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }).unwrap();
-        let cpu = DiveKeyframes::render(plan, (width, height), 4, None, coloring, set_at, None, false, &cancel, |_, _| {}).unwrap();
-        assert_eq!(done.load(std::sync::atomic::Ordering::Relaxed), plan.scales().len(), "told after every keyframe");
-        assert_eq!(both.scales, cpu.scales);
-        for (index, (a, b)) in both.images.iter().zip(&cpu.images).enumerate() {
-            assert!(a.iter().zip(b).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "keyframe {index} differs");
-        }
     }
 
     #[test]
