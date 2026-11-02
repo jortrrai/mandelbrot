@@ -305,7 +305,7 @@ impl MandelbrotApp {
                         self.c = c; //During a flight the camera moves on while a render runs (best effort), so it is not set back to the view of the render
                     }
                     self.texture_outdated = true;
-                    if !self.gesture_active && !self.color_cycling && !message.is_empty() { //(Not every frame of a gesture or step of the color cycling)
+                    if !self.gesture_active && !self.cycling() && !message.is_empty() { //(Not every frame of a gesture or step of the color cycling)
                         let description = self.view_description();
                         self.log(format!("{message} in {:.2} s: {description}", elapsed.as_secs_f64()));
                     }
@@ -338,7 +338,7 @@ impl MandelbrotApp {
         if self.flight.is_some() {
             return; //A flight renders its destination with full quality when it arrives, see `points::fly_at`
         }
-        if self.color_cycling && !self.gesture_active {
+        if self.cycling() && !self.gesture_active {
             return; //Every step of the cycling is a one-sample frame like those of a gesture; the full-quality render follows when it stops, see `cycle::toggle_color_cycle`
         }
         let Some((_, changed, _)) = &self.settle else { return };
@@ -446,7 +446,7 @@ impl MandelbrotApp {
                         let _ = sender.send(JobMessage::Limit { max_iterations: result.limit });
                         m.max_iterations = result.limit;
                         message = format!("{message} (auto iterations: limit {}, {} rounds, {:?}, {:.2} s)", result.limit, result.rounds.len(), result.stop, started.elapsed().as_secs_f64());
-                        println!("{result:?}");
+                        if super::cli::quiet() { eprintln!("{result:?}") } else { println!("{result:?}") }
                     }
                     None => {
                         let _ = samples_sender.send(samples);
@@ -470,7 +470,8 @@ impl MandelbrotApp {
                     return;
                 }
                 let layer_time = layer_started.elapsed();
-                println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
+                let text = format!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
+                if super::cli::quiet() { eprintln!("{text}") } else { println!("{text}") }
                 let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: c.clone(), pass, total: supersampling_amount, layer_time, whole });
                 layer_started = Instant::now();
             });
@@ -485,7 +486,7 @@ impl MandelbrotApp {
         self.flight_job = false;
         self.flight_frame_job = matches!(kind, RenderKind::FlightFrame);
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });
-        if !self.gesture_active && !self.color_cycling {
+        if !self.gesture_active && !self.cycling() {
             self.log("Rendering...");
         }
     }

@@ -85,6 +85,10 @@ pub struct Location {
     pub scale: f64,
     /// The most iterations of the escape-time iteration
     pub max_iterations: u32,
+    /// How far the view is turned counterclockwise around its center, in degrees (issue #217; a file without it is not turned)
+    pub rotation: f64,
+    /// The parameter `c` of a Julia set, if the view is of one (issue #202, see `MandelbrotSet::julia`; a file without it is of the Mandelbrot set)
+    pub julia: Option<(f64, f64)>,
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
@@ -135,6 +139,10 @@ struct RawLocation {
     center: RawCenter,
     scale: f64,
     max_iterations: u32,
+    #[serde(default)]
+    rotation: f64,
+    #[serde(default)]
+    julia: Option<RawCenter>,
 }
 
 #[derive(Deserialize)]
@@ -217,7 +225,8 @@ pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String
         appearance.stretch_palette = raw.stretch_palette;
         appearance
     });
-    let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations };
+    let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations, rotation: if location.rotation.is_finite() { location.rotation } else { 0.0 },
+        julia: location.julia.map(|c| (c.real, c.imaginary)).filter(|(x, y)| x.is_finite() && y.is_finite()) };
     Ok((PointOfInterest { name, description: raw.description, location, appearance, file_name: file_name.to_string() }, warnings))
 }
 
@@ -228,6 +237,29 @@ pub struct LoadReport {
     pub points: Vec<PointOfInterest>,
     /// One message for every problem: files that were skipped, appearances that were ignored, a folder that cannot be read
     pub problems: Vec<String>,
+}
+
+/// The places that come with the program, built into it: used when there is no folder of places to read (the Android app, or the program started elsewhere,
+/// issue #219)
+pub const SHIPPED: [(&str, &str); 11] = [
+    ("00-reset-view.json", include_str!("../points_of_interest/00-reset-view.json")),
+    ("01-frost-on-the-shoreline.json", include_str!("../points_of_interest/01-frost-on-the-shoreline.json")),
+    ("02-frozen-constellation.json", include_str!("../points_of_interest/02-frozen-constellation.json")),
+    ("03-harbor-of-moons.json", include_str!("../points_of_interest/03-harbor-of-moons.json")),
+    ("04-the-narrow-pass.json", include_str!("../points_of_interest/04-the-narrow-pass.json")),
+    ("05-coral-atoll.json", include_str!("../points_of_interest/05-coral-atoll.json")),
+    ("06-seahorse-embers.json", include_str!("../points_of_interest/06-seahorse-embers.json")),
+    ("07-lone-comet.json", include_str!("../points_of_interest/07-lone-comet.json")),
+    ("08-comets-crown.json", include_str!("../points_of_interest/08-comets-crown.json")),
+    ("09-the-whirlpool.json", include_str!("../points_of_interest/09-the-whirlpool.json")),
+    ("10-sunlit-reef.json", include_str!("../points_of_interest/10-sunlit-reef.json")),
+];
+
+/// The places of `SHIPPED`, shallowest first
+pub fn shipped() -> Vec<PointOfInterest> {
+    let mut points: Vec<PointOfInterest> = SHIPPED.iter().filter_map(|(name, text)| parse(text, name).ok().map(|(point, _)| point)).collect();
+    points.sort_by(|a, b| b.location.scale.total_cmp(&a.location.scale));
+    points
 }
 
 /// Loads every `.json` file of `folder`. Other files are ignored; a file that cannot be used is skipped and reported in `problems`, the rest loads.
@@ -294,6 +326,14 @@ pub fn to_json(point: &PointOfInterest) -> String {
             "max_iterations": location.max_iterations,
         },
     });
+    //(Only a turned view has a rotation: the files of the others are as before)
+    if location.rotation != 0.0 {
+        file["location"]["rotation"] = serde_json::Value::from(location.rotation);
+    }
+    //(Only the view of a Julia set has its parameter)
+    if let Some((real, imaginary)) = location.julia {
+        file["location"]["julia"] = serde_json::json!({ "real": real, "imaginary": imaginary });
+    }
     if !point.description.is_empty() {
         file["description"] = serde_json::Value::from(point.description.clone());
     }
@@ -387,7 +427,7 @@ mod tests {
         let (point, warnings) = parse(VALID, "test.json").unwrap();
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(point.name, "Test Place");
-        assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200 });
+        assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200, rotation: 0.0, julia: None });
         let appearance = point.appearance.unwrap();
         assert_eq!(appearance.coloring, Some(Coloring::Hsv));
         assert_eq!(format!("{:?}", appearance.color_channels.unwrap()), "BGR");
@@ -541,7 +581,7 @@ mod tests {
             let point = PointOfInterest {
                 name: String::from("Comet's Crown"),
                 description: String::from(description),
-                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376 },
+                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376, rotation: 0.0, julia: None },
                 appearance,
                 file_name: String::new(),
             };

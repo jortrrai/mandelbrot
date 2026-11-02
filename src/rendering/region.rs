@@ -49,13 +49,26 @@ impl ExposedRegion {
 ///
 /// After the move the plane is the old plane shifted by whole pixels, see `pixel_shift`.
 pub fn move_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i64, columns_right: i64) {
-    c.translate(columns_right as f64 * c.increment_x, -(rows_up as f64) * c.increment_y);
+    if c.rotation() == 0.0 {
+        c.translate(columns_right as f64 * c.increment_x, -(rows_up as f64) * c.increment_y);
+        return;
+    }
+    //A turned view moves along the screen's axes, which are turned in the plane (see `ComplexPlane::screen_offset`)
+    let (right, up) = c.screen_offset(columns_right as f64 * c.increment_x, rows_up as f64 * c.increment_y);
+    c.translate(right, -up);
 }
 
 /// The shift of the buffer that turns the image of `shown` into the image of `wanted`, if `wanted` is `shown` moved by whole pixels.
 ///
 /// The shift is `(rows_up, columns_right)` for [`crate::pixel_buffer::PixelBuffer::translate_buffer`]; `None` if the views differ in size or zoom. Unlike the move of one frame, this also covers several moves whose renders were interrupted.
 pub fn pixel_shift(shown: &ComplexPlane, wanted: &ComplexPlane) -> Option<(i128, i128)> {
+    //Turned views: the same rotation, compared as their unturned views (see `ComplexPlane::unturned`)
+    if shown.rotation().to_bits() != wanted.rotation().to_bits() {
+        return None;
+    }
+    if shown.rotation() != 0.0 {
+        return pixel_shift(&shown.unturned(), &wanted.unturned());
+    }
     //A move keeps the size of the pixels exactly (`ComplexPlane::translate` only adds to the bounds), a zoom or a resize changes it
     let same_size = |a: f64, b: f64| a.to_bits() == b.to_bits();
     let same_grid = same_size(shown.increment_x, wanted.increment_x) && same_size(shown.increment_y, wanted.increment_y) && same_size(shown.length_x, wanted.length_x) && same_size(shown.length_y, wanted.length_y);

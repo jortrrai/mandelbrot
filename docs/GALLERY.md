@@ -2,6 +2,12 @@
 
 Wallpapers rendered with Mandelbrot by Jort. Back to the [README](../README.md).
 
+## 3840x2160 (4K, 64 samples per pixel; shown at 1600x900)
+![A spiral around a mini-Mandelbrot](images/previews/spiral-orange-blue.jpg)
+![Five curling arms around a mini-Mandelbrot](images/previews/arms-blue-red.jpg)
+![Spiral suns on green and orange](images/previews/spirals-green-orange.jpg)
+![The Egg: a mini-Mandelbrot in rings of fine filaments](images/previews/the-egg.jpg)
+
 ## 3440x1440
 ![2023-06-26_12-48-59 189737_UTC](https://github.com/jortrr/mandelbrot/assets/38651009/d487285e-d233-4374-bb5c-c46d84f0d83f)
 ![2023-06-26_12-35-03 632016400_UTC](https://github.com/jortrr/mandelbrot/assets/38651009/ccad4f4a-1bc3-455b-98d9-53c5c0f85db3)
