@@ -74,6 +74,12 @@ pub fn pixel_shift(shown: &ComplexPlane, wanted: &ComplexPlane) -> Option<(i128,
     let same_grid = same_size(shown.increment_x, wanted.increment_x) && same_size(shown.increment_y, wanted.increment_y) && same_size(shown.length_x, wanted.length_x) && same_size(shown.length_y, wanted.length_y);
     let columns = (wanted.min_x - shown.min_x) / wanted.increment_x;
     let rows_up = (shown.min_y - wanted.min_y) / wanted.increment_y;
-    let whole = |value: f64| (value - value.round()).abs() < 1e-6 && value.abs() < 1e9;
-    (same_grid && whole(columns) && whole(rows_up)).then(|| (rows_up.round() as i128, -(columns.round() as i128)))
+    //A move by whole pixels adds a multiple of the pixel size to the bounds, which rounds them to the precision of an f64: deep down that is a visible share of a
+    //pixel (at a scale of 1e-11 at 4K, about a hundredth near -0.8), so a whole move is recognized within a few of those roundings (at most a quarter pixel). The
+    //samples do not depend on it: they are placed in the view where they started (see `SampleState`)
+    let slack = |a: f64, b: f64, increment: f64| (1e-6 + 16.0 * f64::EPSILON * a.abs().max(b.abs()) / increment).min(0.25);
+    let whole = |value: f64, slack: f64| (value - value.round()).abs() < slack && value.abs() < 1e9;
+    let whole_columns = whole(columns, slack(shown.min_x, wanted.min_x, wanted.increment_x));
+    let whole_rows = whole(rows_up, slack(shown.min_y, wanted.min_y, wanted.increment_y));
+    (same_grid && whole_columns && whole_rows).then(|| (rows_up.round() as i128, -(columns.round() as i128)))
 }

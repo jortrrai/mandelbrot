@@ -3741,12 +3741,16 @@ fn memory_held_after_moving_around_and_after_a_video() {
 #[test]
 fn a_drag_with_the_default_settings_keeps_the_layers() {
     //Review 6: with auto iterations, adaptive supersampling and the GPU (the defaults), drag frames that follow each other without waiting, diagonally, also in
-    //a turned view: the render the drag settles on continues the samples of every pixel
-    for rotation in [0.0, -0.1] {
+    //a turned view and at the depth of the place Wow (scale 1.5e-11, where a move by whole pixels rounds to a hundredth of a pixel): the render the drag settles on continues the samples of every pixel
+    for (rotation, view) in [(0.0, None), (-0.1, None), (0.0, Some(crate::complex_plane::View::new(-0.803_102_981_044_643_7, 0.178_500_232_700_653_38, 1.486_058_621_097_152_7e-11)))] {
         let config = Config::sized(320, 200, 100, 16);
         let mut app = MandelbrotApp::new(&config);
         wait_for_job(&mut app);
         app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+        if let Some(view) = &view {
+            app.limit_zoom = false; //(As in your settings: the view of the place, deeper than the fast GPU math reaches)
+            app.c.set_view(view);
+        }
         app.c.set_rotation(rotation);
         app.render("Sixteen layers");
         wait_for_job(&mut app);
@@ -3762,6 +3766,9 @@ fn a_drag_with_the_default_settings_keeps_the_layers() {
         app.settle = app.settle.take().map(|(message, _, moved)| (message, std::time::Instant::now().checked_sub(Duration::from_secs(5)).unwrap(), moved));
         app.settle_gesture(&egui::Context::default());
         wait_for_job(&mut app);
-        assert!(app.log.last().unwrap().starts_with(&format!("Moved by dragging (continued the samples of {} pixels) in ", 320 * 200)), "rotation {rotation}: {:?}", app.log.last());
+        if view.is_some() {
+            assert!((app.c.get_scale() / 1.486_058_621_097_152_7e-11 - 1.0).abs() < 1e-9, "at the depth of the place: {}", app.c.get_scale());
+        }
+        assert!(app.log.last().unwrap().starts_with(&format!("Moved by dragging (continued the samples of {} pixels) in ", 320 * 200)), "rotation {rotation}, {view:?}: {:?}", app.log.last());
     }
 }
