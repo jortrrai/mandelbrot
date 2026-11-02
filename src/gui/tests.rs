@@ -2625,6 +2625,20 @@ fn cycling_the_divide_breathes_around_where_it_started_and_ends_with_a_full_rend
 }
 
 #[test]
+fn the_cycling_divide_bounces_off_its_minimum_instead_of_waiting_there() {
+    //Issue #231: from 0.1 (the minimum) the clamped swing sat at 0.1 for half of every swing
+    let at = |start: f64, phase: f64| super::cycle::cycled_divide(start, phase);
+    for start in [0.1, 0.2, 0.3] {
+        let near_minimum = (0..1000).filter(|step| at(start, f64::from(*step) / 1000.0) < 0.101).count();
+        assert!(near_minimum < 30, "from {start}: {near_minimum} of 1000 steps at the minimum");
+        assert!((0..1000).all(|step| at(start, f64::from(step) / 1000.0) >= crate::mandelbrot_set::MIN_DIVIDE));
+    }
+    //Away from the limits the swing is as before: two doublings either way
+    assert!((at(2.0, 0.25) - 8.0).abs() < 1e-9 && (at(2.0, 0.75) - 0.5).abs() < 1e-9 && (at(2.0, 0.0) - 2.0).abs() < 1e-12);
+    assert!(at(900.0, 0.25) <= crate::mandelbrot_set::MAX_DIVIDE, "and it bounces off the maximum too");
+}
+
+#[test]
 fn cycling_colors_in_the_window_keeps_its_one_sample_steps_and_the_history() {
     //As the window runs every frame: the cycling step, then the settling of a gesture (which must not turn each step into a full render)
     let ctx = egui::Context::default();

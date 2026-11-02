@@ -55,8 +55,7 @@ impl MandelbrotApp {
         //The divide breathes around the one it started at: up and down DIVIDE_SWING doublings, a whole swing in `divide_period` seconds (issue #203)
         if let Some((start, phase)) = self.divide_cycle {
             let phase = phase + seconds / self.divide_period.max(0.1);
-            let doublings = DIVIDE_SWING * (std::f64::consts::TAU * phase).sin();
-            self.m.palette.divide = (start * doublings.exp2()).clamp(crate::mandelbrot_set::MIN_DIVIDE, crate::mandelbrot_set::MAX_DIVIDE);
+            self.m.palette.divide = cycled_divide(start, phase);
             self.divide_cycle = Some((start, phase.fract()));
         }
         self.cycle_last = Some(now);
@@ -89,4 +88,17 @@ impl MandelbrotApp {
             self.render_moved(&format!("Cycled the colors to {}", super::points::palette_description(self.m.palette)));
         }
     }
+}
+
+/// The divide of the cycle that started at `start`, at `phase` (0 to 1) of its swing: `DIVIDE_SWING` doublings up and down. Near a limit of the divide
+/// (`MIN_DIVIDE`, `MAX_DIVIDE`) the swing bounces back off it instead of waiting there until it turns (issue #231: from 0.1 it paused half the time)
+pub(super) fn cycled_divide(start: f64, phase: f64) -> f64 {
+    let (low, high) = (crate::mandelbrot_set::MIN_DIVIDE.log2(), crate::mandelbrot_set::MAX_DIVIDE.log2());
+    let mut doublings = start.clamp(crate::mandelbrot_set::MIN_DIVIDE, crate::mandelbrot_set::MAX_DIVIDE).log2() + DIVIDE_SWING * (std::f64::consts::TAU * phase).sin();
+    if doublings < low {
+        doublings = 2.0 * low - doublings;
+    } else if doublings > high {
+        doublings = 2.0 * high - doublings;
+    }
+    doublings.exp2().clamp(crate::mandelbrot_set::MIN_DIVIDE, crate::mandelbrot_set::MAX_DIVIDE)
 }
