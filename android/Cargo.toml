@@ -13,7 +13,14 @@ crate-type = ["cdylib"]
 mandelbrot = { path = ".." }
 winit = { version = "0.30", features = ["android-native-activity"] }
 
-# For cargo-apk (`cargo apk build -p mandelbrot-android --release`), once the Android SDK and NDK are installed (their license is Jort's to accept)
+# Its own workspace: cargo-apk does not accept the desktop crate's folder as a workspace root that is also a package
+[workspace]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+# For cargo-apk (`cd android && cargo apk build --release`), once the Android SDK and NDK are installed (their license is Jort's to accept)
 [package.metadata.android]
 package = "nl.jortrr.mandelbrot"
 apk_name = "mandelbrot"

@@ -1485,14 +1485,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mandelbrot-android"
-version = "0.4.0"
-dependencies = [
- "mandelbrot",
- "winit",
-]
-
-[[package]]
 name = "memchr"
 version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

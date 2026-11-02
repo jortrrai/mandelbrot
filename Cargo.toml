@@ -42,9 +42,6 @@ winit = { version = "0.30", features = ["android-native-activity"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
-[workspace]
-members = [".", "android"]
-
 [profile.release]
 lto = "fat"
 codegen-units = 1

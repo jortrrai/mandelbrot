@@ -4,7 +4,7 @@ name: Android app
 # install on a phone: allow installing apps from this source). On a pull request that changes the app's code or this workflow, and by hand.
 on:
   pull_request:
-    paths: [ "src/**", "android/**", "Cargo.toml", "Cargo.lock", ".github/workflows/android.yml" ]
+    paths: [ "src/**", "android/**", "Cargo.toml", ".github/workflows/android.yml" ]
   workflow_dispatch:
 
 env:
@@ -20,14 +20,16 @@ jobs:
         with:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: android
       - name: cargo-apk
         run: cargo install cargo-apk --locked
       - name: Build
         run: |
           export ANDROID_HOME="$ANDROID_SDK_ROOT"
           export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
-          cargo apk build -p mandelbrot-android --release
+          cd android && cargo apk build --release
       - uses: actions/upload-artifact@v4
         with:
           name: mandelbrot-android-arm64
-          path: target/release/apk/*.apk
+          path: android/target/release/apk/*.apk
