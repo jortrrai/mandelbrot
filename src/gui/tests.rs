@@ -2810,6 +2810,32 @@ fn a_turned_view_is_kept_by_places_and_flights_and_its_unit_only_changes_how_it_
 }
 
 #[test]
+fn the_rotation_slider_stops_at_its_ends_and_turns_back_to_zero_with_its_button() {
+    //Issue #230: 180° stays at the right end (the same view as -180°), typed angles beyond the ends stop there, and ⟲ 0 unturns the view
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.turn_to(std::f64::consts::PI);
+    assert_eq!(app.c.rotation(), -std::f64::consts::PI, "the view keeps 180° as -180°");
+    let texts = controls_texts(&mut app).join("|");
+    assert!(texts.contains("|180|°|rotation"), "the slider stays at its right end: {texts}");
+    app.turn_to(179.5_f64.to_radians());
+    assert!((app.c.rotation().to_degrees() - 179.5).abs() < 1e-9, "half a degree is kept");
+    let texts = controls_texts(&mut app).join("|");
+    assert!(texts.contains("|179.5|°|rotation"), "{texts}");
+    //Turned some other way (a place, a flight), the slider shows the view's own angle
+    app.c.set_rotation(-0.5);
+    let texts = controls_texts(&mut app).join("|");
+    assert!(texts.contains("|-28.65|°|rotation"), "{texts}");
+    app.turn_to(0.0);
+    assert_eq!(app.c.rotation(), 0.0);
+    //Showing an angle never turns the view by rounding it
+    app.c.set_rotation(std::f64::consts::FRAC_PI_2);
+    app.rotation_in_degrees = false;
+    controls_texts(&mut app);
+    assert_eq!(app.c.rotation(), std::f64::consts::FRAC_PI_2);
+}
+
+#[test]
 fn a_right_click_centers_a_turned_view_on_the_clicked_point() {
     let config = Config::sized(64, 48, 50, 32);
     let mut app = manual_app(&config);

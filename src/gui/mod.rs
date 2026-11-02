@@ -257,6 +257,8 @@ pub struct MandelbrotApp {
     minimap: Option<(status::MinimapColors, egui::TextureHandle, ComplexPlane)>,
     /// Whether the rotation is shown and typed in degrees (or in radians), see `depth::rotation_controls`
     rotation_in_degrees: bool,
+    /// The angle the rotation slider was last set to, in radians: at its right end (180°) it shows 180° although the view keeps the same angle as -180°
+    rotation_slider: f64,
     /// The center the depth control keeps, exactly (see `depth::exact_center`)
     depth_center: Option<crate::complex::Complex>,
     /// The keyframes of the sequence being made, and the times of its transitions as typed (see `sequence`)
@@ -474,6 +476,7 @@ impl MandelbrotApp {
             show_minimap: false,
             minimap: None,
             rotation_in_degrees: true,
+            rotation_slider: 0.0,
             lock_center: false,
             depth_center: None,
             sequence_keyframes: Vec::new(),

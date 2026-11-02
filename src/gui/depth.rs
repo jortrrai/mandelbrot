@@ -39,23 +39,40 @@ impl MandelbrotApp {
         true
     }
 
-    /// The rotation of the view (issue #217): a slider with a number to type, in degrees or radians. It turns the image around the center of the view, which
-    /// stays exactly where it is; switching the unit only changes how the angle is shown
+    /// The rotation of the view (issue #217): a slider with a number to type, in degrees or radians, and a button back to 0. It turns the image around the center
+    /// of the view, which stays exactly where it is; switching the unit only changes how the angle is shown. The slider stops at its ends (-180° and 180°, the
+    /// same view) instead of wrapping around, and moves in fine steps rather than whole degrees (issue #230)
     pub(super) fn rotation_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let radians = self.c.rotation();
+            let radians = self.shown_rotation();
             let (mut value, range, suffix) = if self.rotation_in_degrees { (radians.to_degrees(), -180.0..=180.0, "°") } else { (radians, -std::f64::consts::PI..=std::f64::consts::PI, " rad") };
-            //(Any typed angle is taken, a whole turn more or less is the same view; only a change by the user turns the view, never the slider's own rounding)
-            let response = ui.add(egui::Slider::new(&mut value, range).clamping(egui::SliderClamping::Never).max_decimals(if self.rotation_in_degrees { 2 } else { 4 }).suffix(suffix).text("rotation"))
-                .on_hover_text("Turns the image counterclockwise around the center of the view, which stays where it is (type any angle; 0 is unturned). Places, images, Copy view, keyframes and flights keep the rotation");
+            //(Without smart aim the slider takes the exact angle under the mouse, not the roundest one within a pixel, which was a whole degree. Its own clamping
+            //would round the shown angle every frame and turn the view, so a typed angle beyond an end is stopped there here, only when the user changes it)
+            let ends = (*range.start(), *range.end());
+            let response = ui.add(egui::Slider::new(&mut value, range).clamping(egui::SliderClamping::Never).smart_aim(false).max_decimals(if self.rotation_in_degrees { 2 } else { 4 }).suffix(suffix).text("rotation"))
+                .on_hover_text("Turns the image counterclockwise around the center of the view, which stays where it is (0 is unturned; -180° and 180° are the same view). Places, images, Copy view, keyframes and flights keep the rotation");
             if response.changed() {
-                let turned = if self.rotation_in_degrees { value.to_radians() } else { value };
-                self.c.set_rotation(turned);
-                self.render(&format!("Turned the view to {:.2}°", self.c.rotation().to_degrees()));
+                let value = value.clamp(ends.0, ends.1);
+                self.turn_to(if self.rotation_in_degrees { value.to_radians() } else { value });
+            }
+            if ui.add_enabled(self.c.rotation() != 0.0, egui::Button::new("⟲ 0")).on_hover_text("Turns the view back to unturned (0°)").clicked() {
+                self.turn_to(0.0);
             }
             ui.selectable_value(&mut self.rotation_in_degrees, true, "degrees").on_hover_text("Show and type the rotation in degrees (the angle stays the same)");
             ui.selectable_value(&mut self.rotation_in_degrees, false, "radians").on_hover_text("Show and type the rotation in radians (the angle stays the same)");
         });
+    }
+
+    /// The angle the rotation slider shows: the one it was last set to while the view still has that angle (180° stays 180°), otherwise the view's own
+    fn shown_rotation(&self) -> f64 {
+        if crate::complex_plane::normalized_angle(self.rotation_slider) == self.c.rotation() { self.rotation_slider } else { self.c.rotation() }
+    }
+
+    /// Turns the view to `radians` (from the rotation controls) and renders it
+    pub(super) fn turn_to(&mut self, radians: f64) {
+        self.rotation_slider = radians;
+        self.c.set_rotation(radians);
+        self.render(&format!("Turned the view to {:.2}°", self.c.rotation().to_degrees()));
     }
 
     /// *Show orbit* and *Julia map* (issue #202, both off at first)

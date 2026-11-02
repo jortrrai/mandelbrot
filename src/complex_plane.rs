@@ -2,6 +2,13 @@
 
 use crate::complex::Complex;
 
+/// `radians` as the angle a plane keeps: from -π up to (not including) π, a whole turn more or less being the same; 0 when it isn't finite
+pub fn normalized_angle(radians: f64) -> f64 {
+    let turned = radians.rem_euclid(std::f64::consts::TAU);
+    let turned = if turned >= std::f64::consts::PI { turned - std::f64::consts::TAU } else { turned };
+    if turned.is_finite() { turned } else { 0.0 }
+}
+
 /// # Complex plane
 /// In mathematics, the complex plane is the plane formed by the complex numbers, with a Cartesian coordinate system such that the x-axis, called the real axis, is formed by the real numbers, and the y-axis, called the imaginary axis, is formed by the imaginary numbers.
 /// \
@@ -105,9 +112,7 @@ impl ComplexPlane {
     /// Turns the image counterclockwise by `radians` around the center of the view (any angle; it is kept from -π to π, so a whole turn is exactly no turn).
     /// The center stays exactly where it is
     pub fn set_rotation(&mut self, radians: f64) {
-        let turned = radians.rem_euclid(std::f64::consts::TAU);
-        let turned = if turned >= std::f64::consts::PI { turned - std::f64::consts::TAU } else { turned };
-        self.rotation = if turned.is_finite() { turned } else { 0.0 };
+        self.rotation = normalized_angle(radians);
         (self.rotation_sin, self.rotation_cos) = if self.rotation == 0.0 { (0.0, 1.0) } else { self.rotation.sin_cos() };
     }
 
