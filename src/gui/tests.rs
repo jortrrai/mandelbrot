@@ -3047,6 +3047,35 @@ fn the_mini_map_is_off_at_first_and_shows_the_whole_set_with_the_view_on_it() {
     app.m.palette.offset = 123.0;
     let _ = draw(&mut app);
     assert_ne!(app.minimap.as_ref().map(|(key, _, _)| key.clone()), key, "other colors: the map again");
+    //Review 6: going into a Julia set, or into another one, renders the map again, of that Julia set
+    let key = app.minimap.as_ref().map(|(key, _, _)| key.clone());
+    app.m.julia = Some((-0.8, 0.156));
+    let _ = draw(&mut app);
+    let julia_key = app.minimap.as_ref().map(|(key, _, _)| key.clone());
+    assert_ne!(julia_key, key, "a Julia set: its map");
+    app.m.julia = Some((0.285, 0.01));
+    let _ = draw(&mut app);
+    assert_ne!(app.minimap.as_ref().map(|(key, _, _)| key.clone()), julia_key, "another Julia set: its map");
+}
+
+#[test]
+fn the_mini_map_of_a_julia_set_holds_the_whole_set() {
+    //Review 6: the map of a Julia set showed the Mandelbrot set's area, which cut many Julia sets off. Every point on its edge escapes, so the set is inside
+    let (width, height) = super::status::MINIMAP_SIZE;
+    for c in [(-2.0, 0.0), (-0.75, 0.0), (0.0, 1.0), (-0.8, 0.156), (0.285, 0.01), (-0.1, 0.651), (0.25, 0.0), (-1.75, 0.0)] {
+        let mut plane = ComplexPlane::new(width, height);
+        plane.set_view(&super::status::minimap_view(Some(c), super::status::MINIMAP_SIZE));
+        let edge = (0..width).flat_map(|x| [(x, 0), (x, height - 1)]).chain((0..height).flat_map(|y| [(0, y), (width - 1, y)]));
+        for (x, y) in edge {
+            let z0 = plane.complex_from_pixel_plane(x as f64, y as f64);
+            let (mut zx, mut zy) = (z0.x, z0.y);
+            let escapes = (0..1000).any(|_| {
+                (zx, zy) = (zx * zx - zy * zy + c.0, 2.0 * zx * zy + c.1);
+                zx * zx + zy * zy > 4.0
+            });
+            assert!(escapes, "c = {c:?}: the edge point {z0:?} of the map is in the set");
+        }
+    }
 }
 
 #[test]
