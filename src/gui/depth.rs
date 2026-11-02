@@ -55,7 +55,7 @@ impl MandelbrotApp {
                 let value = value.clamp(ends.0, ends.1);
                 self.turn_to(if self.rotation_in_degrees { value.to_radians() } else { value });
             }
-            if ui.add_enabled(self.c.rotation() != 0.0, egui::Button::new("⟲ 0")).on_hover_text("Turns the view back to unturned (0°)").clicked() {
+            if ui.add_enabled(self.c.rotation() != 0.0, egui::Button::new("Reset")).on_hover_text("Turns the view back to unturned (0°)").clicked() {
                 self.turn_to(0.0);
             }
             ui.selectable_value(&mut self.rotation_in_degrees, true, "degrees").on_hover_text("Show and type the rotation in degrees (the angle stays the same)");

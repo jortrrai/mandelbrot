@@ -2908,7 +2908,7 @@ fn a_turned_view_is_kept_by_places_and_flights_and_its_unit_only_changes_how_it_
 
 #[test]
 fn the_rotation_slider_stops_at_its_ends_and_turns_back_to_zero_with_its_button() {
-    //Issue #230: 180° stays at the right end (the same view as -180°), typed angles beyond the ends stop there, and ⟲ 0 unturns the view
+    //Issue #230: 180° stays at the right end (the same view as -180°), typed angles beyond the ends stop there, and Reset unturns the view
     let config = Config::sized(64, 48, 50, 32);
     let mut app = manual_app(&config);
     app.turn_to(std::f64::consts::PI);
