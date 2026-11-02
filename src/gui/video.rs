@@ -1063,6 +1063,7 @@ impl MandelbrotApp {
             //A finished video says how long its rendering took, to compare settings such as Fast dives (a resumed video: the time since it was resumed)
             let message = if finished { format!("{message}, rendered in {}", render_time(job.started.elapsed())) } else { message };
             self.video_job = None;
+            Self::release_free_memory();
             self.log(message);
             if let Some(name) = discard {
                 //Cancel video: nothing of it is kept (issue #215)

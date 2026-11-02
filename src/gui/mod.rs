@@ -601,6 +601,16 @@ impl MandelbrotApp {
         }
     }
 
+    /// Gives the memory the program freed back to the system, after a video or an image save: their frames come from many threads, and the C allocator keeps
+    /// what each thread freed in a pool of its own, so after a 4K video the idle program held about 9 GB that it no longer used
+    pub(super) fn release_free_memory() {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        // SAFETY: malloc_trim only returns free memory of the allocator's pools to the system; it touches no memory in use
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+
     /// Adds `message` to the status log with the time, and prints it with the time if its level is shown (see `status::LogLevel`)
     pub(super) fn log(&mut self, message: impl Into<String>) {
         let (message, now) = (message.into(), chrono::Local::now());
