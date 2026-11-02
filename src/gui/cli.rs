@@ -16,6 +16,9 @@
 //! mandelbrot video list            every job and its state
 //! mandelbrot video output <id>     the path of its video file
 //! mandelbrot video delete <id> [--video]   delete the job and its chunks (and with --video its finished video)
+//! mandelbrot youtube auth --client client_secret.json                          allow uploads, once (see `youtube`)
+//! mandelbrot video credit <id> --kind bensound --text-file credit.txt          the exact credit of its music
+//! mandelbrot video upload <id> --title "…" [--description-file d.txt]          upload the finished video, always private
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -71,8 +74,19 @@ pub fn command_line(arguments: &[String]) -> i32 {
 fn run(arguments: &[String]) -> Result<(), Failure> {
     let (group, command, rest) = match arguments {
         [group, command, rest @ ..] => (group.as_str(), command.as_str(), rest),
-        _ => return Err(usage("usage: mandelbrot video <new|start|pause|resume|cancel|status|list|output|delete> …")),
+        _ => return Err(usage("usage: mandelbrot video <new|start|pause|resume|cancel|status|list|output|delete|credit|upload> … (or mandelbrot youtube auth)")),
     };
+    #[cfg(not(target_os = "android"))]
+    if group == "youtube" {
+        return match command {
+            "auth" => {
+                let options = options(rest)?;
+                let client = option(&options, "client").ok_or_else(|| usage("youtube auth needs --client <client_secret.json> (a Desktop OAuth client of your Google Cloud project)"))?;
+                print(&super::youtube::authorize(Path::new(client)).map_err(failed)?)
+            }
+            _ => Err(usage(format!("unknown youtube command {command:?}: the command is mandelbrot youtube auth"))),
+        };
+    }
     if group != "video" {
         return Err(usage(format!("unknown command {group:?}: the commands are mandelbrot video …")));
     }
@@ -86,6 +100,10 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         "status" => print(&status(&jobs, id_of(rest)?)?),
         "output" => print(&output(&jobs, id_of(rest)?)?),
         "delete" => print(&delete(&jobs, id_of(rest)?, rest.iter().any(|argument| argument == "--video"))?),
+        #[cfg(not(target_os = "android"))]
+        "credit" => print(&credit(&jobs, id_of(rest)?, &options(&rest[1..])?)?),
+        #[cfg(not(target_os = "android"))]
+        "upload" => print(&upload(&jobs, id_of(rest)?, &options(&rest[1..])?)?),
         _ => Err(usage(format!("unknown video command {command:?}"))),
     }
 }
@@ -396,6 +414,70 @@ fn delete(jobs: &Path, id: &str, with_video: bool) -> Result<Value, Failure> {
     }
     std::fs::remove_file(job_path(jobs, id)).map_err(|err| failed(err.to_string()))?;
     Ok(json!({ "id": id, "deleted": true, "deleted_video": deleted_video }))
+}
+
+/// The whole file of job `id` (its spec, credit and uploads)
+#[cfg(not(target_os = "android"))]
+fn read_job_file(jobs: &Path, id: &str) -> Result<Value, Failure> {
+    read_job(jobs, id)?;
+    let path = job_path(jobs, id);
+    std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str(&text).ok()).ok_or_else(|| failed(format!("{} cannot be read", path.display())))
+}
+
+#[cfg(not(target_os = "android"))]
+fn write_job_file(jobs: &Path, id: &str, file: &Value) -> Result<(), Failure> {
+    let path = job_path(jobs, id);
+    std::fs::write(&path, serde_json::to_string_pretty(file).unwrap_or_default()).map_err(|err| failed(format!("{}: {err}", path.display())))
+}
+
+/// `video credit`: records the exact credit of the music of job `id` (see `youtube::credit_job`)
+#[cfg(not(target_os = "android"))]
+fn credit(jobs: &Path, id: &str, options: &[(String, String)]) -> Result<Value, Failure> {
+    let kind = option(options, "kind").ok_or_else(|| usage(format!("video credit needs --kind ({})", super::youtube::CREDIT_KINDS.join(", "))))?;
+    let text = match (option(options, "text-file"), option(options, "text")) {
+        (Some(file), _) => std::fs::read_to_string(file).map_err(|err| failed(format!("{file}: {err}")))?,
+        (None, Some(text)) => text.to_string(),
+        (None, None) if kind == "own" => String::new(),
+        (None, None) => return Err(usage("video credit needs --text-file <file> (or --text \"…\") with the exact credit the license asks for")),
+    };
+    let mut file = read_job_file(jobs, id)?;
+    let code = super::youtube::credit_job(&mut file, id, kind, &text, &super::youtube::used_codes().map_err(failed)?).map_err(failed)?;
+    write_job_file(jobs, id, &file)?;
+    if let Some(code) = &code {
+        super::youtube::record_code(code, id).map_err(failed)?;
+    }
+    Ok(json!({ "id": id, "credit": file["credit"] }))
+}
+
+/// `video upload`: uploads the finished video of job `id`, private, with its credit under the description; the upload is kept with the job
+#[cfg(not(target_os = "android"))]
+fn upload(jobs: &Path, id: &str, options: &[(String, String)]) -> Result<Value, Failure> {
+    let spec = read_job(jobs, id)?;
+    let mut file = read_job_file(jobs, id)?;
+    let video = output_path(&spec);
+    if state_of(jobs, id, &spec).0 != "finished" {
+        return Err(failed(format!("the video of {id} is not finished (see mandelbrot video status {id})")));
+    }
+    let credit = file["credit"]["text"].as_str().map(str::to_string);
+    if spec.music.is_some() && file["credit"].is_null() {
+        return Err(failed(format!("the video {id} has music without a credit: record it first with mandelbrot video credit {id} --kind … --text-file …")));
+    }
+    let title = option(options, "title").map_or_else(|| spec.flight.name.clone(), str::to_string);
+    let description = match option(options, "description-file") {
+        Some(path) => std::fs::read_to_string(path).map_err(|err| failed(format!("{path}: {err}")))?,
+        None => option(options, "description").unwrap_or_default().to_string(),
+    };
+    let description = super::youtube::description_with_credit(&description, credit.as_deref());
+    let video_id = super::youtube::upload(&video, &title, &description).map_err(failed)?;
+    let record = json!({ "video_id": video_id, "url": format!("https://youtu.be/{video_id}"), "privacy": "private", "title": title, "uploaded": chrono::Local::now().to_rfc3339() });
+    if !file["uploads"].is_array() {
+        file["uploads"] = json!([]);
+    }
+    if let Some(uploads) = file["uploads"].as_array_mut() {
+        uploads.push(record.clone());
+    }
+    write_job_file(jobs, id, &file)?;
+    Ok(json!({ "id": id, "upload": record, "kept": video.display().to_string() }))
 }
 
 #[cfg(test)]
