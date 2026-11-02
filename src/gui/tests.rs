@@ -1291,6 +1291,19 @@ fn every_point_of_interest_shows_its_zoom_in_the_list() {
 }
 
 #[test]
+fn the_center_marker_is_a_circle_around_the_exact_center_of_the_image() {
+    let ctx = egui::Context::default();
+    let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(801.0, 600.0));
+    let output = ctx.run_ui(egui::RawInput::default(), |ui| super::depth::draw_center_marker(&ui.painter_at(rect), rect.center(), 30.0));
+    let circles: Vec<(egui::Pos2, f32)> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Circle(circle) => Some((circle.center, circle.radius)),
+        _ => None,
+    }).collect();
+    output.drop_without_applying_deltas();
+    assert_eq!(circles, vec![(egui::pos2(410.5, 320.0), 30.0); 2], "a dark edge and a white line, both on the exact center");
+}
+
+#[test]
 fn a_place_in_a_julia_set_says_so_in_the_list() {
     let (app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     let mut place = app.points[0].clone();
@@ -1727,6 +1740,8 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     //The saved image size (asked by Jort in the review of review-4)
     (app.save_size.choice, app.save_size.portrait, app.save_size.custom_width, app.save_size.custom_height) = (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000);
+    assert!(!app.center_marker, "issue #223: the center marker is off by default");
+    (app.center_marker, app.center_marker_radius) = (true, 60.0);
     let now = std::time::Instant::now();
     app.keep_settings(now);
     assert!(!path.exists(), "not on every frame of a drag");
@@ -1746,6 +1761,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     assert_eq!((next.save_size.choice.clone(), next.save_size.portrait, next.save_size.custom_width, next.save_size.custom_height), (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000));
     assert_eq!(next.save_size.resolve(next.default_save_resolution(), next.view_resolution()), Ok(crate::resolution::Resolution::new(17_280, 30_720)), "32K upright, as it was");
+    assert_eq!((next.center_marker, next.center_marker_radius), (true, 60.0));
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3, "save_size": "preset:A deleted preset" }"#).unwrap();
     let mut partial = manual_app(&Config::sized(64, 48, 50, 4));

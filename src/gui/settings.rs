@@ -84,6 +84,9 @@ pub(super) struct Settings {
     log_level: Option<String>,
     show_minimap: Option<bool>,
     show_orbit: Option<bool>,
+    center_marker: Option<bool>,
+    /// The radius of the center marker, in points
+    center_marker_radius: Option<f32>,
     /// Whether the Julia map is shown (a new name: the map is on by default since review 5, and a saved `show_julia` from before was usually the old default)
     show_julia_map: Option<bool>,
     /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
@@ -193,6 +196,8 @@ impl MandelbrotApp {
             log_level: Some(self.log_level.name().to_string()),
             show_minimap: Some(self.show_minimap),
             show_orbit: Some(self.show_orbit),
+            center_marker: Some(self.center_marker),
+            center_marker_radius: Some(self.center_marker_radius),
             show_julia_map: Some(self.show_julia),
             save_size: Some(match &self.save_size.choice {
                 SaveSizeChoice::Standard => String::from("default"),
@@ -335,6 +340,10 @@ impl MandelbrotApp {
         set(settings.video_blend, &mut self.video_blend);
         set(settings.show_minimap, &mut self.show_minimap);
         set(settings.show_orbit, &mut self.show_orbit);
+        set(settings.center_marker, &mut self.center_marker);
+        if let Some(radius) = settings.center_marker_radius.filter(|radius| super::depth::CENTER_MARKER_RADII.contains(radius)) {
+            self.center_marker_radius = radius;
+        }
         set(settings.show_julia_map, &mut self.show_julia);
         set(settings.video_keyframe_dives, &mut self.video_keyframe_dives);
         if let Some(level) = settings.log_level.as_deref().and_then(|name| super::status::LogLevel::ALL.into_iter().find(|level| level.name() == name)) {

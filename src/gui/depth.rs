@@ -13,6 +13,22 @@ use crate::complex_plane::{Precision, View};
 /// where their precision ends, see `Precision`)
 pub(super) const DEPTH_ZOOMS: std::ops::RangeInclusive<f64> = 0.1..=1e15;
 
+/// The radius of the center marker at first, and the radii its slider offers, in points (issue #223)
+pub(super) const CENTER_MARKER_RADIUS: f32 = 24.0;
+pub(super) const CENTER_MARKER_RADII: std::ops::RangeInclusive<f32> = 3.0..=400.0;
+
+/// Draws the center marker (issue #223): a circle of `radius` points around `center`, the center of the view, with a small cross on the exact center. White with
+/// a dark edge, so it shows on every color. It is only drawn on the screen, never in saved images or videos
+pub(super) fn draw_center_marker(painter: &egui::Painter, center: egui::Pos2, radius: f32) {
+    let arm = radius.min(6.0) * 0.5;
+    //The dark edge first, the white line on it
+    for stroke in [egui::Stroke::new(3.0, egui::Color32::from_black_alpha(170)), egui::Stroke::new(1.2, egui::Color32::from_white_alpha(230))] {
+        painter.circle_stroke(center, radius, stroke);
+        painter.line_segment([center - egui::vec2(arm, 0.0), center + egui::vec2(arm, 0.0)], stroke);
+        painter.line_segment([center - egui::vec2(0.0, arm), center + egui::vec2(0.0, arm)], stroke);
+    }
+}
+
 impl MandelbrotApp {
     /// The center of the view exactly as the depth control keeps it: the plane stores its edges, so its center read back can differ in the last bits, and
     /// many depth changes would add those up. While the view is where the depth control left it, this is the center it was given
@@ -57,6 +73,12 @@ impl MandelbrotApp {
             }
             if ui.add_enabled(self.c.rotation() != 0.0, egui::Button::new("⟲ 0")).on_hover_text("Turns the view back to unturned (0°)").clicked() {
                 self.turn_to(0.0);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.center_marker, "Center marker").on_hover_text("Draws a circle around the exact center of the view, to put a feature right in the middle before turning or diving around it. Only on the screen: saved images and videos do not show it");
+            if self.center_marker {
+                ui.add(egui::Slider::new(&mut self.center_marker_radius, CENTER_MARKER_RADII).logarithmic(true).integer().suffix(" px").text("size")).on_hover_text("The radius of the circle on the screen");
             }
             ui.selectable_value(&mut self.rotation_in_degrees, true, "degrees").on_hover_text("Show and type the rotation in degrees (the angle stays the same)");
             ui.selectable_value(&mut self.rotation_in_degrees, false, "radians").on_hover_text("Show and type the rotation in radians (the angle stays the same)");

@@ -250,6 +250,9 @@ pub struct MandelbrotApp {
     show_orbit: bool,
     show_julia: bool,
     julia_pinned: Option<(f64, f64)>,
+    /// Whether a circle marks the center of the view, and its radius in points (issue #223, off by default), see `depth::draw_center_marker`
+    center_marker: bool,
+    center_marker_radius: f32,
     /// In a Julia set (`m.julia`, issue #202): the view of the Mandelbrot set to go back to
     mandelbrot_view: Option<crate::complex_plane::View>,
     /// The Julia map shown: what it was rendered for, its texture, and whether all its layers are done; and the render of its next layers (see `julia`)
@@ -477,6 +480,8 @@ impl MandelbrotApp {
             show_orbit: false,
             show_julia: true,
             julia_pinned: None,
+            center_marker: false,
+            center_marker_radius: depth::CENTER_MARKER_RADIUS,
             mandelbrot_view: None,
             julia_map: None,
             julia_map_job: None,
@@ -690,6 +695,9 @@ impl MandelbrotApp {
             points::draw_markers(&ui.painter_at(rect), &points::marker_positions(&self.points, self.displayed_plane(), rect));
         }
         self.julia_overlays(ui, rect);
+        if self.center_marker {
+            depth::draw_center_marker(&ui.painter_at(rect), rect.center(), self.center_marker_radius);
+        }
         self.handle_image_pointer(ui, &response, size);
         available
     }
