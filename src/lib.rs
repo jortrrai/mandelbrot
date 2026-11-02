@@ -41,6 +41,12 @@
     clippy::cast_sign_loss
 )]
 
+/// The memory allocator of the program: mimalloc gives memory that is freed back to the system, where glibc's malloc kept what each render thread freed (the
+/// idle window held gigabytes after a video, and more and more while moving around)
+#[cfg(not(target_os = "android"))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::error::Error;
 
 use coloring::ColorChannelMapping;

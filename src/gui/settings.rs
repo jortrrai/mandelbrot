@@ -71,6 +71,9 @@ pub(super) struct Settings {
     video_length: Option<[String; 3]>,
     video_quality: Option<String>,
     video_playback: Option<String>,
+    /// *Max bitrate*: on or off, and the limit in megabits per second
+    video_max_bitrate: Option<bool>,
+    video_max_mbps: Option<u32>,
     video_pngs: Option<bool>,
     video_blend: Option<bool>,
     video_shutter: Option<f64>,
@@ -81,7 +84,8 @@ pub(super) struct Settings {
     log_level: Option<String>,
     show_minimap: Option<bool>,
     show_orbit: Option<bool>,
-    show_julia: Option<bool>,
+    /// Whether the Julia map is shown (off by default; a new name since review 5, when it was on by default for a while)
+    show_julia_map: Option<bool>,
     /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
     save_size: Option<String>,
     save_width: Option<usize>,
@@ -179,6 +183,8 @@ impl MandelbrotApp {
             video_length: Some(self.video_length.clone()),
             video_quality: Some(self.video_quality.name().to_string()),
             video_playback: Some(self.video_playback.name().to_string()),
+            video_max_bitrate: Some(self.video_max_bitrate),
+            video_max_mbps: Some(self.video_max_mbps),
             video_pngs: Some(self.video_pngs),
             video_blend: Some(self.video_blend),
             video_shutter: Some(self.video_shutter),
@@ -187,7 +193,7 @@ impl MandelbrotApp {
             log_level: Some(self.log_level.name().to_string()),
             show_minimap: Some(self.show_minimap),
             show_orbit: Some(self.show_orbit),
-            show_julia: Some(self.show_julia),
+            show_julia_map: Some(self.show_julia),
             save_size: Some(match &self.save_size.choice {
                 SaveSizeChoice::Standard => String::from("default"),
                 SaveSizeChoice::View => String::from("view"),
@@ -318,6 +324,10 @@ impl MandelbrotApp {
         if let Some(quality) = settings.video_quality.as_deref().and_then(|name| VideoQuality::ALL.into_iter().find(|quality| quality.name() == name)) {
             self.video_quality = quality;
         }
+        set(settings.video_max_bitrate, &mut self.video_max_bitrate);
+        if let Some(mbps) = settings.video_max_mbps.filter(|mbps| (5..=1000).contains(mbps)) {
+            self.video_max_mbps = mbps;
+        }
         if let Some(playback) = settings.video_playback.as_deref().and_then(Playback::of_name) {
             self.video_playback = playback;
         }
@@ -325,7 +335,7 @@ impl MandelbrotApp {
         set(settings.video_blend, &mut self.video_blend);
         set(settings.show_minimap, &mut self.show_minimap);
         set(settings.show_orbit, &mut self.show_orbit);
-        set(settings.show_julia, &mut self.show_julia);
+        set(settings.show_julia_map, &mut self.show_julia);
         set(settings.video_keyframe_dives, &mut self.video_keyframe_dives);
         if let Some(level) = settings.log_level.as_deref().and_then(|name| super::status::LogLevel::ALL.into_iter().find(|level| level.name() == name)) {
             self.log_level = level;

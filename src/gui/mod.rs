@@ -210,6 +210,9 @@ pub struct MandelbrotApp {
     video_length: [String; 3],
     video_quality: video::VideoQuality,
     video_playback: video::Playback,
+    /// *Max bitrate*: whether the video's bitrate is limited, and the limit in megabits per second (issue #224)
+    video_max_bitrate: bool,
+    video_max_mbps: u32,
     video_pngs: bool,
     /// Whether the frames of a video are blended over time, see `video` and `temporal`
     video_blend: bool,
@@ -249,7 +252,9 @@ pub struct MandelbrotApp {
     julia_pinned: Option<(f64, f64)>,
     /// In a Julia set (`m.julia`, issue #202): the view of the Mandelbrot set to go back to
     mandelbrot_view: Option<crate::complex_plane::View>,
-    julia_map: Option<(julia::MapKey, egui::TextureHandle)>,
+    /// The Julia map shown: what it was rendered for, its texture, and whether all its layers are done; and the render of its next layers (see `julia`)
+    julia_map: Option<(julia::MapKey, egui::TextureHandle, bool)>,
+    julia_map_job: Option<julia::MapJob>,
     /// On a narrow screen: whether the controls are shown over the image (see `ui`)
     show_controls: bool,
     /// Whether the mini-map shows in the Current view box, and its texture, the colors it was rendered with and its plane (see `status::minimap_ui`)
@@ -257,6 +262,8 @@ pub struct MandelbrotApp {
     minimap: Option<(status::MinimapColors, egui::TextureHandle, ComplexPlane)>,
     /// Whether the rotation is shown and typed in degrees (or in radians), see `depth::rotation_controls`
     rotation_in_degrees: bool,
+    /// The angle the rotation slider was last set to, in radians: at its right end (180°) it shows 180° although the view keeps the same angle as -180°
+    rotation_slider: f64,
     /// The center the depth control keeps, exactly (see `depth::exact_center`)
     depth_center: Option<crate::complex::Complex>,
     /// The keyframes of the sequence being made, and the times of its transitions as typed (see `sequence`)
@@ -446,6 +453,8 @@ impl MandelbrotApp {
             video_length: [String::new(), String::from("3"), String::from("20")],
             video_quality: video::VideoQuality::VeryHigh,
             video_playback: video::Playback::Maximum,
+            video_max_bitrate: false,
+            video_max_mbps: video::DEFAULT_MAX_MBPS,
             video_pngs: false,
             video_blend: false,
             video_shutter: 0.0,
@@ -470,10 +479,12 @@ impl MandelbrotApp {
             julia_pinned: None,
             mandelbrot_view: None,
             julia_map: None,
+            julia_map_job: None,
             show_controls: false,
             show_minimap: false,
             minimap: None,
             rotation_in_degrees: true,
+            rotation_slider: 0.0,
             lock_center: false,
             depth_center: None,
             sequence_keyframes: Vec::new(),
@@ -590,11 +601,22 @@ impl MandelbrotApp {
         }
     }
 
+    /// Gives the memory the program freed back to the system now, after a video, an image save or a finished render: the allocator (mimalloc, see `ALLOCATOR`)
+    /// would otherwise wait for its next allocations, which an idle window hardly makes
+    pub(super) fn release_free_memory() {
+        #[cfg(not(target_os = "android"))]
+        // SAFETY: mi_collect only returns free memory of the allocator to the system; it touches no memory in use
+        unsafe {
+            libmimalloc_sys::mi_collect(true);
+        }
+    }
+
     /// Adds `message` to the status log with the time, and prints it with the time if its level is shown (see `status::LogLevel`)
     pub(super) fn log(&mut self, message: impl Into<String>) {
         let (message, now) = (message.into(), chrono::Local::now());
-        if status::LogLevel::of(&message) >= self.log_level {
-            let line = format!("[{}] {message}", now.format("%H:%M:%S"));
+        let level = status::LogLevel::of(&message);
+        if level >= self.log_level {
+            let line = format!("[{}] {} {message}", now.format("%H:%M:%S"), level.tag());
             //(On the command line stdout is for its JSON: the log goes to stderr there, see `cli`)
             if cli::quiet() { eprintln!("{line}") } else { println!("{line}") }
         }
