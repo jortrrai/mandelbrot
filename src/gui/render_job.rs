@@ -207,6 +207,7 @@ impl MandelbrotApp {
         //(Its thread sets `ended` before it sends its message, so the message is in the log by now)
         if self.image_save.as_ref().is_some_and(|save| save.ended.load(Ordering::Relaxed)) {
             self.image_save = None;
+            Self::release_free_memory();
         }
         if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
             self.gpu_opening = None;
@@ -288,6 +289,9 @@ impl MandelbrotApp {
                     //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
                     self.m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring, ..m };
                     self.buffer_is_complete = completed && self.settle.is_none(); //A render during a gesture has only the first layer
+                    if self.buffer_is_complete && self.flight.is_none() {
+                        Self::release_free_memory(); //(Not for every frame of a flight)
+                    }
                     self.layer_shown |= completed;
                     if self.progress.take().is_some() {
                         if let Some(bars) = &mut self.bars {
@@ -426,6 +430,8 @@ impl MandelbrotApp {
         let preview = (!layer_on_screen && !levels.is_empty() && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
         //Frames that move (a drag, a flight) may use the f32 loop; the image the view settles on never does
         let (gpu, fast_gpu, f32_frames) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu, self.f32_frames && during_gesture);
+        //The samples of pixels that a move takes out of the view are kept within the neighborhood, so a move back continues them (see `SampleState::keep_around`)
+        let keep_around = self.neighborhood_margin;
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let pixels_done = Arc::new(AtomicUsize::new(0));
@@ -457,6 +463,7 @@ impl MandelbrotApp {
             }
             //A frame of a drag that keeps exact samples (every layer of the view it moves) computes its exposed strip with them instead of the f32 loop: samples of
             //the f32 loop make a render start over, so the frame would discard every layer, and the render the drag settles on would discard the frame
+            samples.keep_around(keep_around);
             let f32_frames = f32_frames && !samples.would_keep(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), false);
             let kept = samples.prepare_for(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), f32_frames && fast_gpu && gpu.is_some());
             let whole = kept == 0;

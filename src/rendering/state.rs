@@ -83,6 +83,53 @@ pub struct SampleState {
     pub(super) recolor_pending: bool,
     /// The memory of the colors of the last render, so the next render does not allocate (and the system clear) a big image again, see `Render::run`
     pub(super) colors: Vec<TrueColor>,
+    /// The samples of pixels that a move took out of the view, so a move back brings them back (see `Outside`)
+    outside: Outside,
+}
+
+/// The side of a tile of `Outside`, in pixels
+const TILE: isize = 64;
+
+/// The samples of one pixel outside the view; a `count` of 0 is a pixel without samples
+#[derive(Clone, Copy)]
+struct OutsidePixel {
+    sum: [u32; 3],
+    count: u8,
+    first: TrueColor,
+    second: TrueColor,
+    position: f64,
+}
+
+const NO_PIXEL: OutsidePixel = OutsidePixel { sum: [0; 3], count: 0, first: TrueColor { red: 0, green: 0, blue: 0 }, second: TrueColor { red: 0, green: 0, blue: 0 }, position: 0.0 };
+
+/// The samples of the pixels around the view that were in it before: a move puts the pixels it takes out of the view here, and takes back those it brings
+/// into the view, so panning back and forth renders no layer twice. Kept up to `margin` percent of the view to every side (the size of the neighborhood, see
+/// `SampleState::keep_around`), in tiles of `TILE` x `TILE` pixels at their positions in the anchor, so only the area that was seen takes memory.
+#[derive(Clone, Default)]
+struct Outside {
+    margin: u16,
+    tiles: std::collections::HashMap<(isize, isize), Box<[OutsidePixel]>>,
+}
+
+impl Outside {
+    /// The pixel at `(x, y)` of the anchor, if it is kept
+    fn get(&self, x: isize, y: isize) -> Option<&OutsidePixel> {
+        self.tiles.get(&(x.div_euclid(TILE), y.div_euclid(TILE))).map(|tile| &tile[(y.rem_euclid(TILE) * TILE + x.rem_euclid(TILE)).unsigned_abs()]).filter(|pixel| pixel.count > 0)
+    }
+
+    /// Keeps `pixel` at `(x, y)` of the anchor
+    fn put(&mut self, x: isize, y: isize, pixel: OutsidePixel) {
+        let tile = self.tiles.entry((x.div_euclid(TILE), y.div_euclid(TILE))).or_insert_with(|| vec![NO_PIXEL; (TILE * TILE).unsigned_abs()].into_boxed_slice());
+        tile[(y.rem_euclid(TILE) * TILE + x.rem_euclid(TILE)).unsigned_abs()] = pixel;
+    }
+
+    /// Forgets the tiles that lie wholly outside the area kept around the `width` x `height` view whose top left pixel is `(left, top)` of the anchor
+    fn forget_beyond(&mut self, (left, top): (isize, isize), width: usize, height: usize) {
+        let (width, height) = (isize::try_from(width).unwrap_or(isize::MAX), isize::try_from(height).unwrap_or(isize::MAX));
+        let (around_x, around_y) = (width * isize::from(i16::try_from(self.margin).unwrap_or(i16::MAX)) / 100, height * isize::from(i16::try_from(self.margin).unwrap_or(i16::MAX)) / 100);
+        let (columns, rows) = ((left - around_x).div_euclid(TILE)..=(left + width + around_x).div_euclid(TILE), (top - around_y).div_euclid(TILE)..=(top + height + around_y).div_euclid(TILE));
+        self.tiles.retain(|(x, y), _| columns.contains(x) && rows.contains(y));
+    }
 }
 
 impl SampleState {
@@ -115,6 +162,19 @@ impl SampleState {
         self.plane.as_ref()
     }
 
+    /// Keeps the samples of pixels that a move takes out of the view up to `margin` percent of the view to every side (0: none), so a move back continues them
+    pub fn keep_around(&mut self, margin: u16) {
+        self.outside.margin = margin;
+        if margin == 0 {
+            self.outside.tiles.clear();
+        }
+    }
+
+    /// How far the view may move and keep samples, in pixels of a side of `length`: the view and the area kept around it
+    fn reach(&self, length: usize) -> usize {
+        length + length * usize::from(self.outside.margin) / 100
+    }
+
     /// Makes the state fit a render of `plane` (`width` x `height` pixels) of `m` colored by `coloring_function`, like `Render::resume` does when it starts,
     /// and returns how many pixels kept samples. A render that resumes the state afterwards finds it prepared.
     #[allow(clippy::too_many_arguments)] // The view, the size and everything the key of the samples needs
@@ -127,6 +187,10 @@ impl SampleState {
     #[allow(clippy::too_many_arguments)] // The same as `prepare_for`
     pub fn would_keep(&self, plane: &ComplexPlane, width: usize, height: usize, m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor, fast_gpu: bool, single: bool) -> bool {
         let Some((rows_up, columns_right)) = self.kept_shift(plane, width, height, &SampleKey::new(m, coloring_function, fast_gpu, single)) else { return false };
+        if !self.outside.tiles.is_empty() || columns_right.unsigned_abs() >= width || rows_up.unsigned_abs() >= height {
+            //(Pixels may come back from around the view; a move that far keeps only those)
+            return !self.outside.tiles.is_empty();
+        }
         //(The pixels that stay visible, in the view of the state)
         let columns = if columns_right >= 0 { 0..width - columns_right.unsigned_abs() } else { columns_right.unsigned_abs()..width };
         let rows = if rows_up >= 0 { 0..height - rows_up.unsigned_abs() } else { rows_up.unsigned_abs()..height };
@@ -138,7 +202,7 @@ impl SampleState {
         let same_render = self.width == width && self.height == height && self.key.as_ref() == Some(key);
         let shift = self.plane.as_ref().filter(|_| same_render).and_then(|old| pixel_shift(old, plane))?;
         let (rows_up, columns_right) = (isize::try_from(shift.0).ok()?, isize::try_from(shift.1).ok()?);
-        (rows_up.unsigned_abs() < height && columns_right.unsigned_abs() < width).then_some((rows_up, columns_right))
+        (rows_up.unsigned_abs() < self.reach(height) && columns_right.unsigned_abs() < self.reach(width)).then_some((rows_up, columns_right))
     }
 
     /// Makes the state fit a render of `plane` (`width` x `height` pixels) with the settings `key`. Returns `true` if it started over (every pixel is empty).
@@ -154,18 +218,21 @@ impl SampleState {
                 Prepared::Kept
             }
             None if recolor => {
+                self.outside.tiles.clear(); //(Their colors are of the old settings)
                 self.recolor_pending = true; //(Also when `prepare_for` prepares the state before the render: the render recolors it)
                 Prepared::Recolor
             }
             None if self.counts.len() == width * height && self.width == width && self.positions.len() == width * height => {
                 //Starting over at the same size reuses the memory: only the counts are cleared, the other values of a pixel are written by its first samples
                 self.counts.fill(0);
+                self.outside.tiles.clear();
                 (self.anchor, self.origin) = (Some(plane.clone()), (0, 0));
                 Prepared::Empty
             }
             None => {
                 let pixels = width * height;
-                *self = SampleState { anchor: Some(plane.clone()), width, height, sums: vec![[0; 3]; pixels], counts: vec![0; pixels], first: vec![TrueColor::new(0, 0, 0); pixels], second: vec![TrueColor::new(0, 0, 0); pixels], positions: vec![0.0; pixels], ..SampleState::default() };
+                let outside = Outside { margin: self.outside.margin, ..Outside::default() };
+                *self = SampleState { anchor: Some(plane.clone()), width, height, outside, sums: vec![[0; 3]; pixels], counts: vec![0; pixels], first: vec![TrueColor::new(0, 0, 0); pixels], second: vec![TrueColor::new(0, 0, 0); pixels], positions: vec![0.0; pixels], ..SampleState::default() };
                 Prepared::Empty
             }
         };
@@ -220,15 +287,75 @@ impl SampleState {
             return;
         }
         let (width, height) = (self.width, self.height);
-        //Only the counts of the exposed pixels have to be cleared: the other values of a pixel without samples are never read, and are written by its first samples
-        shift_grid(&mut self.counts, width, height, rows_up, columns_right, Some(0));
-        shift_grid(&mut self.sums, width, height, rows_up, columns_right, None);
-        shift_grid(&mut self.first, width, height, rows_up, columns_right, None);
-        shift_grid(&mut self.second, width, height, rows_up, columns_right, None);
-        if !self.positions.is_empty() {
-            shift_grid(&mut self.positions, width, height, rows_up, columns_right, None);
+        if self.outside.margin > 0 {
+            //The pixels that leave the view go around it
+            for (x, y) in self.leaving(columns_right, rows_up) {
+                let index = self.index(x, y);
+                if self.counts[index] > 0 && self.counts[index] != FOREIGN {
+                    let pixel = self.pixel(index);
+                    self.outside.put(x + self.origin.0, y + self.origin.1, pixel);
+                }
+            }
+        }
+        if columns_right.unsigned_abs() < width && rows_up.unsigned_abs() < height {
+            //Only the counts of the exposed pixels have to be cleared: the other values of a pixel without samples are never read, and are written by its first samples
+            shift_grid(&mut self.counts, width, height, rows_up, columns_right, Some(0));
+            shift_grid(&mut self.sums, width, height, rows_up, columns_right, None);
+            shift_grid(&mut self.first, width, height, rows_up, columns_right, None);
+            shift_grid(&mut self.second, width, height, rows_up, columns_right, None);
+            if !self.positions.is_empty() {
+                shift_grid(&mut self.positions, width, height, rows_up, columns_right, None);
+            }
+        } else {
+            //(A move of a whole view or more: every pixel is exposed)
+            self.counts.fill(0);
         }
         self.origin = (self.origin.0 - columns_right, self.origin.1 - rows_up);
+        if self.outside.margin > 0 {
+            //The exposed pixels that were in the view before come back
+            for (x, y) in self.leaving(-columns_right, -rows_up) {
+                if let Some(pixel) = self.outside.get(x + self.origin.0, y + self.origin.1).copied() {
+                    let index = self.index(x, y);
+                    self.set_pixel(index, pixel);
+                }
+            }
+            self.outside.forget_beyond(self.origin, width, height);
+        }
+    }
+
+    /// The pixels `(x, y)` of the view that a move by `columns_right` and `rows_up` takes out of it: the rows and the columns at the side it leaves
+    fn leaving(&self, columns_right: isize, rows_up: isize) -> Vec<(isize, isize)> {
+        let (width, height) = (isize::try_from(self.width).unwrap_or(0), isize::try_from(self.height).unwrap_or(0));
+        let columns = if columns_right >= 0 { (width - columns_right).max(0)..width } else { 0..(-columns_right).min(width) };
+        (0..height).flat_map(|y| {
+            let whole_row = !(0..height).contains(&(y + rows_up));
+            let row = if whole_row { 0..width } else { columns.clone() };
+            row.map(move |x| (x, y))
+        }).collect()
+    }
+
+    /// The index of the pixel `(x, y)` of the view, which is in it
+    fn index(&self, x: isize, y: isize) -> usize {
+        y.unsigned_abs() * self.width + x.unsigned_abs()
+    }
+
+    /// The samples of the pixel at `index`
+    fn pixel(&self, index: usize) -> OutsidePixel {
+        OutsidePixel { sum: self.sums[index], count: self.counts[index], first: self.first.get(index).copied().unwrap_or(NO_PIXEL.first), second: self.second.get(index).copied().unwrap_or(NO_PIXEL.second), position: self.positions.get(index).copied().unwrap_or(0.0) }
+    }
+
+    /// Gives the pixel at `index` the samples `pixel`
+    fn set_pixel(&mut self, index: usize, pixel: OutsidePixel) {
+        (self.sums[index], self.counts[index]) = (pixel.sum, pixel.count);
+        if let Some(first) = self.first.get_mut(index) {
+            *first = pixel.first;
+        }
+        if let Some(second) = self.second.get_mut(index) {
+            *second = pixel.second;
+        }
+        if let Some(position) = self.positions.get_mut(index) {
+            *position = pixel.position;
+        }
     }
 }
 

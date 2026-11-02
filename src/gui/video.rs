@@ -710,10 +710,6 @@ impl MandelbrotApp {
         if keyframe_dives && dive.is_none() {
             self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
         }
-        if let Some(plan) = &dive {
-            //(Frame 0 waits for them: say so, the progress shows no frames until then)
-            self.log(format!("Fast dive: {} keyframe images are rendered first{}, then every frame is composed from them", plan.scales().len(), if gpu.is_some() { " (on the CPU and the GPU at once)" } else { "" }));
-        }
         let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none();
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
@@ -1087,6 +1083,7 @@ impl MandelbrotApp {
             //A finished video says how long its rendering took, to compare settings such as Fast dives (a resumed video: the time since it was resumed)
             let message = if finished { format!("{message}, rendered in {}", render_time(job.started.elapsed())) } else { message };
             self.video_job = None;
+            Self::release_free_memory();
             self.log(message);
             if let Some(name) = discard {
                 //Cancel video: nothing of it is kept (issue #215)

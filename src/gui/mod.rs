@@ -487,7 +487,7 @@ impl MandelbrotApp {
             shared_view_input: String::new(),
             depth_dragging: false,
             show_orbit: false,
-            show_julia: true,
+            show_julia: false,
             julia_pinned: None,
             center_marker: false,
             center_marker_radius: depth::CENTER_MARKER_RADIUS,
@@ -616,6 +616,16 @@ impl MandelbrotApp {
             }
             let factor = rendering::FAST_GPU_STEPS / self.c.precision_steps().max(f64::MIN_POSITIVE);
             self.c.scale(factor.clamp(1.0, 1e6) * 1.001);
+        }
+    }
+
+    /// Gives the memory the program freed back to the system now, after a video, an image save or a finished render: the allocator (mimalloc, see `ALLOCATOR`)
+    /// would otherwise wait for its next allocations, which an idle window hardly makes
+    pub(super) fn release_free_memory() {
+        #[cfg(not(target_os = "android"))]
+        // SAFETY: mi_collect only returns free memory of the allocator to the system; it touches no memory in use
+        unsafe {
+            libmimalloc_sys::mi_collect(true);
         }
     }
 

@@ -94,7 +94,7 @@ pub(super) struct Settings {
     lock_aspect: Option<bool>,
     /// The radius of the center marker, in points
     center_marker_radius: Option<f32>,
-    /// Whether the Julia map is shown (a new name: the map is on by default since review 5, and a saved `show_julia` from before was usually the old default)
+    /// Whether the Julia map is shown (off by default; a new name since review 5, when it was on by default for a while)
     show_julia_map: Option<bool>,
     /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
     save_size: Option<String>,
