@@ -2993,6 +2993,9 @@ fn the_youtube_preset_sets_4k60_at_32x_with_motion_blur() {
     assert_eq!((app.video_shutter, app.video_blend), (180.0, false));
     assert_eq!((app.video_quality, app.video_playback), (super::video::VideoQuality::VeryHigh, super::video::Playback::HighQuality));
     assert!(controls_texts(&mut app).iter().any(|text| text == "YouTube 4K60"));
+    //Issue #224: at most 180 Mbit/s, so the video plays smoothly on a PC; otherwise the limit is off
+    assert_eq!((app.video_max_bitrate, app.video_max_mbps), (true, 180));
+    assert!(!manual_app(&config).video_max_bitrate, "off by default");
 }
 
 #[test]

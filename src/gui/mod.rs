@@ -210,6 +210,9 @@ pub struct MandelbrotApp {
     video_length: [String; 3],
     video_quality: video::VideoQuality,
     video_playback: video::Playback,
+    /// *Max bitrate*: whether the video's bitrate is limited, and the limit in megabits per second (issue #224)
+    video_max_bitrate: bool,
+    video_max_mbps: u32,
     video_pngs: bool,
     /// Whether the frames of a video are blended over time, see `video` and `temporal`
     video_blend: bool,
@@ -450,6 +453,8 @@ impl MandelbrotApp {
             video_length: [String::new(), String::from("3"), String::from("20")],
             video_quality: video::VideoQuality::VeryHigh,
             video_playback: video::Playback::Maximum,
+            video_max_bitrate: false,
+            video_max_mbps: video::DEFAULT_MAX_MBPS,
             video_pngs: false,
             video_blend: false,
             video_shutter: 0.0,

@@ -71,6 +71,9 @@ pub(super) struct Settings {
     video_length: Option<[String; 3]>,
     video_quality: Option<String>,
     video_playback: Option<String>,
+    /// *Max bitrate*: on or off, and the limit in megabits per second
+    video_max_bitrate: Option<bool>,
+    video_max_mbps: Option<u32>,
     video_pngs: Option<bool>,
     video_blend: Option<bool>,
     video_shutter: Option<f64>,
@@ -180,6 +183,8 @@ impl MandelbrotApp {
             video_length: Some(self.video_length.clone()),
             video_quality: Some(self.video_quality.name().to_string()),
             video_playback: Some(self.video_playback.name().to_string()),
+            video_max_bitrate: Some(self.video_max_bitrate),
+            video_max_mbps: Some(self.video_max_mbps),
             video_pngs: Some(self.video_pngs),
             video_blend: Some(self.video_blend),
             video_shutter: Some(self.video_shutter),
@@ -318,6 +323,10 @@ impl MandelbrotApp {
         }
         if let Some(quality) = settings.video_quality.as_deref().and_then(|name| VideoQuality::ALL.into_iter().find(|quality| quality.name() == name)) {
             self.video_quality = quality;
+        }
+        set(settings.video_max_bitrate, &mut self.video_max_bitrate);
+        if let Some(mbps) = settings.video_max_mbps.filter(|mbps| (5..=1000).contains(mbps)) {
+            self.video_max_mbps = mbps;
         }
         if let Some(playback) = settings.video_playback.as_deref().and_then(Playback::of_name) {
             self.video_playback = playback;
