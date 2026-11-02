@@ -33,7 +33,7 @@ impl MandelbrotApp {
 
     /// Saves the current view as an image on its own background thread, with a progress bar and a Cancel button (see `image_save`). This does not interrupt a
     /// running render; while one runs, the buffer only holds a partially refined image, so the image is rendered again for saving. An image of another size
-    /// than the view is rendered and written in strips, so its memory stays bounded up to 32K (see `export`).
+    /// than the view is rendered and written in strips, so its memory stays bounded up to 64K (see `export`).
     pub(super) fn save_image(&mut self) {
         if self.image_save.is_some() {
             self.log("Could not save the image: another image is still being saved");

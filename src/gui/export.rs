@@ -1,4 +1,4 @@
-//! Saving an image of any size up to 32K with bounded memory: it is rendered in strips (see `rendering::strips`), blurred strip by strip for a blurred quality,
+//! Saving an image of any size up to 64K with bounded memory: it is rendered in strips (see `rendering::strips`), blurred strip by strip for a blurred quality,
 //! and written to the PNG file row by row on a thread of its own while the next strip renders. At most two strips (and the rows the blur needs from the strips
 //! next to them) are in memory, never the whole image.
 //!
@@ -218,25 +218,31 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "a measurement: renders a 32K image (MANDELBROT_EXPORT=\"width height samples\" for another), run by hand with --release"]
+    #[ignore = "a measurement: renders a 32K image (MANDELBROT_EXPORT=\"width height samples [gpu]\" for another, MANDELBROT_EXPORT_DIR for a folder on disk instead of the temporary one), run by hand with --release"]
     fn a_32k_image_is_saved_with_bounded_memory() {
         let setting = std::env::var("MANDELBROT_EXPORT").unwrap_or_else(|_| String::from("30720 17280 1"));
-        let numbers: Vec<usize> = setting.split_whitespace().map(|number| number.parse().unwrap()).collect();
+        let numbers: Vec<usize> = setting.split_whitespace().filter_map(|number| number.parse().ok()).collect();
         let (size, samples) = (Resolution::new(numbers[0], numbers[1]), u8::try_from(numbers[2]).unwrap());
         let mut c = ComplexPlane::new(size.width, size.height);
         c.set_view(&View::new(-0.7498, 0.0203, 6.4e-5));
         let m = MandelbrotSet::new(1500, 2.0);
         let view = c.get_view();
         let metadata = PngMetadata { view: &view, m: &m, supersampling_amount: samples, color_channel_mapping: ColorChannelMapping::RGB, place: None };
-        let picture = Picture { plane: &c, size, m: &m, samples, coloring_function: TrueColor::new_from_bernstein_polynomials, gpu: None, blur: None };
-        let folder = folder("measure");
+        //(Issue #225: with the GPU, and on a disk, as the temporary folder can be in memory)
+        let gpu = setting.contains("gpu").then(|| crate::rendering::gpu::GpuIterator::new().ok()).flatten();
+        let picture = Picture { plane: &c, size, m: &m, samples, coloring_function: TrueColor::new_from_bernstein_polynomials, gpu: gpu.as_ref(), blur: None };
+        let folder = std::env::var("MANDELBROT_EXPORT_DIR").map_or_else(|_| folder("measure"), PathBuf::from);
+        std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join("large.png");
         let started = Instant::now();
         let (cancel, progress) = (AtomicBool::new(false), StripProgress::default());
         assert!(save_png(&path, &picture, &metadata, crate::rendering::strips::STRIP_PIXELS, &cancel, &progress).unwrap());
         let (bytes, peak) = (std::fs::metadata(&path).unwrap().len(), peak_memory().unwrap_or(0));
-        println!("{size} at {samples}x: {:.1} s, file {:.0} MB, peak memory {:.0} MB (the whole image would be {:.0} MB of colors alone)", started.elapsed().as_secs_f64(), bytes as f64 / 1e6, peak as f64 / 1e6, size.pixels() as f64 * 3.0 / 1e6);
-        std::fs::remove_dir_all(&folder).unwrap();
-        assert!(peak < 1_000_000_000, "the memory stays bounded");
+        println!("{size} at {samples}x{}: {:.1} s, file {:.0} MB, peak memory {:.0} MB (the whole image would be {:.0} MB of colors alone)", if gpu.is_some() { " with the GPU" } else { "" }, started.elapsed().as_secs_f64(), bytes as f64 / 1e6, peak as f64 / 1e6, size.pixels() as f64 * 3.0 / 1e6);
+        if std::env::var("MANDELBROT_EXPORT_KEEP").is_err() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        //(Issue #225, 1x with the GPU: 1.0 GB at 32K, 1.3 GB at 48K, 1.7 GB at 64K, where the colors of the whole image alone would be 1.6, 3.6 and 6.4 GB)
+        assert!(peak < 2_500_000_000, "the memory stays bounded");
     }
 }

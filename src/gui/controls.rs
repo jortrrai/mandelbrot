@@ -519,7 +519,9 @@ impl MandelbrotApp {
         });
         match self.save_size.resolve(default_size, view) {
             Ok(resolution) => {
-                ui.label(format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6));
+                //(A PNG of a detailed view can take up to its 3 bytes a pixel: say so for the images that need gigabytes, issue #225)
+                let gigabytes = resolution.pixels() as f64 * 3.0 / 1e9;
+                ui.label(if gigabytes >= 1.0 { format!("{:.1} megapixels, up to {gigabytes:.1} GB on disk", resolution.pixels() as f64 / 1e6) } else { format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6) });
                 if resolution.pixels() > resolution::LARGE_IMAGE_PIXELS {
                     ui.weak("A large image: rendered in strips, so it needs little memory, but slow at high quality. Many phone galleries and image viewers cannot open \
                         images this large: use a viewer for large images, or print it");
