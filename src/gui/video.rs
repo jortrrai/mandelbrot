@@ -684,6 +684,10 @@ impl MandelbrotApp {
         if keyframe_dives && dive.is_none() {
             self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
         }
+        if let Some(plan) = &dive {
+            //(Frame 0 waits for them: say so, the progress shows no frames until then)
+            self.log(format!("Fast dive: {} keyframe images are rendered first, then every frame is composed from them{}", plan.scales().len(), if gpu.is_some() { " on the GPU" } else { "" }));
+        }
         let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none();
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
@@ -910,7 +914,7 @@ impl MandelbrotApp {
                                     vec![time]
                                 };
                                 let moments: Vec<(f64, f64)> = moments.iter().map(|moment| (path.camera_at(*moment).scale, flight.rotation_at(path, *moment))).collect();
-                                let colors = keyframes.compose_moments(&moments);
+                                let colors = keyframes.compose_moments(&moments, gpu.as_deref());
                                 scheduler.finish_frame(true);
                                 if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
                                     return;

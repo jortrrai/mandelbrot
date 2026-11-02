@@ -2069,7 +2069,7 @@ fn wait_for_video(app: &mut MandelbrotApp) -> String {
         app.poll_video(&ctx);
         std::thread::sleep(Duration::from_millis(1));
     }
-    app.log.iter().rev().find(|line| line.starts_with("Video of the flight") || line.starts_with("Could not")).cloned().unwrap()
+    app.log.iter().rev().find(|line| line.starts_with("Video of the flight") || line.starts_with("Could not")).cloned().unwrap_or_else(|| panic!("the video ended without its message: {:?}", app.log.iter().rev().take(6).collect::<Vec<_>>()))
 }
 
 #[test]
