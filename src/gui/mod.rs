@@ -247,6 +247,8 @@ pub struct MandelbrotApp {
     show_orbit: bool,
     show_julia: bool,
     julia_pinned: Option<(f64, f64)>,
+    /// In a Julia set (`m.julia`, issue #202): the view of the Mandelbrot set to go back to
+    mandelbrot_view: Option<crate::complex_plane::View>,
     julia_map: Option<(julia::MapKey, egui::TextureHandle)>,
     /// On a narrow screen: whether the controls are shown over the image (see `ui`)
     show_controls: bool,
@@ -466,6 +468,7 @@ impl MandelbrotApp {
             show_orbit: false,
             show_julia: false,
             julia_pinned: None,
+            mandelbrot_view: None,
             julia_map: None,
             show_controls: false,
             show_minimap: false,

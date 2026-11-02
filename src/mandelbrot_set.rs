@@ -24,6 +24,10 @@ pub struct MandelbrotSet {
     pub palette: ColorCycle,
     ///Whether colors use the smooth (fractional) iteration position of `iterate_smooth` instead of the integer iteration count, see `MandelbrotSet::position`
     pub smooth_coloring: bool,
+    ///With `Some(c)`, the Julia set of `c` instead (issue #202): every point `z` of the plane iterates `z² + c` from itself. Plain loops on the CPU (`julia_position`),
+    ///without the interior shortcuts and cycle detection of the Mandelbrot set's loops, and without the GPU (see `rendering::Render::gpu`)
+    #[serde(default)]
+    pub julia: Option<(f64, f64)>,
 }
 
 /// How iteration counts map onto the palette, as in Kalles Fraktaler.
@@ -94,7 +98,7 @@ const STREAM_LANES: usize = 4;
 impl MandelbrotSet {
     /// Creates the set with `max_iterations` and `orbit_radius`; smooth coloring is on and the palette is stretched over the limit (`ColorCycle::STRETCHED`)
     pub fn new(max_iterations: u32, orbit_radius: f64) -> MandelbrotSet {
-        MandelbrotSet { max_iterations, orbit_radius, palette: ColorCycle::STRETCHED, smooth_coloring: true }
+        MandelbrotSet { max_iterations, orbit_radius, palette: ColorCycle::STRETCHED, smooth_coloring: true, julia: None }
     }
 
     /// The color of a point with the given iteration count, see `ColorCycle`. Stretched over the limit, this is exactly `coloring_function(iterations, max_iterations)`.
@@ -114,11 +118,34 @@ impl MandelbrotSet {
 
     /// Whether `c` is certified to be inside the set by the cardioid and period-two bulb test, see `is_known_interior`
     pub fn is_certified_interior(&self, c: &Complex) -> bool {
-        self.is_known_interior(c)
+        self.julia.is_none() && self.is_known_interior(c)
+    }
+
+    /// The position (see `position`) of the point `z` of the Julia set of `c` (see `julia`): the iteration count until `z² + c` leaves the orbit radius, with
+    /// `smooth_coloring` plus a fraction from how far beyond it landed (after a few more steps), or `max_iterations` if it stays
+    pub fn julia_position(&self, mut z: Complex, c: &Complex) -> f64 {
+        let radius_squared = self.orbit_radius * self.orbit_radius;
+        for iterations in 0..self.max_iterations {
+            z = z.squared().add(c);
+            if z.x * z.x + z.y * z.y > radius_squared {
+                if !self.smooth_coloring {
+                    return f64::from(iterations + 1);
+                }
+                for _ in 0..4 {
+                    z = z.squared().add(c);
+                }
+                let log_modulus = 0.5 * (z.x * z.x + z.y * z.y).ln();
+                return (f64::from(iterations + 5) - log_modulus.ln() / std::f64::consts::LN_2).clamp(0.0, f64::from(self.max_iterations));
+            }
+        }
+        f64::from(self.max_iterations)
     }
 
     /// The position in the color table of a point: `iterate` as a number, or with `smooth_coloring` the smooth position of `iterate_smooth`
     pub fn position(&self, c: &Complex) -> f64 {
+        if let Some((x, y)) = self.julia {
+            return self.julia_position(Complex::new(c.x, c.y), &Complex::new(x, y));
+        }
         if self.smooth_coloring { self.iterate_smooth(c) } else { f64::from(self.iterate(c)) }
     }
 
@@ -196,6 +223,11 @@ impl MandelbrotSet {
     /// Run the Mandelbrot set algorithm for a single Complex number
     /// Returns the amount of iterations needed before Zn escapes to infinity
     pub fn iterate(&self, c: &Complex) -> u32 {
+        if self.julia.is_some() {
+            let smooth = MandelbrotSet { smooth_coloring: false, ..self.clone() };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // A whole count between 1 and max_iterations
+            return smooth.position(c) as u32;
+        }
         if self.is_known_interior(c) {
             return self.max_iterations; //Same result as the escape loop below, which never breaks for points inside the set
         }
@@ -314,6 +346,16 @@ impl MandelbrotSet {
     /// With `cancel`, it stops soon after `cancel` is set and returns how many points from the start of `points` have their position in `out`; without, all of them.
     pub fn positions(&self, points: &[Complex], out: &mut [f64], cancel: Option<&AtomicBool>) -> usize {
         debug_assert_eq!(points.len(), out.len());
+        if let Some((x, y)) = self.julia {
+            let c = Complex::new(x, y);
+            for (index, (z, position)) in points.iter().zip(out.iter_mut()).enumerate() {
+                if index % 4096 == 0 && cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) {
+                    return index;
+                }
+                *position = self.julia_position(Complex::new(z.x, z.y), &c);
+            }
+            return points.len();
+        }
         #[cfg(target_arch = "x86_64")]
         {
             if std::arch::is_x86_feature_detected!("avx2") {

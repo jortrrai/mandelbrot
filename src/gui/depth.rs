@@ -67,6 +67,20 @@ impl MandelbrotApp {
                 self.julia_pinned = None;
             }
         });
+        ui.horizontal(|ui| {
+            if let Some(c) = self.m.julia {
+                ui.label(format!("Julia set of c = {}", super::julia::complex_text(c)));
+                if ui.button("Back to the Mandelbrot set").on_hover_text("Shows the Mandelbrot set again, at the view it had before").clicked() {
+                    self.leave_julia();
+                }
+            } else {
+                let center = self.c.center();
+                let (c, of) = self.julia_pinned.map_or(((center.x, center.y), "the center"), |pinned| (pinned, "the pinned point"));
+                if ui.button(format!("Julia set of {of}")).on_hover_text("Shows the Julia set of that point in the whole view, to explore like the Mandelbrot set (on the CPU: the GPU's loops are the Mandelbrot set's). Pin a point with a middle click on the image (with Julia map), or move it to the center").clicked() {
+                    self.enter_julia(c);
+                }
+            }
+        });
     }
 
     /// The depth slider and *Lock center*

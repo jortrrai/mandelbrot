@@ -400,6 +400,8 @@ impl MandelbrotApp {
 
     /// Flies from the current view to `point` with the flight controls, the colors going from the current ones to `destination_palette` (see `PointFlight::palettes`)
     pub(super) fn fly_to(&mut self, point: PointOfInterest, destination_palette: ColorCycle) {
+        //(Places are in the Mandelbrot set: a flight from a Julia set starts at the view before it)
+        self.back_to_the_mandelbrot_set();
         let center = self.c.center();
         let from = Camera { x: center.x, y: center.y, scale: self.c.get_scale() };
         let to = Camera { x: point.location.real, y: point.location.imaginary, scale: point.location.scale };
@@ -562,6 +564,8 @@ impl MandelbrotApp {
     /// Goes to `point`: its center, scale and maximum iterations are applied, and with `restore_appearance` also the coloring, color channels and color cycle saved in its file.
     /// Otherwise the current appearance, and the supersampling, stay as they are.
     fn arrive_at(&mut self, point: &PointOfInterest) {
+        //(A place is a view of the Mandelbrot set)
+        self.back_to_the_mandelbrot_set();
         let location = &point.location;
         self.c.set_view(&View::new(location.real, location.imaginary, location.scale));
         self.c.set_rotation(location.rotation.to_radians());

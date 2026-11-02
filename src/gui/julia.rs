@@ -26,28 +26,6 @@ pub(super) type MapKey = (u64, u64, usize, u64, u64, bool, bool);
 /// How many steps of an orbit are drawn at most
 pub(super) const ORBIT_STEPS: usize = 500;
 
-/// The smooth escape time of `z = z² + c` from `z`, like `MandelbrotSet::position` (the iteration count plus a fraction from how far beyond the orbit radius it
-/// landed, with smooth colors), or `max_iterations` if it stays
-pub(super) fn julia_position(m: &MandelbrotSet, mut z: Complex, c: &Complex) -> f64 {
-    let radius_squared = m.orbit_radius * m.orbit_radius;
-    for iterations in 0..m.max_iterations {
-        z = z.squared().add(c);
-        let modulus_squared = z.x * z.x + z.y * z.y;
-        if modulus_squared > radius_squared {
-            if !m.smooth_coloring {
-                return f64::from(iterations + 1);
-            }
-            //A few more steps, so the logarithm of a large |z| gives a smooth fraction
-            for _ in 0..4 {
-                z = z.squared().add(c);
-            }
-            let log_modulus = 0.5 * (z.x * z.x + z.y * z.y).ln();
-            return (f64::from(iterations + 5) - log_modulus.ln() / std::f64::consts::LN_2).clamp(0.0, f64::from(m.max_iterations));
-        }
-    }
-    f64::from(m.max_iterations)
-}
-
 /// The colors of the Julia set of `c`, `width` x `height` pixels of the plane `plane`, colored like `m` with `coloring_function`, on all render threads
 pub(super) fn julia_image(plane: &ComplexPlane, m: &MandelbrotSet, c: &Complex, (width, height): (usize, usize), coloring_function: fn(f64, f64) -> TrueColor) -> Vec<TrueColor> {
     let mut colors = vec![TrueColor::new(0, 0, 0); width * height];
@@ -58,7 +36,7 @@ pub(super) fn julia_image(plane: &ComplexPlane, m: &MandelbrotSet, c: &Complex, 
                 for (index, pixel) in rows.iter_mut().enumerate() {
                     let (x, y) = (index % width, chunk * rows_per_chunk + index / width);
                     let z = plane.complex_from_pixel_plane(x as f64 + 0.5, y as f64 + 0.5);
-                    let position = julia_position(m, z, c);
+                    let position = m.julia_position(z, c);
                     *pixel = m.interpolated_color(position, |iterations| m.color(coloring_function, iterations));
                 }
             });
@@ -81,6 +59,11 @@ pub(super) fn orbit(c: &Complex, steps: usize, orbit_radius: f64) -> Vec<Complex
     points
 }
 
+/// `c` as text: `-0.123456 + 0.654321i`
+pub(super) fn complex_text((x, y): (f64, f64)) -> String {
+    format!("{x:.6} {} {:.6}i", if y < 0.0 { "-" } else { "+" }, y.abs())
+}
+
 /// The plane the Julia map shows: `MAP_WIDTH` wide around 0
 fn map_plane() -> ComplexPlane {
     let mut plane = ComplexPlane::new(MAP_SIZE.0, MAP_SIZE.1);
@@ -98,10 +81,39 @@ impl MandelbrotApp {
         Some(self.displayed_plane().complex_from_pixel_plane(f64::from(x), f64::from(y)))
     }
 
+    /// Shows the Julia set of `c` in the main view (issue #202), the whole of it (`MAP_WIDTH` wide around 0), remembering the view of the Mandelbrot set to go back to
+    pub(super) fn enter_julia(&mut self, c: (f64, f64)) {
+        if self.m.julia.is_none() {
+            self.mandelbrot_view = Some(self.c.get_view());
+        }
+        self.m.julia = Some(c);
+        self.c.set_view(&crate::complex_plane::View::new(0.0, 0.0, MAP_WIDTH / 2.5));
+        self.render(&format!("The Julia set of c = {}", complex_text(c)));
+    }
+
+    /// Back to the Mandelbrot set, at the view it had before the Julia set
+    pub(super) fn leave_julia(&mut self) {
+        if self.back_to_the_mandelbrot_set() {
+            self.render("Back to the Mandelbrot set");
+        }
+    }
+
+    /// Leaves a Julia set for the view of the Mandelbrot set before it, without a render (a flight or a place follows); whether it was in one
+    pub(super) fn back_to_the_mandelbrot_set(&mut self) -> bool {
+        if self.m.julia.take().is_none() {
+            return false;
+        }
+        if let Some(view) = self.mandelbrot_view.take() {
+            self.c.set_view(&view);
+        }
+        true
+    }
+
     /// Draws the orbit of the point under the mouse over the image (with *Show orbit*), and the Julia map in the top right of the image (with *Julia map*):
     /// the Julia set of the pinned point, or of the point under the mouse. A middle click pins the point under the mouse (or unpins)
     pub(super) fn julia_overlays(&mut self, ui: &egui::Ui, rect: egui::Rect) {
-        if !self.show_orbit && !self.show_julia {
+        //(In a Julia set the orbits and the map of the Mandelbrot set's points do not apply)
+        if (!self.show_orbit && !self.show_julia) || self.m.julia.is_some() {
             return;
         }
         let hovered = self.point_under_mouse(ui, rect);
@@ -146,7 +158,7 @@ impl MandelbrotApp {
         let map = egui::Rect::from_min_size(egui::pos2(rect.max.x - size.x - 8.0, rect.min.y + 8.0), size);
         painter.rect_filled(map.expand(2.0), 3.0, Color32::from_black_alpha(160));
         painter.image(texture.id(), map, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
-        let label = format!("Julia c = {:.6} {} {:.6}i{}", c.x, if c.y < 0.0 { "-" } else { "+" }, c.y.abs(), if self.julia_pinned.is_some() { " (pinned)" } else { "" });
+        let label = format!("Julia c = {}{}", complex_text((c.x, c.y)), if self.julia_pinned.is_some() { " (pinned)" } else { "" });
         painter.text(map.left_bottom() + egui::vec2(4.0, -4.0), egui::Align2::LEFT_BOTTOM, label, egui::FontId::proportional(11.0), Color32::WHITE);
     }
 }
@@ -159,8 +171,8 @@ mod tests {
     fn julia_sets_follow_the_mandelbrot_set_and_orbits_escape_or_stay() {
         let m = MandelbrotSet::new(200, 2.0);
         //c = 0: the Julia set is the unit disk: inside stays, outside escapes
-        assert_eq!(julia_position(&m, Complex::new(0.5, 0.0), &Complex::new(0.0, 0.0)), 200.0);
-        assert!(julia_position(&m, Complex::new(1.5, 0.0), &Complex::new(0.0, 0.0)) < 10.0);
+        assert_eq!(m.julia_position(Complex::new(0.5, 0.0), &Complex::new(0.0, 0.0)), 200.0);
+        assert!(m.julia_position(Complex::new(1.5, 0.0), &Complex::new(0.0, 0.0)) < 10.0);
         //The orbit of a point inside the set stays bounded for all its steps; one outside leaves
         assert_eq!(orbit(&Complex::new(-0.5, 0.0), 300, 2.0).len(), 301);
         let outside = orbit(&Complex::new(1.0, 1.0), 300, 2.0);
@@ -170,5 +182,47 @@ mod tests {
         let colors = julia_image(&plane, &m, &Complex::new(-1.0, 0.0), MAP_SIZE, TrueColor::new_from_bernstein_polynomials);
         let (middle, corner) = (colors[MAP_SIZE.1 / 2 * MAP_SIZE.0 + MAP_SIZE.0 / 2], colors[0]);
         assert_ne!((middle.red, middle.green, middle.blue), (corner.red, corner.green, corner.blue));
+    }
+
+    #[test]
+    fn the_main_view_renders_a_julia_set_on_the_cpu_and_goes_back_to_its_mandelbrot_view() {
+        //The set: every entry point gives the Julia set's positions, without the Mandelbrot set's interior shortcut
+        let m = MandelbrotSet { julia: Some((-1.0, 0.0)), ..MandelbrotSet::new(300, 2.0) };
+        let points: Vec<Complex> = (0..500).map(|i| Complex::new(-1.8 + f64::from(i) * 0.0072, 0.3 - f64::from(i) * 0.001)).collect();
+        let mut out = vec![0.0; points.len()];
+        assert_eq!(m.positions(&points, &mut out, None), points.len());
+        for (z, position) in points.iter().zip(&out) {
+            assert_eq!(position.to_bits(), m.julia_position(Complex::new(z.x, z.y), &Complex::new(-1.0, 0.0)).to_bits());
+            assert_eq!(position.to_bits(), m.position(z).to_bits());
+        }
+        assert!(!m.is_certified_interior(&Complex::new(-0.1, 0.0)), "the cardioid of the Mandelbrot set says nothing about a Julia set");
+        assert_eq!(m.iterate(&Complex::new(0.0, 0.0)), 300, "0 is in the basilica");
+        //A render with a GPU (and on the GPU only) gets the CPU's Julia set
+        let plane = map_plane();
+        let gpu = crate::rendering::gpu::GpuIterator::new().ok();
+        let render = |gpu: Option<&crate::rendering::gpu::GpuIterator>| {
+            let mut colors = Vec::new();
+            let render = crate::rendering::Render::new(&plane, &m, MAP_SIZE.0, MAP_SIZE.1, TrueColor::new_from_bernstein_polynomials).gpu(gpu.map(|gpu| (gpu, std::time::Duration::ZERO)));
+            let render = if gpu.is_some() { render.on_the_gpu_only() } else { render };
+            assert!(render.run(|layer, _| colors = layer.to_vec()));
+            colors.iter().map(|color| (color.red, color.green, color.blue)).collect::<Vec<_>>()
+        };
+        let cpu = render(None);
+        let direct = julia_image(&plane, &m, &Complex::new(-1.0, 0.0), MAP_SIZE, TrueColor::new_from_bernstein_polynomials);
+        //(The renderer takes its sample at a jitter inside the pixel, the map at its middle: nearly every pixel alike)
+        let far = cpu.iter().zip(&direct).filter(|((r, g, b), color)| r.abs_diff(color.red).max(g.abs_diff(color.green)).max(b.abs_diff(color.blue)) > 24).count();
+        assert!(far * 50 < cpu.len(), "the renderer's Julia set is the plain loop's: {far} of {} pixels differ", cpu.len());
+        if let Some(gpu) = &gpu {
+            assert_eq!(render(Some(gpu)), cpu);
+        }
+        //The app: into the Julia set of the center, and back to the view before
+        let mut app = MandelbrotApp::new(&crate::Config::default());
+        app.c.set_view(&crate::complex_plane::View::new(-0.75, 0.1, 0.01));
+        app.enter_julia((-0.75, 0.1));
+        assert_eq!(app.m.julia, Some((-0.75, 0.1)));
+        assert!((app.c.get_scale() - MAP_WIDTH / 2.5).abs() < 1e-12 && app.c.center().x.abs() < 1e-12, "the whole Julia set");
+        app.leave_julia();
+        assert_eq!(app.m.julia, None);
+        assert!((app.c.get_scale() - 0.01).abs() < 1e-12 && (app.c.center().x + 0.75).abs() < 1e-12, "back at the view before");
     }
 }

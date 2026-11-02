@@ -3419,3 +3419,16 @@ fn after_a_cancelled_dive_with_jorts_settings_and_the_gpu_the_same_place_can_be_
         assert!(drive_flight(&mut app, 120, |app| app.flight.is_none()), "attempt {attempt}: the second dive arrives: {:?}", app.log.iter().rev().take(4).collect::<Vec<_>>());
     }
 }
+
+#[test]
+fn the_julia_set_of_the_center_or_the_pinned_point_is_one_button_away_and_back() {
+    //Issue #202: the main view as a Julia set
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    assert!(controls_texts(&mut app).iter().any(|text| text == "Julia set of the center"));
+    app.julia_pinned = Some((-0.12, 0.74));
+    assert!(controls_texts(&mut app).iter().any(|text| text == "Julia set of the pinned point"));
+    app.enter_julia((-0.12, 0.74));
+    let texts = controls_texts(&mut app);
+    assert!(texts.iter().any(|text| text == "Back to the Mandelbrot set") && texts.iter().any(|text| text.starts_with("Julia set of c = -0.120000 + 0.740000i")));
+}

@@ -41,6 +41,7 @@ pub(super) struct NeighborhoodKey {
     orbit_radius: u64,
     coloring_function: usize,
     mapping: ColorChannelMapping,
+    julia: Option<(u64, u64)>,
 }
 
 impl NeighborhoodKey {
@@ -52,6 +53,7 @@ impl NeighborhoodKey {
             orbit_radius: m.orbit_radius.to_bits(),
             coloring_function: coloring_function as usize,
             mapping,
+            julia: m.julia.map(|(x, y)| (x.to_bits(), y.to_bits())),
         }
     }
 }

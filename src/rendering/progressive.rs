@@ -149,7 +149,8 @@ impl<'a> Render<'a> {
     /// CPU threads alone would take longer than `GPU_WORTHWHILE` for it, and not at all otherwise.
     #[must_use]
     pub fn gpu(mut self, gpu: Option<(&'a GpuIterator, Duration)>) -> Self {
-        self.gpu = gpu;
+        //(The GPU's loops are the Mandelbrot set's: a Julia set is rendered on the CPU, see `MandelbrotSet::julia`)
+        self.gpu = gpu.filter(|_| self.set.julia.is_none());
         self
     }
 
@@ -258,7 +259,8 @@ impl<'a> Render<'a> {
         let fast_gpu = fast_gpu && c.precision_steps() >= FAST_GPU_STEPS && width <= MAX_PIXEL && height <= MAX_PIXEL && c.rotation() == 0.0
             && sample_planes.is_none_or(|planes| planes.iter().all(|plane| plane.rotation() == 0.0));
         let math = if !fast_gpu { GpuMath::Exact } else if f32_gpu && c.precision_steps() >= F32_GPU_STEPS { GpuMath::Single } else { GpuMath::DoubleFloat };
-        debug_assert!(cpu_threads > 0 || gpu.is_some(), "a render without CPU threads needs the GPU");
+        //A render on the GPU only without its GPU (a Julia set, see `gpu`) gets the CPU threads after all
+        let cpu_threads = if gpu.is_none() && cpu_threads == 0 { render_thread_count() } else { cpu_threads };
         let own_gpu_samples = AtomicUsize::new(0);
         let gpu_samples = gpu_samples.unwrap_or(&own_gpu_samples);
         let (never_cancelled, own_counter) = (AtomicBool::new(false), AtomicUsize::new(0));
