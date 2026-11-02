@@ -3451,3 +3451,24 @@ fn the_back_button_closes_the_controls_of_a_narrow_screen_then_leaves_a_julia_se
     back(&mut app, 400.0);
     assert_eq!(app.m.julia, None, "then the Julia set is left");
 }
+
+#[test]
+fn a_view_of_a_julia_set_keeps_its_parameter_in_places_shared_text_and_images() {
+    //Issue #202: a saved place, a copied view and the metadata of a saved image know that they are of a Julia set
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    app.c.set_view(&crate::complex_plane::View::new(-0.5, 0.2, 0.3));
+    app.enter_julia((-0.8, 0.156));
+    let point = app.current_point(String::from("Dendrite"), String::new());
+    assert_eq!(point.location.julia, Some((-0.8, 0.156)));
+    let text = super::sharing::one_line(&point);
+    let (read, _) = crate::points_of_interest::parse(&text, "shared").unwrap();
+    assert_eq!(read.location.julia, Some((-0.8, 0.156)), "through the text of a place: {text}");
+    //Back in the Mandelbrot set, going to the shared view goes into the Julia set again (without a flight), and Back returns to the Mandelbrot view
+    app.leave_julia();
+    assert!(!crate::points_of_interest::to_json(&app.current_point(String::from("M"), String::new())).contains("julia"), "a Mandelbrot place has no parameter");
+    app.go_to_shared(&text);
+    assert_eq!(app.m.julia, Some((-0.8, 0.156)));
+    app.leave_julia();
+    assert!((app.c.get_scale() - 0.3).abs() < 1e-12, "back at the Mandelbrot view before");
+}

@@ -356,7 +356,7 @@ impl MandelbrotApp {
         PointOfInterest {
             name,
             description,
-            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations, rotation: self.c.rotation().to_degrees() },
+            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations, rotation: self.c.rotation().to_degrees(), julia: self.m.julia },
             appearance: Some(points_of_interest::Appearance {
                 coloring: Some(coloring),
                 color_channels: Some(self.p.color_channel_mapping),
@@ -400,7 +400,7 @@ impl MandelbrotApp {
 
     /// Flies from the current view to `point` with the flight controls, the colors going from the current ones to `destination_palette` (see `PointFlight::palettes`)
     pub(super) fn fly_to(&mut self, point: PointOfInterest, destination_palette: ColorCycle) {
-        //(Places are in the Mandelbrot set: a flight from a Julia set starts at the view before it)
+        //(Flights are in the Mandelbrot set: one from a Julia set starts at the view before it, and a place in a Julia set is gone to without a flight)
         self.back_to_the_mandelbrot_set();
         let center = self.c.center();
         let from = Camera { x: center.x, y: center.y, scale: self.c.get_scale() };
@@ -410,7 +410,7 @@ impl MandelbrotApp {
         if self.zoom_refused(&destination) {
             return; //Deeper than the zoom limit: no flight
         }
-        if self.pace == Pace::NoFlight {
+        if self.pace == Pace::NoFlight || point.location.julia.is_some() {
             self.m.palette = destination_palette;
             self.arrive_at(&point);
             return;
@@ -564,8 +564,19 @@ impl MandelbrotApp {
     /// Goes to `point`: its center, scale and maximum iterations are applied, and with `restore_appearance` also the coloring, color channels and color cycle saved in its file.
     /// Otherwise the current appearance, and the supersampling, stay as they are.
     fn arrive_at(&mut self, point: &PointOfInterest) {
-        //(A place is a view of the Mandelbrot set)
-        self.back_to_the_mandelbrot_set();
+        //A place in a Julia set (saved there, see `MandelbrotSet::julia`) goes into it; Back returns to the view of the Mandelbrot set before
+        match point.location.julia {
+            Some(c) => {
+                if self.m.julia.is_none() {
+                    self.mandelbrot_view = Some(self.c.get_view());
+                }
+                self.m.julia = Some(c);
+            }
+            None => {
+                self.m.julia = None;
+                self.mandelbrot_view = None;
+            }
+        }
         let location = &point.location;
         self.c.set_view(&View::new(location.real, location.imaginary, location.scale));
         self.c.set_rotation(location.rotation.to_radians());

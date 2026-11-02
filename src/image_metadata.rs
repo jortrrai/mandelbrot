@@ -43,7 +43,7 @@ pub fn view_of_texts(texts: &[(String, String)], file_name: &str) -> Result<Poin
     let (real, imaginary, scale) = parse_view(view).ok_or_else(|| format!("{file_name}: cannot read its view {view:?}"))?;
     let max_iterations = text("mandelbrot_set").and_then(|set| set.split(',').find_map(|part| part.trim().strip_prefix("max_iterations = ")?.trim().parse().ok())).unwrap_or(1000);
     let appearance = text("color_channel_mapping").and_then(|mapping| mapping.trim().parse().ok()).map(|mapping| Appearance { color_channels: Some(mapping), ..Appearance::default() });
-    Ok(PointOfInterest { name, description: String::new(), location: Location { real, imaginary, scale, max_iterations, rotation: 0.0 }, appearance, file_name: file_name.to_string() })
+    Ok(PointOfInterest { name, description: String::new(), location: Location { real, imaginary, scale, max_iterations, rotation: 0.0, julia: None }, appearance, file_name: file_name.to_string() })
 }
 
 /// The center and scale of the text of a view: `z = -0.75 - 0i, scale = 1` (see `complex_plane::View`'s `Debug`)
@@ -79,7 +79,7 @@ mod tests {
         let point = PointOfInterest {
             name: String::from("x"),
             description: String::new(),
-            location: Location { real: -0.749_810_000_000_000_1, imaginary: 0.1, scale: 6.400_000_000_000_002e-5, max_iterations: 5000, rotation: 0.0 },
+            location: Location { real: -0.749_810_000_000_000_1, imaginary: 0.1, scale: 6.400_000_000_000_002e-5, max_iterations: 5000, rotation: 0.0, julia: None },
             appearance: Some(Appearance { iteration_divide: Some(0.113), color_offset: Some(278.0), ..Appearance::default() }),
             file_name: String::new(),
         };
