@@ -204,6 +204,11 @@ impl MandelbrotApp {
         while let Ok(notice) = self.notices.try_recv() {
             self.log(notice);
         }
+        //(Its thread sets `ended` before it sends its message, so the message is in the log by now)
+        if self.image_save.as_ref().is_some_and(|save| save.ended.load(Ordering::Relaxed)) {
+            self.image_save = None;
+            Self::release_free_memory();
+        }
         if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
             self.gpu_opening = None;
             match opened {
@@ -279,10 +284,14 @@ impl MandelbrotApp {
                     self.landing_blur = false; //The render of the place is finished: sharp
                     self.job = None;
                     self.flight_job = false;
+                    self.flight_frame_job = false;
                     self.limit_pending = false;
                     //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
                     self.m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring, ..m };
                     self.buffer_is_complete = completed && self.settle.is_none(); //A render during a gesture has only the first layer
+                    if self.buffer_is_complete && self.flight.is_none() {
+                        Self::release_free_memory(); //(Not for every frame of a flight)
+                    }
                     self.layer_shown |= completed;
                     if self.progress.take().is_some() {
                         if let Some(bars) = &mut self.bars {
@@ -300,7 +309,7 @@ impl MandelbrotApp {
                         self.c = c; //During a flight the camera moves on while a render runs (best effort), so it is not set back to the view of the render
                     }
                     self.texture_outdated = true;
-                    if !self.gesture_active && !self.color_cycling && !message.is_empty() { //(Not every frame of a gesture or step of the color cycling)
+                    if !self.gesture_active && !self.cycling() && !message.is_empty() { //(Not every frame of a gesture or step of the color cycling)
                         let description = self.view_description();
                         self.log(format!("{message} in {:.2} s: {description}", elapsed.as_secs_f64()));
                     }
@@ -332,6 +341,9 @@ impl MandelbrotApp {
     pub(super) fn settle_gesture(&mut self, ctx: &egui::Context) {
         if self.flight.is_some() {
             return; //A flight renders its destination with full quality when it arrives, see `points::fly_at`
+        }
+        if self.cycling() && !self.gesture_active {
+            return; //Every step of the cycling is a one-sample frame like those of a gesture; the full-quality render follows when it stops, see `cycle::toggle_color_cycle`
         }
         let Some((_, changed, _)) = &self.settle else { return };
         if let (true, Some(remaining)) = (self.gesture_active, GESTURE_PAUSE.checked_sub(changed.elapsed())) {
@@ -418,6 +430,8 @@ impl MandelbrotApp {
         let preview = (!layer_on_screen && !levels.is_empty() && expected_first_layer.is_none_or(|expected| expected > PREVIEW_WORTHWHILE)).then_some(PREVIEW_WORTHWHILE);
         //Frames that move (a drag, a flight) may use the f32 loop; the image the view settles on never does
         let (gpu, fast_gpu, f32_frames) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu, self.f32_frames && during_gesture);
+        //The samples of pixels that a move takes out of the view are kept within the neighborhood, so a move back continues them (see `SampleState::keep_around`)
+        let keep_around = self.neighborhood_margin;
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let pixels_done = Arc::new(AtomicUsize::new(0));
@@ -438,7 +452,7 @@ impl MandelbrotApp {
                         let _ = sender.send(JobMessage::Limit { max_iterations: result.limit });
                         m.max_iterations = result.limit;
                         message = format!("{message} (auto iterations: limit {}, {} rounds, {:?}, {:.2} s)", result.limit, result.rounds.len(), result.stop, started.elapsed().as_secs_f64());
-                        println!("{result:?}");
+                        if super::cli::quiet() { eprintln!("{result:?}") } else { println!("{result:?}") }
                     }
                     None => {
                         let _ = samples_sender.send(samples);
@@ -447,6 +461,10 @@ impl MandelbrotApp {
                     }
                 }
             }
+            //A frame of a drag that keeps exact samples (every layer of the view it moves) computes its exposed strip with them instead of the f32 loop: samples of
+            //the f32 loop make a render start over, so the frame would discard every layer, and the render the drag settles on would discard the frame
+            samples.keep_around(keep_around);
+            let f32_frames = f32_frames && !samples.would_keep(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), false);
             let kept = samples.prepare_for(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), f32_frames && fast_gpu && gpu.is_some());
             let whole = kept == 0;
             if kept > 0 {
@@ -462,7 +480,8 @@ impl MandelbrotApp {
                     return;
                 }
                 let layer_time = layer_started.elapsed();
-                println!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
+                let text = format!("Rendered supersampling layer {pass} of {supersampling_amount} in {:.3} s", layer_time.as_secs_f64());
+                if super::cli::quiet() { eprintln!("{text}") } else { println!("{text}") }
                 let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(colors), plane: c.clone(), pass, total: supersampling_amount, layer_time, whole });
                 layer_started = Instant::now();
             });
@@ -475,8 +494,9 @@ impl MandelbrotApp {
         self.flight_queue.clear();
         self.job = Some(receiver);
         self.flight_job = false;
+        self.flight_frame_job = matches!(kind, RenderKind::FlightFrame);
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });
-        if !self.gesture_active && !self.color_cycling {
+        if !self.gesture_active && !self.cycling() {
             self.log("Rendering...");
         }
     }

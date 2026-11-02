@@ -14,18 +14,33 @@
 mod actions;
 mod benchmark;
 mod blur;
+mod chunks;
+mod music;
 mod controls;
+mod cli;
+#[cfg(not(target_os = "android"))]
+mod youtube;
+pub use cli::command_line;
 mod cycle;
+mod depth;
+mod dive_keyframes;
+mod export;
 mod fit;
 mod flight;
+mod flight_files;
 mod flight_job;
 mod history;
+mod julia;
 mod neighborhood;
 mod pointer;
 mod points;
+mod queue;
 mod render_job;
 mod save_size;
+mod sequence;
 mod settings;
+mod sharing;
+mod songs;
 pub use settings::settings_path;
 mod status;
 mod temporal;
@@ -58,6 +73,9 @@ use crate::rendering::{self};
 use crate::resolution::{self, Resolution};
 use crate::thumbnails::{self, Lru};
 use crate::{ColoringFunction, Config, InteractionVariables, COLORING_FUNCTION, COLOR_CHANNEL_MAPPING};
+
+/// Below this width in points the window counts as a phone screen: the controls slide in from a button (issue #219)
+const NARROW_SCREEN: f32 = 700.0;
 
 /// Width in points of the right side panel, used to size the initial window
 pub const SIDE_PANEL_WIDTH: f32 = 380.0;
@@ -124,6 +142,8 @@ pub struct MandelbrotApp {
     fit: Fit,
     /// The size of the saved image, see `save_size`
     save_size: SaveSize,
+    /// The save of an image that is running, if any (see `export`)
+    image_save: Option<export::ImageSave>,
     /// Edited values of the max iterations field, applied when editing ends
     max_iterations_input: u32,
     /// Whether the maximum iterations are chosen automatically for the zoom of every render, see `auto_iterations`
@@ -185,18 +205,86 @@ pub struct MandelbrotApp {
     video_fps: u32,
     /// The speed of a video in percent of the flight's, its file format, and whether its frames are also written as PNG files, see `video`
     video_speed: u16,
+    /// Whether the speed of a video is set by a length instead (*Fit to length*), and that length as typed in the hours, minutes and seconds boxes (#179)
+    video_fit_length: bool,
+    video_length: [String; 3],
     video_quality: video::VideoQuality,
     video_playback: video::Playback,
+    /// *Max bitrate*: whether the video's bitrate is limited, and the limit in megabits per second (issue #224)
+    video_max_bitrate: bool,
+    video_max_mbps: u32,
     video_pngs: bool,
     /// Whether the frames of a video are blended over time, see `video` and `temporal`
     video_blend: bool,
-    /// How many frames of a video render at once, see `video`
-    video_frames_at_once: usize,
+    /// Motion blur of videos: the shutter angle in degrees (see `video::sample_times`)
+    video_shutter: f64,
+    /// Whether dives into a fixed center are composed from keyframe images (see `dive_keyframes`)
+    video_keyframe_dives: bool,
+    /// A fixed number of frames a video renders at once, for measurements (the window always lets the job choose, see `video::FrameScheduler`)
+    video_at_once_fixed: Option<usize>,
+    /// The saved flights (see `flight_files`): their folder (`flights`), the flights read from it (once the controls are first shown), the one chosen in the
+    /// list, and the name the last flight is saved under
+    flights_folder: std::path::PathBuf,
+    saved_flights: Vec<flight_files::SavedFlight>,
+    saved_flights_loaded: bool,
+    selected_flight: Option<usize>,
+    flight_name_input: String,
+    /// The render queue (see `queue`): the waiting videos, the one under way, and whether the queue runs
+    video_queue: Vec<video::VideoSpec>,
+    queue_current: Option<video::VideoSpec>,
+    queue_running: bool,
+    /// Whether a video with a GPU has a renderer of whole frames on the GPU alone (on; off only for measurements), see `video`
+    video_gpu_renderer: bool,
+    /// The frames of a chunk of a video, for tests (else `chunks::CHUNK_SECONDS` of video)
+    video_chunk_frames: Option<usize>,
+    /// The unfinished videos of the videos folder (name, frames done, frames), read when the video controls are shown and again when a video ends
+    unfinished_videos: Option<Vec<(String, usize, usize)>>,
+    /// The unfinished video whose *Delete* asks to be confirmed (see `video::unfinished_ui`)
+    confirm_delete: Option<String>,
+    /// The text of the field to paste a view into (see `sharing`)
+    shared_view_input: String,
+    /// Whether the depth slider is being dragged, and whether the mouse keeps the center of the view (see `depth`)
+    depth_dragging: bool,
+    lock_center: bool,
+    /// Whether the orbit of the point under the mouse is drawn, and the Julia map shown, its pinned point and its texture (see `julia`, issue #202)
+    show_orbit: bool,
+    show_julia: bool,
+    julia_pinned: Option<(f64, f64)>,
+    /// In a Julia set (`m.julia`, issue #202): the view of the Mandelbrot set to go back to
+    mandelbrot_view: Option<crate::complex_plane::View>,
+    /// The Julia map shown: what it was rendered for, its texture, and whether all its layers are done; and the render of its next layers (see `julia`)
+    julia_map: Option<(julia::MapKey, egui::TextureHandle, bool)>,
+    julia_map_job: Option<julia::MapJob>,
+    /// On a narrow screen: whether the controls are shown over the image (see `ui`)
+    show_controls: bool,
+    /// Whether the mini-map shows in the Current view box, and its texture, the colors it was rendered with and its plane (see `status::minimap_ui`)
+    show_minimap: bool,
+    minimap: Option<(status::MinimapColors, egui::TextureHandle, ComplexPlane)>,
+    /// Whether the rotation is shown and typed in degrees (or in radians), see `depth::rotation_controls`
+    rotation_in_degrees: bool,
+    /// The angle the rotation slider was last set to, in radians: at its right end (180°) it shows 180° although the view keeps the same angle as -180°
+    rotation_slider: f64,
+    /// The center the depth control keeps, exactly (see `depth::exact_center`)
+    depth_center: Option<crate::complex::Complex>,
+    /// The keyframes of the sequence being made, and the times of its transitions as typed (see `sequence`)
+    sequence_keyframes: Vec<sequence::Keyframe>,
+    sequence_seconds: Vec<String>,
+    /// The song to fit a video to, the search under way, and the recordings found (see `songs`)
+    song_input: String,
+    song_search: Option<std::sync::mpsc::Receiver<Result<Vec<songs::Recording>, String>>>,
+    song_results: Vec<songs::Recording>,
+    /// The audio track a video follows (see `music`): its path, whether videos follow it, how strongly, and its length (read once per path)
+    music_path: String,
+    follow_music: bool,
+    music_strength: f64,
+    music_length: Option<(String, Option<std::time::Duration>)>,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
     flight: Option<points::PointFlight>,
     /// Whether the running job renders the frames of the flight (see `flight_job`), and the time between two frames of the screen, which the job keeps to
     flight_job: bool,
+    /// Whether the running job renders a frame of a flight in the window (best effort), not a render from before the flight (see `points::fly_at`)
+    flight_frame_job: bool,
     frame_interval: Duration,
     /// How complete the frames of a flight have to be (best effort by default), see `flight::FlightRendering`
     flight_rendering: flight::FlightRendering,
@@ -209,6 +297,10 @@ pub struct MandelbrotApp {
     view_inputs: [String; 3],
     /// Messages shown to the user in the status box
     log: Vec<String>,
+    /// When every message of `log` was logged (issue #204)
+    log_times: Vec<chrono::DateTime<chrono::Local>>,
+    /// The lowest level of the messages that the status log shows and prints (issue #205, see `status::LogLevel`)
+    log_level: status::LogLevel,
     texture: Option<TextureHandle>,
     texture_outdated: bool,
     /// The neighborhood of the view, drawn behind the image, and the job that renders it, see `neighborhood`; whether it is rendered at all
@@ -224,6 +316,10 @@ pub struct MandelbrotApp {
     /// Whether the colors cycle, how fast (steps of the palette per second), and when the offset moved last, see `cycle`
     color_cycling: bool,
     cycle_rate: f64,
+    /// The cycling of the iteration divide, if it runs: the divide it started at and how far through a swing it is (see `cycle`, issue #203)
+    divide_cycle: Option<(f64, f64)>,
+    /// The time of a whole swing of the divide, in seconds
+    divide_period: f64,
     cycle_last: Option<std::time::Instant>,
     /// How many frames of a flight the flight job may render ahead of the one on the screen (0: none, it renders one frame at a time as before), see `flight_job`
     frames_ahead: usize,
@@ -322,6 +418,7 @@ impl MandelbrotApp {
             history: ViewHistory::default(),
             fit: Fit::new(config.fit_window),
             save_size,
+            image_save: None,
             points: Vec::new(),
             thumbs: Lru::new(thumbnails::MAX_CACHED),
             thumb_job: None,
@@ -352,14 +449,57 @@ impl MandelbrotApp {
             video_job: None,
             video_fps: 30,
             video_speed: 100,
+            video_fit_length: false,
+            video_length: [String::new(), String::from("3"), String::from("20")],
             video_quality: video::VideoQuality::VeryHigh,
-            video_playback: video::Playback::Computers,
+            video_playback: video::Playback::Maximum,
+            video_max_bitrate: false,
+            video_max_mbps: video::DEFAULT_MAX_MBPS,
             video_pngs: false,
             video_blend: false,
-            video_frames_at_once: 2,
+            video_shutter: 0.0,
+            video_keyframe_dives: false,
+            video_at_once_fixed: None,
+            flights_folder: std::path::PathBuf::from("flights"),
+            saved_flights: Vec::new(),
+            saved_flights_loaded: false,
+            selected_flight: None,
+            flight_name_input: String::new(),
+            video_queue: Vec::new(),
+            queue_current: None,
+            queue_running: false,
+            video_gpu_renderer: true,
+            video_chunk_frames: None,
+            unfinished_videos: None,
+            confirm_delete: None,
+            shared_view_input: String::new(),
+            depth_dragging: false,
+            show_orbit: false,
+            show_julia: false,
+            julia_pinned: None,
+            mandelbrot_view: None,
+            julia_map: None,
+            julia_map_job: None,
+            show_controls: false,
+            show_minimap: false,
+            minimap: None,
+            rotation_in_degrees: true,
+            rotation_slider: 0.0,
+            lock_center: false,
+            depth_center: None,
+            sequence_keyframes: Vec::new(),
+            sequence_seconds: Vec::new(),
+            song_input: String::new(),
+            song_search: None,
+            song_results: Vec::new(),
+            music_path: String::new(),
+            follow_music: false,
+            music_strength: 0.5,
+            music_length: None,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
             flight_job: false,
+            flight_frame_job: false,
             frame_interval: Duration::from_secs_f64(1.0 / 60.0),
             flight_rendering: flight::FlightRendering::BestEffort,
             immersion: false,
@@ -367,6 +507,8 @@ impl MandelbrotApp {
             frame_accepted: false,
             view_inputs: [String::new(), String::new(), String::new()],
             log: Vec::new(),
+            log_times: Vec::new(),
+            log_level: status::LogLevel::Info,
             texture: None,
             texture_outdated: true,
             neighborhood: None,
@@ -377,6 +519,8 @@ impl MandelbrotApp {
             auto_blur: true,
             color_cycling: false,
             cycle_rate: cycle::CYCLE_RATE,
+            divide_cycle: None,
+            divide_period: cycle::DIVIDE_PERIOD,
             cycle_last: None,
             frames_ahead: 2,
             flight_queue: std::collections::VecDeque::new(),
@@ -457,10 +601,27 @@ impl MandelbrotApp {
         }
     }
 
+    /// Gives the memory the program freed back to the system now, after a video, an image save or a finished render: the allocator (mimalloc, see `ALLOCATOR`)
+    /// would otherwise wait for its next allocations, which an idle window hardly makes
+    pub(super) fn release_free_memory() {
+        #[cfg(not(target_os = "android"))]
+        // SAFETY: mi_collect only returns free memory of the allocator to the system; it touches no memory in use
+        unsafe {
+            libmimalloc_sys::mi_collect(true);
+        }
+    }
+
+    /// Adds `message` to the status log with the time, and prints it with the time if its level is shown (see `status::LogLevel`)
     pub(super) fn log(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        println!("{message}");
+        let (message, now) = (message.into(), chrono::Local::now());
+        let level = status::LogLevel::of(&message);
+        if level >= self.log_level {
+            let line = format!("[{}] {} {message}", now.format("%H:%M:%S"), level.tag());
+            //(On the command line stdout is for its JSON: the log goes to stderr there, see `cli`)
+            if cli::quiet() { eprintln!("{line}") } else { println!("{line}") }
+        }
         self.log.push(message);
+        self.log_times.push(now);
     }
 
     pub(super) fn view_description(&self) -> String {
@@ -524,7 +685,7 @@ impl MandelbrotApp {
         let target = transform::rect_of(self.drawn_fraction(), rect);
         //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
         self.draw_neighborhood(&ui.painter_at(rect), rect);
-        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.color_cycling || self.landing_blur)) || self.quality_blur) {
+        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.color_cycling || self.divide_cycle.is_some() || self.landing_blur)) || self.quality_blur) {
             Some(blur) => {
                 let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
@@ -538,6 +699,7 @@ impl MandelbrotApp {
         if self.show_points {
             points::draw_markers(&ui.painter_at(rect), &points::marker_positions(&self.points, self.displayed_plane(), rect));
         }
+        self.julia_overlays(ui, rect);
         self.handle_image_pointer(ui, &response, size);
         available
     }
@@ -630,6 +792,17 @@ impl MandelbrotApp {
     }
 }
 
+impl MandelbrotApp {
+    /// The Back button of a phone (and of a mouse): closes the controls of a narrow screen, or leaves a Julia set
+    fn back_button(&mut self, narrow: bool) {
+        if narrow && self.show_controls {
+            self.show_controls = false;
+        } else {
+            self.leave_julia();
+        }
+    }
+}
+
 impl eframe::App for MandelbrotApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -637,16 +810,34 @@ impl eframe::App for MandelbrotApp {
         self.poll_thumbnails(&ctx);
         self.poll_neighborhood(&ctx);
         self.poll_video(&ctx);
+        self.run_queue();
+        self.open_dropped_images(&ctx);
+        self.poll_song_search(&ctx);
         self.cycle_colors(&ctx, std::time::Instant::now());
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(100)); //Keep polling for the finished job
         }
         self.update_texture(&ctx);
 
-        egui::Panel::right("side_panel").default_size(SIDE_PANEL_WIDTH).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
+        //A narrow screen (a phone, issue #219): the image fills it, and the controls slide in from a button
+        let narrow = ui.available_rect_before_wrap().width() < NARROW_SCREEN;
+        if ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
+            self.back_button(narrow);
+        }
+        if !narrow || self.show_controls {
+            egui::Panel::right("side_panel").default_size(if narrow { ui.available_rect_before_wrap().width() * 0.85 } else { SIDE_PANEL_WIDTH }).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
+        }
 
         let mut fit_area = egui::Vec2::ZERO;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| fit_area = self.image_ui(ui));
+        if narrow {
+            egui::Area::new(egui::Id::unique("controls_button")).anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0)).show(&ctx, |ui| {
+                let label = if self.show_controls { "✕ Close" } else { "☰ Controls" };
+                if ui.add(egui::Button::new(egui::RichText::new(label).size(20.0)).min_size(egui::vec2(120.0, 48.0))).clicked() {
+                    self.show_controls = !self.show_controls;
+                }
+            });
+        }
         self.fly(&ctx);
         self.keep_settings(std::time::Instant::now());
         self.step_benchmark(&ctx);

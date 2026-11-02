@@ -4,9 +4,9 @@
 //! A background job puts the camera at `n / fps × speed` along the flight path for frame `n` (*Video speed*: 100% is the speed of the flight, 10% a ten times
 //! slower video), renders it at the saved image size and quality (the GPU helps as in the window), and hands it on: one thread writes it as `frame-00001.png`, ...
 //! to a folder of `saved/` (with *PNG frames*, off by default), another pipes it to `ffmpeg`, when it is installed, which encodes the video in the chosen
-//! `VideoQuality` for the chosen `Playback`. Several frames render at once (`FRAMES_AT_ONCE`), and the renderers go on while the writers write the last
+//! `VideoQuality` for the chosen `Playback`. Several frames render at once, as many as keep the CPU busy (`FrameScheduler`), and the renderers go on while the writers write the last
 //! ones (at most `FRAMES_WAITING` frames wait), so neither the CPU threads nor the GPU wait for the encoder or for the end of a layer. The iteration limit follows the zoom like a flight with auto iterations: from the limit at the start to the limit of
-//! the place. Frames are sharp (no motion blur). An interrupted video keeps the frames written.
+//! the place. Frames are sharp (no motion blur). A video is written in chunks that survive any interruption and can be resumed (see `chunks`).
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
@@ -31,13 +31,145 @@ pub(super) const SPEEDS: std::ops::RangeInclusive<u16> = 1..=400;
 /// How many rendered frames may wait for the writers of the video (the PNG frames and ffmpeg) before the renderers wait for them
 const FRAMES_WAITING: usize = 2;
 
-/// The range of the frames a video renders at once, see `MandelbrotApp::video_frames_at_once`
-pub(super) const FRAMES_AT_ONCE: std::ops::RangeInclusive<usize> = 1..=4;
+/// The most frames a video renders at once: each takes all the CPU threads and the GPU, and the job adds frames while the CPU is not yet busy (see `FrameScheduler`)
+const MAX_AT_ONCE: usize = 8;
+
+/// How much faster a video must render with one more frame at once to keep it (1.03: 3% more frames per second); measured differences below that are noise
+const WORTH_ONE_MORE: f64 = 1.03;
+
+/// How many measurements the job keeps the number of frames at once after one more did not pay, before it tries again (the frames get dearer along a zoom,
+/// which can change what pays)
+const HOLD_WINDOWS: u32 = 8;
+
+/// The shortest measurement of the frame rate (and at least twice as many frames as are under way, so every renderer finishes some)
+const MIN_WINDOW: Duration = Duration::from_secs(2);
+
+/// The memory of a frame under way, per pixel: its samples (`rendering::SampleState`, about 30 bytes) and its colors on the way to the file, with room to spare
+const BYTES_PER_PIXEL_UNDER_WAY: u64 = 48;
+
+/// How many frames of `pixels` the job may render at once: at most `MAX_AT_ONCE`, and together at most a third of the memory that is available (on systems
+/// where that is not known, of 4 GB)
+fn frames_memory_allows(pixels: usize) -> usize {
+    let per_frame = (pixels as u64 * BYTES_PER_PIXEL_UNDER_WAY).max(1);
+    //(Where the system does not say, as much as a modest computer has free: 4 GB)
+    let available = available_memory().unwrap_or(4 << 30);
+    let allowed = usize::try_from(available / 3 / per_frame).unwrap_or(MAX_AT_ONCE);
+    allowed.clamp(1, MAX_AT_ONCE)
+}
+
+/// The memory that is available for new work, in bytes (`MemAvailable` of `/proc/meminfo`), where the system says it
+fn available_memory() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|line| line.starts_with("MemAvailable:"))?;
+    line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kilobytes| kilobytes * 1024)
+}
+
+/// How many frames of a video render at the same time, chosen by the job itself (issue #174), and the frames finished so far, which it measures that by. Every
+/// frame under way takes all the CPU threads and hands rows to the GPU, so one fills the gaps another leaves (the end of a layer, the small passes of adaptive
+/// supersampling, the GPU's batches). More is not always faster: frames that share the threads also slow each other down, so the job keeps what is measured
+/// to be fastest (see `Climber`)
+pub(super) struct FrameScheduler {
+    /// The frames that may be under way, and those that are
+    allowed: AtomicUsize,
+    under_way: std::sync::Mutex<usize>,
+    free: std::sync::Condvar,
+    /// The frames finished by the renderers
+    pub(super) finished: AtomicUsize,
+    /// The CPU use of the render threads in the last measurement, in percent, for the progress line
+    pub(super) cpu_percent: AtomicUsize,
+}
+
+impl FrameScheduler {
+    fn new(start: usize) -> FrameScheduler {
+        FrameScheduler { allowed: AtomicUsize::new(start), under_way: std::sync::Mutex::new(0), free: std::sync::Condvar::new(), finished: AtomicUsize::new(0), cpu_percent: AtomicUsize::new(0) }
+    }
+
+    /// The frames that may be under way now
+    pub(super) fn allowed(&self) -> usize {
+        self.allowed.load(Ordering::Relaxed)
+    }
+
+    fn set_allowed(&self, allowed: usize) {
+        self.allowed.store(allowed.max(1), Ordering::Relaxed);
+        self.free.notify_all();
+    }
+
+    /// Waits until another frame may start (or `cancel` is set: then false)
+    fn start_frame(&self, cancel: &AtomicBool) -> bool {
+        let mut under_way = self.under_way.lock().unwrap();
+        while *under_way >= self.allowed() {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            under_way = self.free.wait_timeout(under_way, Duration::from_millis(50)).unwrap().0;
+        }
+        *under_way += 1;
+        true
+    }
+
+    /// The renderer of a frame stops (`rendered`: with the frame finished): another frame may start
+    fn finish_frame(&self, rendered: bool) {
+        if rendered {
+            self.finished.fetch_add(1, Ordering::Relaxed);
+        }
+        *self.under_way.lock().unwrap() -= 1;
+        self.free.notify_all();
+    }
+}
+
+/// Finds the number of frames at once that renders fastest, by trying one more and keeping it when the frame rate rises by `WORTH_ONE_MORE` (hill climbing).
+/// After one more did not pay it waits `HOLD_WINDOWS` measurements, measures again where it is, and tries again
+struct Climber {
+    current: usize,
+    most: usize,
+    /// The frame rate at `current`, the number being tried, and the measurements left before the next try
+    rate: Option<f64>,
+    trying: Option<usize>,
+    hold: u32,
+}
+
+impl Climber {
+    fn new(start: usize, most: usize) -> Climber {
+        Climber { current: start.clamp(1, most.max(1)), most: most.max(1), rate: None, trying: None, hold: 0 }
+    }
+
+    /// Takes the frame rate measured with the number this returned last (`current` at first), and returns the number of frames at once for the next measurement
+    fn measured(&mut self, rate: f64) -> usize {
+        match self.trying.take() {
+            Some(more) if rate > self.rate.unwrap_or(0.0) * WORTH_ONE_MORE => {
+                (self.current, self.rate) = (more, Some(rate)); //It pays: keep it, and try one more at once
+                self.try_one_more()
+            }
+            Some(_) => {
+                self.hold = HOLD_WINDOWS; //It does not: back to where it was, for a while
+                self.rate = None;
+                self.current
+            }
+            None if self.hold > 0 => {
+                self.hold -= 1;
+                self.current
+            }
+            None => {
+                self.rate = Some(rate);
+                self.try_one_more()
+            }
+        }
+    }
+
+    fn try_one_more(&mut self) -> usize {
+        if self.current < self.most {
+            self.trying = Some(self.current + 1);
+            self.current + 1
+        } else {
+            self.current
+        }
+    }
+}
 
 /// The quality of the video file: how much of the rendered detail the encoder keeps. The tiers keep a fixed quality (the encoder's quantizer), so a busy view
 /// gets the bits it needs and a calm one stays small. Measured on 60 frames of a detailed 1080p zoom at 60 FPS (the mean error of a color channel, in levels of
 /// 255, on the GPU's encoder with full color): High 3.7, Very High 2.7, Ultra High 1.9, Near Lossless 0.9
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum VideoQuality {
     High,
     VeryHigh,
@@ -76,10 +208,10 @@ impl VideoQuality {
     const fn bits_per_pixel(self, playback: Playback) -> f64 {
         match (self, playback) {
             (VideoQuality::Lossless, _) => 8.2,
-            (VideoQuality::High, Playback::Computers) => 0.65,
-            (VideoQuality::VeryHigh, Playback::Computers) => 1.1,
-            (VideoQuality::UltraHigh, Playback::Computers) => 1.75,
-            (VideoQuality::NearLossless, Playback::Computers) => 3.4,
+            (VideoQuality::High, Playback::Maximum) => 0.65,
+            (VideoQuality::VeryHigh, Playback::Maximum) => 1.1,
+            (VideoQuality::UltraHigh, Playback::Maximum) => 1.75,
+            (VideoQuality::NearLossless, Playback::Maximum) => 3.4,
             (VideoQuality::High, _) => 0.57,
             (VideoQuality::VeryHigh, _) => 0.9,
             (VideoQuality::UltraHigh, _) => 1.3,
@@ -88,45 +220,61 @@ impl VideoQuality {
     }
 }
 
-/// Where the video has to play, which decides its color resolution and codec (lossless videos are always FFV1)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The format of the video: its codec, bit depth and color resolution (lossless videos are always FFV1)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Playback {
     /// HEVC (on an NVIDIA GPU's encoder; H.264 on the CPU otherwise) in 10 bits with the full color resolution (4:4:4): the best colors; computers play it
     /// (VLC, most players), phones and TVs do not
-    Computers,
+    Maximum,
     /// HEVC Main 10 (10 bits, half the color resolution, 4:2:0), which phones, TVs and browsers decode in hardware. Detail of single pixels in strong colors
     /// gets softer
-    Phones,
+    HighQuality,
     /// H.264 in 8 bits with half the color resolution: plays on anything, with the softest colors
-    Everywhere,
+    MostCompatible,
 }
 
 impl Playback {
     /// Every choice, in the order of the list (the default first)
-    pub(super) const ALL: [Playback; 3] = [Playback::Computers, Playback::Phones, Playback::Everywhere];
+    pub(super) const ALL: [Playback; 3] = [Playback::Maximum, Playback::HighQuality, Playback::MostCompatible];
 
     /// The name in the list
     pub(super) const fn name(self) -> &'static str {
         match self {
-            Playback::Computers => "Computers",
-            Playback::Phones => "Phones and TVs",
-            Playback::Everywhere => "Everywhere",
+            Playback::Maximum => "Maximum",
+            Playback::HighQuality => "High quality",
+            Playback::MostCompatible => "Most compatible",
         }
+    }
+
+    /// The choice of `name`, also by the names it had before (issue #173: "Computers", "Phones and TVs", "Everywhere"), so saved settings keep their choice
+    pub(super) fn of_name(name: &str) -> Option<Playback> {
+        let name = match name {
+            "Computers" => "Maximum",
+            "Phones and TVs" => "High quality",
+            "Everywhere" => "Most compatible",
+            name => name,
+        };
+        Playback::ALL.into_iter().find(|playback| playback.name() == name)
     }
 }
 
 /// The extension of the file of a video of `quality`
-const fn extension(quality: VideoQuality) -> &'static str {
+pub(super) const fn extension(quality: VideoQuality) -> &'static str {
     match quality {
         VideoQuality::Lossless => "mkv",
         _ => "mp4",
     }
 }
 
-/// The arguments of ffmpeg that encode RGB frames at `fps` in `quality` for `playback` (with `nvenc`: on the GPU's HEVC encoder). The colors are converted
+/// The most bits per second a video takes by default when *Max bitrate* is on, and with the *YouTube 4K60* button (issue #224: 150 and 180 Mbit/s copies of a
+/// 528 Mbit/s 4K60 video both played smoothly on Jort's PC, without a visible difference)
+pub(super) const DEFAULT_MAX_MBPS: u32 = 180;
+
+/// The arguments of ffmpeg that encode RGB frames at `fps` in `quality` for `playback` (with `nvenc`: on the GPU's HEVC encoder), at most `max_mbps` megabits
+/// per second on average over half a second when given (the quality level stays the target; only busier frames than the limit allows get fewer bits). The colors are converted
 /// with the BT.709 matrix and tagged so, so players show them as they were rendered; half-resolution color is made with a sharp filter. A keyframe every
 /// half second, B-frames and the index at the start of the file, as video sites ask for
-fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32) -> Vec<String> {
+fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32, max_mbps: Option<u32>) -> Vec<String> {
     const FULL: &str = "scale=out_color_matrix=bt709:out_range=tv,format=";
     const HALF: &str = "scale=out_color_matrix=bt709:out_range=tv:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=";
     if quality == VideoQuality::Lossless {
@@ -136,19 +284,28 @@ fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32) -
     let nvenc_hevc = |format: &str| vec![format.to_string(), "-c:v".into(), "hevc_nvenc".into(), "-preset".into(), "p7".into(), "-tune".into(), "hq".into(), "-rc".into(), "constqp".into(), "-qp".into(), qp.into(), "-tag:v".into(), "hvc1".into()];
     let mut arguments = vec![String::from("-vf")];
     arguments.extend(match playback {
-        Playback::Computers if nvenc => nvenc_hevc(&format!("{FULL}yuv444p16le")),
-        Playback::Computers => vec![format!("{FULL}yuv444p10le"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into()],
-        Playback::Phones if nvenc => [nvenc_hevc(&format!("{HALF}p010le")), vec!["-profile:v".into(), "main10".into()]].concat(),
-        Playback::Phones => vec![format!("{HALF}yuv420p10le"), "-c:v".into(), "libx265".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-tag:v".into(), "hvc1".into(), "-x265-params".into(), "log-level=error".into()],
-        Playback::Everywhere => vec![format!("{HALF}yuv420p"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-profile:v".into(), "high".into()],
+        Playback::Maximum if nvenc => nvenc_hevc(&format!("{FULL}yuv444p16le")),
+        Playback::Maximum => vec![format!("{FULL}yuv444p10le"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into()],
+        Playback::HighQuality if nvenc => [nvenc_hevc(&format!("{HALF}p010le")), vec!["-profile:v".into(), "main10".into()]].concat(),
+        Playback::HighQuality => vec![format!("{HALF}yuv420p10le"), "-c:v".into(), "libx265".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-tag:v".into(), "hvc1".into(), "-x265-params".into(), "log-level=error".into()],
+        Playback::MostCompatible => vec![format!("{HALF}yuv420p"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-profile:v".into(), "high".into()],
     });
+    if let Some(mbps) = max_mbps.filter(|mbps| *mbps > 0) {
+        //A limit: the GPU's encoder aims at the same quality with a variable rate under the limit; the CPU's keep their quality factor within a buffer. The
+        //buffer of half a second keeps peaks near the limit (measured on NVENC: about 30% over it in the busiest second, see #224)
+        let (rate, buffer) = (format!("{mbps}M"), format!("{}k", mbps * 500));
+        if let Some(at) = arguments.iter().position(|argument| argument == "constqp") {
+            arguments.splice(at..at + 3, ["vbr", "-cq", qp, "-b:v", &rate].map(String::from));
+        }
+        arguments.extend(["-maxrate".into(), rate, "-bufsize".into(), buffer]);
+    }
     arguments.extend(["-g".into(), (fps / 2).max(1).to_string(), "-bf".into(), "2".into(), "-movflags".into(), "+faststart".into()]);
     arguments.extend(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"].map(String::from));
     arguments
 }
 
 /// The estimate of a video shown next to its controls: its frames, its length, and the size it takes at most on busy views (see `bits_per_pixel`)
-pub(super) fn estimate(duration: Duration, fps: u32, speed: u16, (width, height): (usize, usize), quality: VideoQuality, playback: Playback) -> (usize, Duration, f64) {
+pub(super) fn estimate(duration: Duration, fps: u32, speed: f64, (width, height): (usize, usize), quality: VideoQuality, playback: Playback) -> (usize, Duration, f64) {
     let frames = frame_count(duration, fps, speed);
     let bytes = frames as f64 * (width * height) as f64 * quality.bits_per_pixel(playback) / 8.0;
     (frames, Duration::from_secs_f64(frames as f64 / f64::from(fps)), bytes)
@@ -167,17 +324,88 @@ fn nvenc_works() -> bool {
 }
 
 /// The time along the flight of frame `frame` of a video at `fps` and `speed` percent of the flight's speed
-fn frame_time(frame: usize, fps: u32, speed: u16) -> Duration {
-    Duration::from_secs_f64(frame as f64 / f64::from(fps) * f64::from(speed.max(1)) / 100.0)
+fn frame_time(frame: usize, fps: u32, speed: f64) -> Duration {
+    Duration::from_secs_f64(frame as f64 / f64::from(fps) * speed.max(1.0) / 100.0)
 }
 
-/// The frames of a video of a flight of `duration` at `fps` and `speed` percent: from the start to the place, both included
-fn frame_count(duration: Duration, fps: u32, speed: u16) -> usize {
-    (duration.as_secs_f64() * 100.0 / f64::from(speed.max(1)) * f64::from(fps)).ceil() as usize + 1
+/// The frames of a video of a flight of `duration` at `fps` and `speed` percent: from the start to the place, both included (a video that fits a length exactly
+/// is not one frame longer because of the rounding of the speed)
+fn frame_count(duration: Duration, fps: u32, speed: f64) -> usize {
+    (duration.as_secs_f64() * 100.0 / speed.max(1.0) * f64::from(fps) - 1e-6).ceil().max(0.0) as usize + 1
+}
+
+/// The time along the flight of every frame of a video: at `fps` and `speed` percent of the flight's speed, or following the `music` (see `music`), when the
+/// flight of `duration` lasts as long as the track
+#[derive(Clone, Debug)]
+pub(super) struct FrameClock {
+    fps: u32,
+    speed: f64,
+    music: Option<Arc<super::music::MusicClock>>,
+    duration: Duration,
+}
+
+impl FrameClock {
+    /// The time along the flight of frame `frame`
+    fn time(&self, frame: usize) -> Duration {
+        self.music.as_ref().map_or_else(|| frame_time(frame, self.fps, self.speed), |music| self.duration.mul_f64(music.share_at(frame as f64 / f64::from(self.fps))))
+    }
+
+    /// The frames of the video, from the start to the place, both included
+    fn frames(&self) -> usize {
+        self.music.as_ref().map_or_else(|| frame_count(self.duration, self.fps, self.speed), |music| (music.length().as_secs_f64() * f64::from(self.fps) - 1e-6).ceil().max(0.0) as usize + 1)
+    }
+}
+
+/// The moments of the `samples` samples of a frame at `time` with motion blur: spread over `shutter` degrees of the `interval` between frames (360: all of it),
+/// centered on the frame and within the flight (`duration`). The fraction of sample `k` is the radical inverse of `k` in base 2, so the first samples, which
+/// every pixel gets (the adaptive ones only where there is detail), are spread over the shutter too: sample 0 is at the frame itself, sample 1 half a shutter away
+pub(super) fn sample_times(samples: u8, time: Duration, interval: Duration, shutter: f64, duration: Duration) -> Vec<Duration> {
+    let count = f64::from(samples.max(1));
+    (0..u32::from(samples.max(1))).map(|k| {
+        let fraction = (f64::from(k.reverse_bits()) / f64::from(u32::MAX) + 0.5).fract() + 0.5 / count - 0.5;
+        let moment = time.as_secs_f64() + fraction * (shutter / 360.0) * interval.as_secs_f64();
+        Duration::from_secs_f64(moment.clamp(0.0, duration.as_secs_f64()))
+    }).collect()
+}
+
+/// The moments a frame of a dive composed from keyframes averages with motion blur (composing is cheap, see `dive_keyframes`)
+const DIVE_MOMENTS: u8 = 8;
+
+/// The average of the colors of `frames` (all the same size)
+fn average_frames(frames: &[Vec<crate::coloring::TrueColor>]) -> Vec<crate::coloring::TrueColor> {
+    if frames.len() == 1 {
+        return frames[0].clone();
+    }
+    let count = frames.len() as f32;
+    (0..frames[0].len()).map(|index| {
+        let mut sum = [0.0_f32; 3];
+        for frame in frames {
+            let color = frame[index];
+            sum[0] += f32::from(color.red);
+            sum[1] += f32::from(color.green);
+            sum[2] += f32::from(color.blue);
+        }
+        crate::coloring::TrueColor::new((sum[0] / count).round() as u8, (sum[1] / count).round() as u8, (sum[2] / count).round() as u8)
+    }).collect()
+}
+
+/// The shutters of the *Motion blur* list: off, then quarter to whole frames
+pub(super) const SHUTTERS: [f64; 5] = [0.0, 90.0, 180.0, 270.0, 360.0];
+
+/// A speed in percent as the video controls and the log show it: whole percents without decimals
+pub(super) fn speed_text(speed: f64) -> String {
+    if (speed - speed.round()).abs() < 0.05 { format!("{speed:.0}%") } else { format!("{speed:.1}%") }
+}
+
+/// A length as hours, minutes and seconds (`1:02:03`, or `2:03` under an hour)
+pub(super) fn length_text(length: Duration) -> String {
+    let seconds = length.as_secs_f64().round() as u64;
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 { format!("{hours}:{minutes:02}:{seconds:02}") } else { format!("{minutes}:{seconds:02}") }
 }
 
 /// The flight a video is made of: from where to where, at which pace, and the iteration limits at both ends
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) struct VideoFlight {
     pub(super) from: Camera,
     pub(super) to: Camera,
@@ -192,13 +420,132 @@ pub(super) struct VideoFlight {
     pub(super) limits: (u32, u32),
     /// The color cycle at the start and at the place, blended on the way like a flight's (see `points::PointFlight::palettes`)
     pub(super) palettes: (crate::mandelbrot_set::ColorCycle, crate::mandelbrot_set::ColorCycle),
+    /// A flight through keyframes instead (see `sequence`): then `from` and `to` are its first and last keyframes
+    #[serde(default)]
+    pub(super) sequence: Option<super::sequence::Sequence>,
+    /// The rotation at the start and at the place, in radians, turned the short way on the way (issue #217)
+    #[serde(default)]
+    pub(super) rotations: (f64, f64),
+    /// The Julia set the whole flight is in, by its parameter c (issue #229: a sequence made in a Julia set); none: the Mandelbrot set
+    #[serde(default)]
+    pub(super) julia: Option<(f64, f64)>,
+}
+
+impl VideoFlight {
+    /// The path of the flight: through its keyframes, or from `from` to `to` at its pace along its route
+    pub(super) fn path(&self) -> Flight {
+        self.sequence.as_ref().map_or_else(
+            || Flight::with(self.from, self.to, self.pace, self.route, self.constant_speed, self.speed, self.dive_zoom),
+            |sequence| Flight::of_sequence(sequence.clone(), (self.constant_speed, self.speed)),
+        )
+    }
+
+    /// The colors of the frame `time` into the flight: from its keyframes, or blended from those at the start to the place's
+    pub(super) fn palette_at(&self, path: &Flight, time: Duration) -> crate::mandelbrot_set::ColorCycle {
+        path.palette_at(time).unwrap_or_else(|| self.palettes.0.blend(self.palettes.1, path.share_of_path(time)))
+    }
+
+    /// The rotation of the frame `time` into the flight, in radians: from its keyframes, or turned from the one at the start to the place's
+    pub(super) fn rotation_at(&self, path: &Flight, time: Duration) -> f64 {
+        path.rotation_at(time).unwrap_or_else(|| super::flight::blend_angles(self.rotations.0, self.rotations.1, path.share_of_path(time)))
+    }
+}
+
+/// A render time for the log: `42.3 s`, `3 min 7.0 s` or `1 h 2 min 3 s`
+pub(super) fn render_time(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs_f64();
+    if seconds < 60.0 {
+        format!("{seconds:.1} s")
+    } else if seconds < 3600.0 {
+        format!("{} min {:.1} s", (seconds / 60.0).floor(), seconds % 60.0)
+    } else {
+        let whole = elapsed.as_secs();
+        format!("{} h {} min {} s", whole / 3600, whole % 3600 / 60, whole % 60)
+    }
+}
+
+/// Everything a video is made of: the flight and every setting of the render, taken when the video is started or added to the queue, so later changes of
+/// the controls do not change it
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // The settings of a render as the controls have them
+pub(super) struct VideoSpec {
+    pub(super) flight: VideoFlight,
+    pub(super) width: usize,
+    pub(super) height: usize,
+    pub(super) fps: u32,
+    /// In percent of the flight's speed (exact, also for *Fit to length*)
+    pub(super) speed: f64,
+    pub(super) quality: VideoQuality,
+    pub(super) playback: Playback,
+    /// The most megabits per second of the video, on average over half a second (*Max bitrate*, issue #224); none: no limit
+    #[serde(default)]
+    pub(super) max_mbps: Option<u32>,
+    pub(super) pngs: bool,
+    pub(super) blend: bool,
+    /// The samples per pixel, adaptive supersampling and the blur preset of saved images
+    pub(super) samples: u8,
+    pub(super) adaptive: bool,
+    pub(super) blur: bool,
+    /// The coloring (an index of `COLORING_FUNCTIONS`), the color channels, and the set (its limit without auto iterations, its smooth coloring)
+    pub(super) coloring_index: usize,
+    #[serde(with = "mapping_text")]
+    pub(super) mapping: crate::coloring::ColorChannelMapping,
+    pub(super) set: crate::mandelbrot_set::MandelbrotSet,
+    pub(super) auto: Option<crate::auto_iterations::AutoIterationSettings>,
+    pub(super) use_gpu: bool,
+    pub(super) fast_gpu: bool,
+    /// The name of the video file (without extension), given when it is first started: a resumed video keeps its name (see `chunks`)
+    #[serde(default)]
+    pub(super) output: Option<String>,
+    /// The audio track the video follows and has as its sound (see `music`)
+    #[serde(default)]
+    pub(super) music: Option<super::music::Music>,
+    /// Motion blur: the shutter angle in degrees (0: sharp frames, 180: the shutter of film), see `sample_times`
+    #[serde(default)]
+    pub(super) shutter: f64,
+    /// Whether a dive into a fixed center is composed from keyframe images (see `dive_keyframes`, issue #209)
+    #[serde(default)]
+    pub(super) keyframe_dives: bool,
+}
+
+/// The name of a new video of `flight` in `folder` (without extension): the time and the name of the place, with a number when a video of that name (or its
+/// chunks) is there already
+pub(super) fn video_name(flight: &VideoFlight, folder: &std::path::Path) -> String {
+    let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    let slug: String = flight.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let base = format!("video-{stamp}-{slug}");
+    let taken = |name: &str| ["mp4", "mkv", "parts"].iter().any(|extension| folder.join(format!("{name}.{extension}")).exists()) || folder.join(name).exists();
+    //(Every name is a new file name, so one of the first more than there are entries in the folder is free)
+    let entries = std::fs::read_dir(folder).map_or(0, Iterator::count);
+    (1..=entries + 2).map(|copy| if copy == 1 { base.clone() } else { format!("{base}-{copy}") }).find(|name| !taken(name)).expect("a free name")
+}
+
+/// The color channels of a `VideoSpec` in a file as their text ("RGB", "BGR", ...)
+mod mapping_text {
+    use crate::coloring::ColorChannelMapping;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[allow(clippy::trivially_copy_pass_by_ref)] // The signature that `serde(with)` calls
+    pub(super) fn serialize<S: Serializer>(mapping: &ColorChannelMapping, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(mapping)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ColorChannelMapping, D::Error> {
+        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 /// A video job: its progress (frames written of all) and cancel flag, and the receiver of its final message
 pub(super) struct VideoJob {
-    done: Arc<AtomicUsize>,
-    total: usize,
-    cancel: Arc<AtomicBool>,
+    /// The name of the video (its file and its chunks, see `chunks`)
+    pub(super) name: String,
+    /// Set by *Cancel video*: the chunks are deleted when the job has stopped (see `poll_video`)
+    pub(super) discard: bool,
+    pub(super) done: Arc<AtomicUsize>,
+    /// How many frames render at once, and the CPU use (see `FrameScheduler`)
+    pub(super) scheduler: Arc<FrameScheduler>,
+    pub(super) total: usize,
+    pub(super) cancel: Arc<AtomicBool>,
     started: Instant,
     result: mpsc::Receiver<String>,
 }
@@ -213,12 +560,21 @@ fn limit_at(scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations:
     (limit.round() as u32).clamp(1, 1_000_000)
 }
 
-/// `ffmpeg` encoding raw RGB frames of `width` x `height` at `fps` from its standard input into `path` in `quality` for `playback`, if `ffmpeg` can be started
-fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, quality: VideoQuality, playback: Playback) -> Option<Child> {
+/// `ffmpeg` encoding raw RGB frames of `width` x `height` at `fps` from its standard input into `path` in `quality` for `playback` (with `nvenc` on the GPU's
+/// encoder), if `ffmpeg` can be started
+fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, (quality, playback, max_mbps): (VideoQuality, Playback, Option<u32>), nvenc: bool) -> Option<Child> {
     let (size, rate) = (format!("{width}x{height}"), fps.to_string());
-    let nvenc = width >= NVENC_SMALLEST.0 && height >= NVENC_SMALLEST.1 && nvenc_works();
     let mut command = Command::new("ffmpeg");
-    command.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &size, "-r", &rate, "-i", "-"]).args(arguments(quality, playback, nvenc, fps)).arg(path);
+    let mut arguments = arguments(quality, playback, nvenc, fps, max_mbps);
+    if std::path::Path::new(path).extension().is_some_and(|extension| extension == "mkv") {
+        //Options of MP4 files only: a chunk is Matroska, and the joined file gets them (see `chunks::join_chunks`)
+        for option in ["-tag:v", "-movflags"] {
+            if let Some(at) = arguments.iter().position(|argument| argument == option) {
+                arguments.drain(at..at + 2);
+            }
+        }
+    }
+    command.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &size, "-r", &rate, "-i", "-"]).args(arguments).arg(path);
     command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
 }
 
@@ -235,63 +591,160 @@ fn finish(colors: Vec<TrueColor>, blur: bool, width: usize, height: usize, sampl
 }
 
 /// Writes `rgb` (`width` x `height`) as a PNG file at `path`, with fast compression (a video has many frames; ffmpeg makes the small file)
-fn write_png(path: &std::path::Path, rgb: &[u8], width: usize, height: usize) -> std::io::Result<()> {
+fn write_png(path: &std::path::Path, rgb: &[u8], width: usize, height: usize, place: &str) -> std::io::Result<()> {
     let file = std::fs::File::create(path)?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Fast);
+    encoder.add_itxt_chunk(String::from(crate::image_metadata::KEYWORD), place.to_string()).map_err(std::io::Error::other)?;
     encoder.write_header().and_then(|mut writer| writer.write_image_data(rgb)).map_err(std::io::Error::other)
 }
 
 impl MandelbrotApp {
-    /// Starts the video of the last flight, see the module
-    #[allow(clippy::too_many_lines)] // The settings of the job, its two writers and its loop over the frames
+    /// What a video of the last flight with the current settings would be (see `VideoSpec`), or why there is none
+    pub(super) fn video_spec(&self) -> Result<VideoSpec, String> {
+        let flight = self.last_flight.clone().ok_or_else(|| String::from("there is no flight yet"))?;
+        let julia = flight.julia;
+        let resolution = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution())?;
+        let path = flight.path();
+        let music = self.followed_music();
+        let speed = if music.is_some() { 100.0 } else { self.video_speed_for(path.duration())? }; //(A video that follows music lasts as long as the track)
+        Ok(VideoSpec {
+            flight,
+            width: resolution.width,
+            height: resolution.height,
+            fps: self.video_fps,
+            speed,
+            quality: self.video_quality,
+            playback: self.video_playback,
+            max_mbps: self.video_max_bitrate.then_some(self.video_max_mbps),
+            pngs: self.video_pngs,
+            blend: self.video_blend,
+            samples: self.image_supersampling_amount,
+            adaptive: self.adaptive_supersampling,
+            blur: self.image_quality_blur,
+            coloring_index: self.coloring_index,
+            mapping: self.p.color_channel_mapping,
+            //(The set of the flight: a flight made in a Julia set renders it, also when the window has left it since)
+            set: crate::mandelbrot_set::MandelbrotSet { julia, ..self.m.clone() },
+            auto: self.auto_iterations.then(|| self.auto_settings.clone()),
+            use_gpu: self.use_gpu,
+            fast_gpu: self.fast_gpu,
+            output: None,
+            music,
+            shutter: self.video_shutter,
+            keyframe_dives: self.video_keyframe_dives,
+        })
+    }
+
+    /// Renders the video of the last flight with the current settings in the background (see the module)
     pub(super) fn start_video(&mut self) {
-        let Some(flight) = self.last_flight.clone() else { return };
-        let resolution = match self.save_size.resolve(self.default_save_resolution(), self.view_resolution()) {
-            Ok(resolution) => resolution,
+        match self.video_spec() {
+            Ok(spec) => {
+                self.start_video_of(spec);
+            }
+            Err(reason) => self.log(format!("Could not render the video: {reason}")),
+        }
+    }
+
+    /// Renders the video `spec` in the background (see the module): a video of the last flight, or one of the queue; false when it could not start (the reason
+    /// is in the log)
+    #[allow(clippy::too_many_lines)] // The settings of the job, its two writers and its loop over the frames
+    pub(super) fn start_video_of(&mut self, spec: VideoSpec) -> bool {
+        let name = spec.output.clone().unwrap_or_else(|| video_name(&spec.flight, &self.video_folder));
+        let job_name = name.clone();
+        let spec = VideoSpec { output: Some(name.clone()), ..spec };
+        let manifest_spec = spec.clone();
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, max_mbps, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music, shutter, keyframe_dives } = spec;
+        let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
+        let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
+        let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
+        let thread_scheduler = Arc::clone(&scheduler);
+        let path = flight.path();
+        //The clock of the frames: at the video speed, or following the music (see `music`)
+        let music_clock = match music.as_ref().map(|music| super::music::clock_of_track(std::path::Path::new(&music.path), music.strength)).transpose() {
+            Ok(clock) => clock.map(Arc::new),
             Err(reason) => {
                 self.log(format!("Could not render the video: {reason}"));
-                return;
+                return false;
             }
         };
-        let (width, height, fps, speed, quality, playback, pngs) = (resolution.width, resolution.height, self.video_fps, self.video_speed, self.video_quality, self.video_playback, self.video_pngs);
-        let at_once = self.video_frames_at_once.clamp(1, *FRAMES_AT_ONCE.end());
-        let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
-        let total = frame_count(path.duration(), fps, speed);
-        let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-        let slug: String = flight.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-        let name = format!("video-{stamp}-{slug}");
-        let (m, coloring_function, mapping) = (self.m.clone(), self.coloring_function, self.p.color_channel_mapping);
-        let (samples, adaptive, blur, blend) = (self.image_supersampling_amount, self.adaptive_supersampling.then(rendering::AdaptiveSampling::default), self.image_quality_blur, self.video_blend);
-        let auto_settings = self.auto_iterations.then(|| self.auto_settings.clone());
-        let (gpu, fast_gpu) = (self.gpu.clone().filter(|_| self.use_gpu), self.fast_gpu);
+        let clock = FrameClock { fps, speed, music: music_clock, duration: path.duration() };
+        let total = clock.frames();
+        let coloring_function = super::COLORING_FUNCTIONS[coloring_index.min(super::COLORING_FUNCTIONS.len() - 1)].1;
+        let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
+        let auto_settings = auto;
+        let gpu = self.gpu.clone().filter(|_| use_gpu);
+        //With a GPU, one more renderer renders whole frames on the GPU alone (see the renderers below)
+        //A dive into a fixed center with the same colors all the way, at most 4K: composed from keyframe images (see `dive_keyframes`)
+        let dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1)
+            .then(|| super::dive_keyframes::DivePlan::of((0..total).map(|frame| clock.time(frame)), |time| {
+                let camera = path.camera_at(time);
+                ((camera.x, camera.y), camera.scale)
+            }))
+            .flatten();
+        if keyframe_dives && dive.is_none() {
+            self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
+        }
+        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none();
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
         let (sender, result) = mpsc::channel();
         let destination = flight.name.clone();
         let saved = self.video_folder.clone();
         std::thread::spawn(move || {
+            use super::chunks;
             let folder = saved.join(&name);
-            let created = if pngs { std::fs::create_dir_all(&folder) } else { std::fs::create_dir_all(&saved) };
+            let parts = chunks::parts_folder(&saved, &name);
+            let created = std::fs::create_dir_all(&saved).and_then(|()| if pngs { std::fs::create_dir_all(&folder) } else { Ok(()) });
             if let Err(err) = created {
                 let _ = sender.send(format!("Could not render the video: {err}"));
                 return;
             }
-            let video = saved.join(format!("{name}.{}", extension(quality))).display().to_string();
-            let mut ffmpeg = start_ffmpeg((width, height), fps, &video, quality, playback);
-            let encoding = ffmpeg.is_some();
+            let video = saved.join(format!("{name}.{}", extension(quality)));
+            //The chunks so far, when the video was started before (see `chunks`), or a new manifest; ffmpeg is needed for the video file
+            let encoding = Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success());
+            let nvenc_now = width >= NVENC_SMALLEST.0 && height >= NVENC_SMALLEST.1 && nvenc_works();
+            let mut manifest = chunks::read_manifest(&parts).filter(|manifest| manifest.total == total).unwrap_or_else(|| chunks::Manifest::new(manifest_spec, total, chunk_frames, nvenc_now));
+            if encoding {
+                if manifest.nvenc && !nvenc_now {
+                    let _ = sender.send(format!("Could not resume the video: it was started with the GPU's encoder (NVENC), which does not work now; its chunks are kept in {}", parts.display()));
+                    return;
+                }
+                if let Err(err) = std::fs::create_dir_all(&parts).and_then(|()| chunks::write_manifest(&parts, &manifest)) {
+                    let _ = sender.send(format!("Could not render the video: {err}"));
+                    return;
+                }
+            }
+            //Without ffmpeg only PNG frames are written, all of them
+            let first = if encoding { manifest.first_frame() } else { 0 };
+            let resumed = first > 0;
+            //With Blend frames the frames before the first one are rendered again, so the blend continues as before (they are not written)
+            let warm_up = if blend { first.min(chunks::WARM_UP_FRAMES) } else { 0 };
             //The two writers, each with its own queue of frames; a frame counts as done when both have written it
-            let (png_done, encoded) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let (png_done, encoded) = (Arc::new(AtomicUsize::new(first)), Arc::new(AtomicUsize::new(first)));
             let failure = Arc::new(std::sync::Mutex::new(None::<String>));
             let (png_sender, png_receiver) = mpsc::sync_channel::<(usize, Arc<Vec<u8>>)>(FRAMES_WAITING);
             let (ffmpeg_sender, ffmpeg_receiver) = mpsc::sync_channel::<Arc<Vec<u8>>>(FRAMES_WAITING);
             let png_writer = {
                 let (folder, png_done, failure, cancel) = (folder.clone(), Arc::clone(&png_done), Arc::clone(&failure), Arc::clone(&thread_cancel));
+                //Every frame has its view in its metadata (see `image_metadata`): where the camera is, its limit and its colors, and which frame of which video it is
+                let (path, flight, auto_settings, limit, name, png_clock) = (path.clone(), flight.clone(), auto_settings.clone(), m.max_iterations, name.clone(), clock.clone());
+                let coloring = if coloring_index == 0 { crate::points_of_interest::Coloring::Hsv } else { crate::points_of_interest::Coloring::Bernstein };
                 std::thread::spawn(move || {
                     for (frame, rgb) in png_receiver {
-                        if let Err(err) = write_png(&folder.join(format!("frame-{:05}.png", frame + 1)), &rgb, width, height) {
+                        let time = png_clock.time(frame);
+                        let camera = path.camera_at(time);
+                        let palette = flight.palette_at(&path, time);
+                        let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
+                            name: format!("{} frame {}", flight.name, frame + 1),
+                            description: format!("Frame {} of {total} of the video {name}", frame + 1),
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))), rotation: flight.rotation_at(&path, time).to_degrees(), julia: flight.julia },
+                            appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
+                            file_name: String::new(),
+                        });
+                        if let Err(err) = write_png(&folder.join(format!("frame-{:05}.png", frame + 1)), &rgb, width, height, &place) {
                             *failure.lock().unwrap() = Some(format!("Could not write frame {} of the video: {err}", frame + 1));
                             cancel.store(true, Ordering::Relaxed);
                             return;
@@ -300,16 +753,60 @@ impl MandelbrotApp {
                     }
                 })
             };
+            //The encoder writes chunk after chunk, each a file of its own: a chunk counts in the manifest once ffmpeg has finished it
             let ffmpeg_writer = {
-                let (encoded, mut stdin) = (Arc::clone(&encoded), ffmpeg.as_mut().and_then(|child| child.stdin.take()));
+                let (encoded, failure, cancel, parts, mut manifest) = (Arc::clone(&encoded), Arc::clone(&failure), Arc::clone(&thread_cancel), parts.clone(), manifest.clone());
                 std::thread::spawn(move || {
-                    for rgb in ffmpeg_receiver {
-                        if stdin.as_mut().is_some_and(|stdin| stdin.write_all(&rgb).is_err()) {
-                            stdin = None; //ffmpeg stopped: the PNG frames go on
+                    let mut chunk: Option<(Child, usize)> = None; //The ffmpeg of the chunk under way, and its frames so far
+                    let finish_chunk = |child: Child, number: usize, complete: bool, manifest: &mut chunks::Manifest| -> Result<(), String> {
+                        let mut child = child;
+                        drop(child.stdin.take()); //The end of the frames of the chunk
+                        let encoded = child.wait().is_ok_and(|status| status.success());
+                        if !complete {
+                            let _ = std::fs::remove_file(chunks::chunk_path(&parts, number, chunks::CHUNK_EXTENSION));
+                            return Ok(());
                         }
-                        encoded.fetch_add(1, Ordering::Relaxed);
+                        if !encoded {
+                            return Err(format!("ffmpeg could not encode chunk {} of the video", number + 1));
+                        }
+                        manifest.chunks_done = number + 1;
+                        chunks::write_manifest(&parts, manifest).map_err(|err| format!("Could not save the progress of the video: {err}"))
+                    };
+                    for rgb in ffmpeg_receiver {
+                        let number = manifest.chunks_done;
+                        if chunk.is_none() {
+                            let path = chunks::chunk_path(&parts, number, chunks::CHUNK_EXTENSION).display().to_string();
+                            match start_ffmpeg((width, height), fps, &path, (quality, playback, max_mbps), manifest.nvenc) {
+                                Some(child) => chunk = Some((child, 0)),
+                                None => {
+                                    *failure.lock().unwrap() = Some(String::from("Could not start ffmpeg for the video"));
+                                    cancel.store(true, Ordering::Relaxed);
+                                    return;
+                                }
+                            }
+                        }
+                        let (child, frames) = chunk.as_mut().expect("a chunk under way");
+                        if child.stdin.as_mut().is_none_or(|stdin| stdin.write_all(&rgb).is_err()) {
+                            *failure.lock().unwrap() = Some(format!("ffmpeg stopped while encoding chunk {} of the video", number + 1));
+                            cancel.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                        *frames += 1;
+                        let written = encoded.fetch_add(1, Ordering::Relaxed) + 1;
+                        if *frames == manifest.chunk_frames || written == manifest.total {
+                            let (child, _) = chunk.take().expect("a chunk under way");
+                            if let Err(err) = finish_chunk(child, number, true, &mut manifest) {
+                                *failure.lock().unwrap() = Some(err);
+                                cancel.store(true, Ordering::Relaxed);
+                                return;
+                            }
+                        }
                     }
-                    drop(stdin); //The end of the frames
+                    //Stopped in the middle of a chunk: it is not kept (the manifest only counts finished chunks)
+                    if let Some((child, _)) = chunk.take() {
+                        let number = manifest.chunks_done;
+                        let _ = finish_chunk(child, number, false, &mut manifest);
+                    }
                 })
             };
             let progress = |png_done: &AtomicUsize, encoded: &AtomicUsize, rendered: usize| {
@@ -317,33 +814,146 @@ impl MandelbrotApp {
                 let video = if encoding { encoded.load(Ordering::Relaxed) } else { rendered };
                 png.min(video)
             };
-            //`at_once` renderers take the next frame as soon as they are free (each with all the CPU threads and the GPU, so one fills the gaps the other leaves:
+            //Renderers take the next frame as soon as the scheduler lets them (each with all the CPU threads and the GPU, so one fills the gaps the other leaves:
             //the end of a layer, the GPU's batches); the frames go to the writers in their order
-            let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(0), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(at_once));
-            let mut rendered = 0;
+            let scheduler = &thread_scheduler;
+            let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(first - warm_up), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(most_at_once));
+            let mut rendered = first - warm_up;
+            //The frames in order so far: no renderer starts a frame more than `ahead` after it, so finished frames waiting for a slow one (on the
+            //GPU-only renderer, say) stay few
+            let written = AtomicUsize::new(rendered);
+            let ahead = most_at_once * 2 + 2;
+            //A dive: its keyframe images first, then every frame is composed from them (see `dive_keyframes`)
+            let keyframes = match dive {
+                Some(plan) => {
+                    let set_at = |scale: f64| {
+                        let mut set = m.clone();
+                        set.palette = flight.palettes.0;
+                        if let Some(settings) = &auto_settings {
+                            set.max_iterations = limit_at(scale, &flight, settings);
+                        }
+                        set
+                    };
+                    match super::dive_keyframes::DiveKeyframes::render(plan, (width, height), samples, adaptive, coloring_function, set_at, gpu.as_deref(), fast_gpu, &thread_cancel, |_, _| {}) {
+                        Some(keyframes) => Some(keyframes),
+                        None => {
+                            let _ = sender.send(format!("Video of the flight paused before its first chunk of {} frames was finished: no frames are kept yet, and Resume starts it again from the beginning with the same settings", manifest.chunk_frames));
+                            return;
+                        }
+                    }
+                }
+                None => None,
+            };
+            let keyframes = &keyframes;
             std::thread::scope(|scope| {
-                for _ in 0..at_once {
-                    let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu);
+                //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
+                let (next_ref, steering_cancel) = (&next, &thread_cancel);
+                scope.spawn(move || {
+                    let threads = rendering::render_thread_count().max(1) as f64;
+                    let mut climber = Climber::new(scheduler.allowed(), most_at_once);
+                    let running = || next_ref.load(Ordering::Relaxed) < total && !steering_cancel.load(Ordering::Relaxed);
+                    while running() {
+                        //A new number of frames at once first fills up: the measurement starts after as many frames as are under way
+                        let at_once = scheduler.allowed();
+                        let settled = scheduler.finished.load(Ordering::Relaxed) + at_once;
+                        while running() && scheduler.finished.load(Ordering::Relaxed) < settled {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        let (started, first, cpu_before) = (Instant::now(), scheduler.finished.load(Ordering::Relaxed), cpu_time::ProcessTime::try_now().ok());
+                        while running() && (started.elapsed() < MIN_WINDOW || scheduler.finished.load(Ordering::Relaxed) < first + 2 * at_once) {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        if !running() {
+                            return;
+                        }
+                        let seconds = started.elapsed().as_secs_f64();
+                        if let Some(cpu) = cpu_before.and_then(|before| cpu_time::ProcessTime::try_now().ok().map(|now| now.duration_since(before).as_secs_f64())) {
+                            scheduler.cpu_percent.store((100.0 * cpu / (seconds * threads)).round() as usize, Ordering::Relaxed);
+                        }
+                        let rate = (scheduler.finished.load(Ordering::Relaxed) - first) as f64 / seconds;
+                        scheduler.set_allowed(climber.measured(rate));
+                    }
+                });
+                //The renderers that the scheduler lets start frames (with all the CPU threads, handing rows to the GPU), and with a GPU one more that renders whole
+                //frames on the GPU alone: the CPU threads take most rows of a frame they share with the GPU, so the GPU would otherwise be idle much of the time
+                for renderer in 0..most_at_once + usize::from(gpu_renderer) {
+                    let on_the_gpu = renderer == most_at_once;
+                    let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu, clock, written) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu, &clock, &written);
                     scope.spawn(move || {
                         let (mut plane, mut m) = (ComplexPlane::new(width, height), m);
                         loop {
-                            let frame = next.fetch_add(1, Ordering::SeqCst);
-                            if frame >= total || thread_cancel.load(Ordering::Relaxed) {
+                            if !on_the_gpu && !scheduler.start_frame(thread_cancel) {
                                 return;
                             }
-                            let time = frame_time(frame, fps, speed);
+                            while next.load(Ordering::SeqCst) >= written.load(Ordering::SeqCst) + ahead && !thread_cancel.load(Ordering::Relaxed) {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            let frame = next.fetch_add(1, Ordering::SeqCst);
+                            if frame >= total || thread_cancel.load(Ordering::Relaxed) {
+                                if !on_the_gpu {
+                                    scheduler.finish_frame(false);
+                                }
+                                return;
+                            }
+                            let time = clock.time(frame);
                             let camera = path.camera_at(time);
                             plane.set_view(&camera.view());
-                            if let Some(settings) = auto_settings {
+                            plane.set_rotation(flight.rotation_at(path, time));
+                            //A dive: the frame composed from its keyframe (with motion blur: from the moments of its shutter)
+                            if let Some(keyframes) = keyframes {
+                                let moments = if shutter > 0.0 {
+                                    let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
+                                    sample_times(DIVE_MOMENTS, time, interval, shutter, path.duration())
+                                } else {
+                                    vec![time]
+                                };
+                                let composed: Vec<Vec<crate::coloring::TrueColor>> = moments.iter().map(|moment| keyframes.compose(path.camera_at(*moment).scale, flight.rotation_at(path, *moment))).collect();
+                                let colors = average_frames(&composed);
+                                scheduler.finish_frame(true);
+                                if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
+                            if let Some(limit) = path.limit_at(time) {
+                                m.max_iterations = limit; //The limits of the keyframes
+                            } else if let Some(settings) = auto_settings {
                                 m.max_iterations = limit_at(camera.scale, flight, settings);
                             }
-                            m.palette = flight.palettes.0.blend(flight.palettes.1, path.share_of_path(time));
+                            m.palette = flight.palette_at(path, time);
+                            //Motion blur: every sample in the view of its own moment within the shutter (the limit and the colors stay those of the frame)
+                            let planes: Vec<ComplexPlane> = if shutter > 0.0 && samples > 1 && !blend {
+                                let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
+                                sample_times(samples, time, interval, shutter, path.duration()).into_iter().map(|moment| {
+                                    let mut sample_plane = ComplexPlane::new(width, height);
+                                    sample_plane.set_view(&path.camera_at(moment).view());
+                                    sample_plane.set_rotation(flight.rotation_at(path, moment));
+                                    sample_plane
+                                }).collect()
+                            } else {
+                                Vec::new()
+                            };
                             let mut colors = Vec::new();
                             let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
                                 .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
+                            let render = if planes.is_empty() { render } else { render.sample_planes(&planes) };
                             //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
                             let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
-                            if !render.run(|layer, _| colors = layer.to_vec()) {
+                            //(The CPU workers below the threads that feed the GPU, see `Render::in_the_background`)
+                            let render = if on_the_gpu { render.on_the_gpu_only() } else { render.in_the_background() };
+                            //Only the last pass is kept: copying the whole frame after each of its passes cost 64 copies of 25 MB per 4K frame at 64x (#212)
+                            let last_pass = if blend && samples <= 1 { 1 } else { samples.clamp(1, 64) };
+                            let completed = render.run(|layer, pass| {
+                                if pass >= last_pass {
+                                    colors = layer.to_vec();
+                                }
+                            });
+                            if on_the_gpu {
+                                scheduler.finished.fetch_add(usize::from(completed), Ordering::Relaxed);
+                            } else {
+                                scheduler.finish_frame(completed);
+                            }
+                            if !completed {
                                 let _ = frames_sender.send((frame, None));
                                 return;
                             }
@@ -376,12 +986,14 @@ impl MandelbrotApp {
                                 colors_to_rgb_bytes(&finish(shown, blur, width, height, samples), mapping)
                             }
                         });
-                        //(A full queue makes the renderers wait for the writers; a writer that stopped makes the send fail, and the cancel flag says why)
-                        if (pngs && png_sender.send((rendered, Arc::clone(&rgb))).is_err()) || (encoding && ffmpeg_sender.send(rgb).is_err()) {
+                        //(A full queue makes the renderers wait for the writers; a writer that stopped makes the send fail, and the cancel flag says why.
+                        //The frames that warm up the blend of a resumed video were written before)
+                        if rendered >= first && ((pngs && png_sender.send((rendered, Arc::clone(&rgb))).is_err()) || (encoding && ffmpeg_sender.send(rgb).is_err())) {
                             thread_cancel.store(true, Ordering::Relaxed);
                             break;
                         }
                         rendered += 1;
+                        written.store(rendered, Ordering::SeqCst);
                         thread_done.store(progress(&png_done, &encoded, rendered), Ordering::Relaxed);
                     }
                 }
@@ -390,18 +1002,49 @@ impl MandelbrotApp {
             let _ = (png_writer.join(), ffmpeg_writer.join());
             let failure = failure.lock().unwrap().take();
             if let Some(failure) = failure {
-                let _ = sender.send(failure);
+                let kept = if encoding { format!("; the finished chunks are kept in {}, and Resume continues the video", parts.display()) } else { String::new() };
+                let _ = sender.send(format!("{failure}{kept}"));
                 return;
             }
             let frames = progress(&png_done, &encoded, rendered);
             thread_done.store(frames, Ordering::Relaxed);
-            let encoded = ffmpeg.and_then(|mut child| child.wait().ok().filter(std::process::ExitStatus::success)).is_some();
-            let complete = if frames == total { "" } else { " (stopped: incomplete)" };
-            let (written, file) = (if pngs { format!(" in {}", folder.display()) } else { String::new() }, if encoded { format!(" as {video}") } else if pngs { String::from(" (ffmpeg was not found or failed, so there is no video file; the frames can be encoded with it later)") } else { String::from(" (ffmpeg was not found or failed, and PNG frames are off: nothing was written)") });
-            let _ = sender.send(format!("Video of the flight: {frames} of {total} frames at {fps} FPS, {speed}% speed{complete}{written}{file}"));
+            let speed = speed_text(speed);
+            let written = if pngs { format!(" in {}", folder.display()) } else { String::new() };
+            if !encoding {
+                let (complete, file) = (if frames == total { "" } else { " (stopped: incomplete)" }, if pngs { " (ffmpeg was not found, so there is no video file; the frames can be encoded with it later)" } else { " (ffmpeg was not found, and PNG frames are off: nothing was written)" });
+                let _ = sender.send(format!("Video of the flight: {frames} of {total} frames at {fps} FPS, {speed} speed{complete}{written}{file}"));
+                return;
+            }
+            manifest = chunks::read_manifest(&parts).unwrap_or(manifest);
+            if manifest.chunks_done < manifest.chunks() {
+                let message = if manifest.chunks_done == 0 {
+                    //(A chunk is kept once all its frames are encoded: before the first, there is nothing yet)
+                    format!("Video of the flight paused before its first chunk of {} frames was finished: no frames are kept yet, and Resume starts it again from the beginning with the same settings", manifest.chunk_frames)
+                } else {
+                    format!("Video of the flight paused at {} of {total} frames: {} of {} chunks are kept in {}, and Resume continues it", manifest.first_frame(), manifest.chunks_done, manifest.chunks(), parts.display())
+                };
+                let _ = sender.send(message);
+                return;
+            }
+            let hevc = arguments(quality, playback, manifest.nvenc, fps, max_mbps).iter().any(|argument| argument == "hevc_nvenc" || argument == "libx265");
+            if !chunks::join_chunks(&parts, manifest.chunks(), &video, hevc) {
+                let _ = sender.send(format!("Could not join the chunks of the video into {}; they are kept in {}", video.display(), parts.display()));
+                return;
+            }
+            let _ = std::fs::remove_dir_all(&parts);
+            let mut with_music = String::new();
+            if let Some(music) = &music {
+                match super::music::add_track(&video, std::path::Path::new(&music.path)) {
+                    Ok(()) => with_music = format!(", with the music of {}", music.path),
+                    Err(reason) => with_music = format!(" ({reason})"),
+                }
+            }
+            let resumed = if resumed { format!(" (resumed at frame {})", first + 1) } else { String::new() };
+            let _ = sender.send(format!("Video of the flight: {total} of {total} frames at {fps} FPS, {speed} speed{resumed}{written} as {}{with_music}", video.display()));
         });
-        self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {speed}% speed, {}, {}", quality.name(), playback.name()));
-        self.video_job = Some(VideoJob { done, total, cancel, started: Instant::now(), result });
+        self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {} speed, {}, {}", speed_text(speed), quality.name(), playback.name()));
+        self.video_job = Some(VideoJob { name: job_name, discard: false, done, scheduler, total, cancel, started: Instant::now(), result });
+        true
     }
 
     /// Takes the final message of the video job
@@ -409,33 +1052,192 @@ impl MandelbrotApp {
         let Some(job) = &self.video_job else { return };
         ctx.request_repaint_after(Duration::from_millis(200));
         if let Ok(message) = job.result.try_recv() {
+            //A video that was cancelled, stopped or could not start has not finished (for the queue)
+            //(By the result, not by Pause video: pressed while the chunks are joined, the video is still finished)
+            let finished = message.starts_with("Video of the flight:") && !message.contains("(stopped");
+            let discard = (job.discard && !finished).then(|| job.name.clone());
+            //A finished video says how long its rendering took, to compare settings such as Fast dives (a resumed video: the time since it was resumed)
+            let message = if finished { format!("{message}, rendered in {}", render_time(job.started.elapsed())) } else { message };
             self.video_job = None;
+            Self::release_free_memory();
             self.log(message);
+            if let Some(name) = discard {
+                //Cancel video: nothing of it is kept (issue #215)
+                self.delete_unfinished(&name);
+            }
+            self.unfinished_videos = None; //Read again (see `unfinished_ui`)
+            self.queue_video_ended(finished);
         }
     }
 
     /// The progress of a video under way, with its button to cancel it
-    pub(super) fn video_progress_ui(&self, ui: &mut egui::Ui) {
+    pub(super) fn video_progress_ui(&mut self, ui: &mut egui::Ui) {
+        let mut cancel_video = false;
+        self.video_progress_row(ui, &mut cancel_video);
+        if cancel_video {
+            if let Some(job) = &mut self.video_job {
+                job.discard = true;
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The row of `video_progress_ui`; `cancel_video` is set when *Cancel video* is pressed
+    fn video_progress_row(&self, ui: &mut egui::Ui, cancel_video: &mut bool) {
         let Some(job) = &self.video_job else { return };
         ui.horizontal(|ui| {
             let done = job.done.load(Ordering::Relaxed);
             let elapsed = job.started.elapsed().as_secs_f64();
             let left = if done > 0 { elapsed / done as f64 * (job.total - done) as f64 } else { 0.0 };
-            if ui.button("Cancel video").clicked() {
+            if ui.button("Pause video").on_hover_text("Stops the video: its finished chunks (10 seconds of video each) are kept, and Resume continues it later, also after the program was closed").clicked() {
                 job.cancel.store(true, Ordering::Relaxed);
             }
-            ui.add(egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!("Video: {done} of {} frames, {left:.0} s left", job.total)));
+            if ui.button("Cancel video").on_hover_text("Stops the video and deletes what it rendered so far (Pause video keeps it)").clicked() {
+                *cancel_video = true;
+            }
+            let (at_once, cpu) = (job.scheduler.allowed(), job.scheduler.cpu_percent.load(Ordering::Relaxed));
+            ui.add(egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!("Video: {done} of {} frames, {left:.0} s left ({at_once} at once, CPU {cpu}%)", job.total)))
+                .on_hover_text("The job renders as many frames at once as renders fastest: it tries one more while the video runs and keeps it when the frame rate rises (up to what the memory allows)");
         });
+    }
+
+    /// The length typed in the hours, minutes and seconds boxes of *Fit to length* (issue #179): empty boxes count as 0, and a length needs more than 0 seconds
+    pub(super) fn target_length(&self) -> Option<Duration> {
+        let mut seconds = 0.0;
+        for (input, unit) in self.video_length.iter().zip([3600.0, 60.0, 1.0]) {
+            let input = input.trim();
+            let value = if input.is_empty() { 0.0 } else { input.replace(',', ".").parse::<f64>().ok().filter(|value| value.is_finite() && *value >= 0.0)? };
+            seconds += value * unit;
+        }
+        (seconds > 0.0).then(|| Duration::from_secs_f64(seconds))
+    }
+
+    /// The speed of the video of a flight of `duration`, in percent of the flight's: the speed control's, or with *Fit to length* the speed that makes the video
+    /// exactly as long as the typed length; an error says why there is none (no length, or a speed outside `SPEEDS`)
+    pub(super) fn video_speed_for(&self, duration: Duration) -> Result<f64, String> {
+        if !self.video_fit_length {
+            return Ok(f64::from(self.video_speed));
+        }
+        let length = self.target_length().ok_or_else(|| String::from("Type the length of the video in hours, minutes and seconds"))?;
+        let speed = duration.as_secs_f64() * 100.0 / length.as_secs_f64();
+        let (slowest, fastest) = (f64::from(*SPEEDS.start()), f64::from(*SPEEDS.end()));
+        if (slowest..=fastest).contains(&speed) {
+            Ok(speed)
+        } else {
+            Err(format!("{} needs {} speed, outside {slowest:.0}% to {fastest:.0}%: the flight takes {:.1} s at 100%", length_text(length), speed_text(speed), duration.as_secs_f64()))
+        }
+    }
+
+    /// The video file of `spec` when it is finished: it is there, and no chunks of it wait to be joined (a queued video that was finished already)
+    pub(super) fn finished_video(&self, spec: &VideoSpec) -> Option<std::path::PathBuf> {
+        let name = spec.output.as_ref()?;
+        let video = self.video_folder.join(format!("{name}.{}", extension(spec.quality)));
+        (video.exists() && !super::chunks::parts_folder(&self.video_folder, name).exists()).then_some(video)
+    }
+
+    /// Continues video `name` of the videos folder from its first unfinished chunk, with the settings it was started with (see `chunks`)
+    pub(super) fn resume_video(&mut self, name: &str) {
+        match super::chunks::read_manifest(&super::chunks::parts_folder(&self.video_folder, name)) {
+            Some(manifest) => {
+                self.start_video_of(VideoSpec { output: Some(name.to_string()), ..manifest.spec });
+            }
+            None => self.log(format!("Could not resume the video {name}: its manifest cannot be read")),
+        }
+    }
+
+    /// The videos that were stopped before they were finished, each with *Resume* (the list is read again when a video ends)
+    fn unfinished_ui(&mut self, ui: &mut egui::Ui) {
+        let videos = self.unfinished_videos.get_or_insert_with(|| super::chunks::unfinished(&self.video_folder).into_iter().map(|(name, manifest)| (name, manifest.first_frame(), manifest.total)).collect());
+        let (mut resume, mut delete, mut confirm) = (None, None, self.confirm_delete.clone());
+        for (name, done, total) in videos.iter() {
+            ui.horizontal(|ui| {
+                //Delete, after a second click that says how much it frees (issue #215)
+                if confirm.as_deref() == Some(name.as_str()) {
+                    let size = super::chunks::folder_size(&super::chunks::parts_folder(&self.video_folder, name));
+                    ui.label(format!("Delete {name} and its {}?", megabytes(size as f64)));
+                    if ui.button("Delete").clicked() {
+                        delete = Some(name.clone());
+                    }
+                    if ui.button("Keep").clicked() {
+                        confirm = None;
+                    }
+                    return;
+                }
+                if ui.small_button("Delete…").on_hover_text("Deletes what was rendered of this video (its chunks); asks first").clicked() {
+                    confirm = Some(name.clone());
+                }
+                //Every frame rendered, the chunks not joined (the join failed or was interrupted): Resume only joins them
+                let (button, tooltip, label) = if done == total {
+                    ("Join", "Joins the finished chunks of this video into its file; nothing is rendered again", format!("Rendered, not joined: {name} (all {total} frames)"))
+                } else {
+                    ("Resume", "Continues this video from its first unfinished chunk, with the settings it was started with", format!("Unfinished: {name} ({done} of {total} frames)"))
+                };
+                if ui.button(button).on_hover_text(tooltip).clicked() {
+                    resume = Some(name.clone());
+                }
+                ui.label(label);
+            });
+        }
+        self.confirm_delete = confirm;
+        if let Some(name) = delete {
+            self.confirm_delete = None;
+            self.delete_unfinished(&name);
+        }
+        if let Some(name) = resume {
+            self.resume_video(&name);
+        }
+    }
+
+    /// Deletes the chunks of the unfinished video `name` (its `.parts` folder, nothing else) and takes it out of the queue
+    pub(super) fn delete_unfinished(&mut self, name: &str) {
+        let parts = super::chunks::parts_folder(&self.video_folder, name);
+        match std::fs::remove_dir_all(&parts) {
+            Ok(()) => self.log(format!("Deleted the unfinished video {name} ({})", parts.display())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => self.log(format!("Could not delete {}: {err}", parts.display())),
+        }
+        let queued = self.video_queue.len();
+        self.video_queue.retain(|spec| spec.output.as_deref() != Some(name));
+        if self.video_queue.len() != queued {
+            self.log(format!("Took {name} out of the queue"));
+            self.save_queue();
+        }
+        self.unfinished_videos = None;
     }
 
     /// The video controls: the button, the frame rate, the speed, the format and the PNG frames (the progress of a video under way is at the top, see
     /// `video_progress_ui`)
     pub(super) fn video_ui(&mut self, ui: &mut egui::Ui) {
         ui.strong("Video of the last flight");
-        ui.add_enabled_ui(self.video_job.is_none(), |ui| self.video_settings_ui(ui));
+        ui.add_enabled_ui(self.video_job.is_none(), |ui| {
+            self.saved_flights_ui(ui);
+            self.video_settings_ui(ui);
+        });
+        if self.video_job.is_none() {
+            self.unfinished_ui(ui);
+        }
+        self.queue_ui(ui);
+    }
+
+    /// Sets the video controls for a YouTube upload in 4K at 60 FPS (issue #213): the cheapest quality whose result after YouTube's re-encode measured as
+    /// good as 64x (#211: 32x adaptive), motion blur of film, HEVC in 10 bits that YouTube takes in full, the GPU on. Only these controls change
+    pub(super) fn use_youtube_preset(&mut self) {
+        self.save_size.choice = super::save_size::SaveSizeChoice::Preset(String::from("4K UHD"));
+        self.save_size.portrait = false;
+        (self.video_fps, self.image_supersampling_amount, self.image_quality_blur, self.adaptive_supersampling) = (60, 32, false, true);
+        (self.video_shutter, self.video_blend, self.video_pngs) = (180.0, false, false);
+        (self.video_quality, self.video_playback) = (VideoQuality::VeryHigh, Playback::HighQuality);
+        (self.video_max_bitrate, self.video_max_mbps) = (true, DEFAULT_MAX_MBPS);
+        (self.use_gpu, self.fast_gpu) = (true, true);
+        self.log(format!("Set the video for YouTube: 4K UHD at 60 FPS, 32x adaptive, motion blur 180°, High quality (HEVC, 10 bits) Very High at most {DEFAULT_MAX_MBPS} Mbit/s, the GPU on"));
     }
 
     fn video_settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("YouTube 4K60").on_hover_text("Sets the video for a YouTube upload: 4K at 60 FPS, 32x adaptive (after YouTube's own compression it measured as good as 64x in 60% of the time), motion blur 180°, High quality format at most 180 Mbit/s (smooth to play on a PC), the GPU on. Change anything afterwards").clicked() {
+                self.use_youtube_preset();
+            }
+        });
         ui.horizontal(|ui| {
             let name = self.last_flight.as_ref().map_or_else(|| String::from("no flight yet"), |flight| flight.name.clone());
             if ui.add_enabled(self.last_flight.is_some(), egui::Button::new("Render video of the last flight")).on_hover_text(format!("The last flight ({name}) as a video: every frame rendered offline at the saved image size and quality, at a fixed frame rate, written as PNG frames to saved/ (and as an .mp4 when ffmpeg is installed)")).clicked() {
@@ -448,11 +1250,27 @@ impl MandelbrotApp {
             });
         });
         ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
-            ui.add(egui::DragValue::new(&mut self.video_frames_at_once).range(FRAMES_AT_ONCE).suffix(" at once")).on_hover_text("How many frames are rendered at the same time (1 to 4), each with all the CPU threads and the GPU: one fills the gaps another leaves, so the CPU and the GPU stay busy; more takes more memory");
+            ui.add_enabled(!self.video_fit_length, egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
             ui.checkbox(&mut self.video_blend, "Blend frames").on_hover_text("Every frame is blended into the frames before it, moved to its view, as Blend frames does in flights: with the 1x qualities every frame takes another sample, so the video gathers samples over time and moves smoothly for the cost of one sample a frame (fine with 1x + blur). With more samples it smooths the motion");
+            egui::ComboBox::from_id_salt("video_shutter").selected_text(shutter_text(self.video_shutter)).show_ui(ui, |ui| {
+                for shutter in SHUTTERS {
+                    ui.selectable_value(&mut self.video_shutter, shutter, shutter_text(shutter));
+                }
+            }).response.on_hover_text("Motion blur: every sample of a pixel is taken at its own moment while the shutter is open, as a film camera does, so motion blurs along its direction and fine detail shimmers less, at no extra cost (the same samples). 180° is the shutter of film; more is smoother and softer at the edges of a fast zoom, whose center stays sharp. Needs 2 samples or more, without Blend frames");
+            ui.checkbox(&mut self.video_keyframe_dives, "Fast dives").on_hover_text("A dive into a fixed center (the same colors all the way, at most 4K, without Blend frames) is rendered as one large image per doubling of the zoom, and every frame is composed from the image of its depth: many times faster, a slightly different picture (each frame averages 1 to 4 keyframe pixels per pixel). Other flights render frame by frame");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.video_fit_length, "Fit to length:").on_hover_text("Sets the speed so the video of the last flight lasts exactly this long (hours, minutes, seconds), instead of the speed in percent");
+            ui.add_enabled_ui(self.video_fit_length, |ui| {
+                for (input, unit) in self.video_length.iter_mut().zip(["h", "m", "s"]) {
+                    ui.add(egui::TextEdit::singleline(input).desired_width(28.0).hint_text(unit));
+                    ui.label(unit);
+                }
+            });
+        });
+        self.song_ui(ui);
+        self.music_ui(ui);
         ui.horizontal(|ui| {
             ui.label("Quality:");
             egui::ComboBox::from_id_salt("video_quality").selected_text(self.video_quality.name()).show_ui(ui, |ui| {
@@ -467,28 +1285,56 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("How much of the rendered detail the video file keeps: a fixed quality, so busy views get the bits they need and calm ones stay small");
             ui.add_enabled_ui(self.video_quality != VideoQuality::Lossless, |ui| {
-                ui.label("for");
+                ui.label("Format:");
                 egui::ComboBox::from_id_salt("video_playback").selected_text(self.video_playback.name()).show_ui(ui, |ui| {
                     for playback in Playback::ALL {
                         ui.selectable_value(&mut self.video_playback, playback, playback.name()).on_hover_text(match playback {
-                            Playback::Computers => "Full color resolution in 10 bits (HEVC on an NVIDIA GPU, else H.264): the best colors, no banding; plays on computers (VLC and most players), not on phones and TVs",
-                            Playback::Phones => "HEVC Main 10 (10 bits, half the color resolution), which phones, TVs and browsers play in hardware; single pixels of strong colors get softer",
-                            Playback::Everywhere => "H.264 in 8 bits with half the color resolution: plays on anything, with the softest colors",
+                            Playback::Maximum => "Full color resolution in 10 bits (HEVC on an NVIDIA GPU, else H.264): the best colors, no banding; plays on computers (VLC and most players), not on phones and TVs",
+                            Playback::HighQuality => "HEVC Main 10 (10 bits, half the color resolution), which phones, TVs and browsers play in hardware; single pixels of strong colors get a little softer",
+                            Playback::MostCompatible => "H.264 in 8 bits with half the color resolution: plays on anything, even old devices, with the softest colors",
                         });
                     }
-                }).response.on_hover_text("Where the video has to play, which sets its color resolution and codec");
+                }).response.on_hover_text("The codec, bit depth and color resolution of the video: Maximum for the best colors, High quality to play on phones and TVs, Most compatible to play anywhere");
+            });
+        });
+        ui.add_enabled_ui(self.video_quality != VideoQuality::Lossless, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.video_max_bitrate, "Max bitrate").on_hover_text("Off: the quality level alone decides, so busy, colorful views can take hundreds of Mbit/s, more than some players keep up with. On: at most this many megabits per second on average (peaks of a second can be about a third higher); calm views stay as small as before");
+                ui.add_enabled(self.video_max_bitrate, egui::DragValue::new(&mut self.video_max_mbps).range(5..=1000).suffix(" Mbit/s"))
+                    .on_hover_text(format!("The most megabits per second the video takes; {DEFAULT_MAX_MBPS} played smoothly on a PC where 500 stuttered"));
             });
         });
         //What the video will be: its length and frames are exact, its size an estimate (an upper end: measured on a busy view)
         if let Some(flight) = &self.last_flight {
-            let path = Flight::with(flight.from, flight.to, flight.pace, flight.route, flight.constant_speed, flight.speed, flight.dive_zoom);
-            let size = self.save_size.resolve(self.default_save_resolution(), self.view_resolution()).map_or((0, 0), |resolution| (resolution.width, resolution.height));
-            let (frames, length, bytes) = estimate(path.duration(), self.video_fps, self.video_speed, size, self.video_quality, self.video_playback);
-            let png = if self.video_pngs { format!(" + PNG frames about {}", megabytes(frames as f64 * (size.0 * size.1) as f64 * 3.0 / 2.0)) } else { String::new() };
-            ui.label(format!("{:.1} s, {frames} frames of {} x {}, up to about {}{png}", length.as_secs_f64(), size.0, size.1, megabytes(bytes)))
-                .on_hover_text("The length and the frames of the video, and the size of its file at most (measured on a busy, detailed view; calm views take far less)");
+            let path = flight.path();
+            let size = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution()).map(|resolution| (resolution.width, resolution.height));
+            let music_length = self.followed_music_length();
+            let speed = size.clone().and_then(|_| match (self.followed_music(), music_length) {
+                (Some(_), Some(length)) => Ok(path.duration().as_secs_f64() * 100.0 / length.as_secs_f64()), //(The average speed: the video lasts as long as the track)
+                (Some(music), None) => Err(format!("The music {} cannot be read", music.path)),
+                (None, _) => self.video_speed_for(path.duration()),
+            });
+            match speed.and_then(|speed| Ok((speed, size?))) {
+                Ok((speed, size)) => {
+                    let (frames, length, bytes) = estimate(path.duration(), self.video_fps, speed, size, self.video_quality, self.video_playback);
+                    //(With a limit, at most the limit's bits for its length)
+                    let bytes = if self.video_max_bitrate && self.video_quality != VideoQuality::Lossless { bytes.min(f64::from(self.video_max_mbps) * 1e6 / 8.0 * length.as_secs_f64()) } else { bytes };
+                    let png = if self.video_pngs { format!(" + PNG frames about {}", megabytes(frames as f64 * (size.0 * size.1) as f64 * 3.0 / 2.0)) } else { String::new() };
+                    let fitted = if music_length.is_some() && self.follow_music { String::from(", following the music") } else if self.video_fit_length { format!(" at {} speed", speed_text(speed)) } else { String::new() };
+                    ui.label(format!("{} ({:.1} s){fitted}, {frames} frames of {} x {}, up to about {}{png}", length_text(length), length.as_secs_f64(), size.0, size.1, megabytes(bytes)))
+                        .on_hover_text("The length and the frames of the video, and the size of its file at most (measured on a busy, detailed view; calm views take far less)");
+                }
+                Err(reason) => {
+                    ui.colored_label(egui::Color32::from_rgb(255, 165, 0), reason);
+                }
+            }
         }
     }
+}
+
+/// The text of a shutter in the *Motion blur* list
+fn shutter_text(shutter: f64) -> String {
+    if shutter <= 0.0 { String::from("No motion blur") } else { format!("Motion blur {shutter:.0}°") }
 }
 
 /// A size in bytes, in MB or GB
@@ -498,12 +1344,19 @@ fn megabytes(bytes: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_render_time_reads_in_seconds_minutes_or_hours() {
+        assert_eq!(super::render_time(Duration::from_millis(42_345)), "42.3 s");
+        assert_eq!(super::render_time(Duration::from_secs(187)), "3 min 7.0 s");
+        assert_eq!(super::render_time(Duration::from_secs(3723)), "1 h 2 min 3 s");
+    }
+
     use super::*;
 
     #[test]
     fn the_limit_of_a_video_frame_goes_from_the_limit_at_the_start_to_that_of_the_place() {
         let settings = crate::auto_iterations::AutoPreset::Balanced.settings();
-        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE) };
+        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, rotations: (0.0, 0.0), julia: None };
         assert_eq!(limit_at(1.0, &flight, &settings), 300);
         assert_eq!(limit_at(6.4e-5, &flight, &settings), 5000);
         let middle = limit_at(8e-3, &flight, &settings);
@@ -513,37 +1366,98 @@ mod tests {
     #[test]
     fn a_slower_video_has_more_frames_of_the_same_flight() {
         let second = Duration::from_secs(1);
-        assert_eq!(frame_count(second * 2, 30, 100), 61, "2 s at 30 FPS: the start, then 60 more frames");
-        assert_eq!(frame_count(second * 2, 30, 10), 601, "10%: ten times the frames");
-        assert_eq!(frame_count(second * 2, 240, 400), 121);
-        assert_eq!(frame_time(30, 30, 100), second);
-        assert_eq!(frame_time(300, 30, 10), second, "at 10% frame 300 (10 s of video) is 1 s into the flight");
-        assert_eq!(frame_time(60, 120, 50), Duration::from_millis(250));
+        assert_eq!(frame_count(second * 2, 30, 100.0), 61, "2 s at 30 FPS: the start, then 60 more frames");
+        assert_eq!(frame_count(second * 2, 30, 10.0), 601, "10%: ten times the frames");
+        assert_eq!(frame_count(second * 2, 240, 400.0), 121);
+        assert_eq!(frame_time(30, 30, 100.0), second);
+        assert_eq!(frame_time(300, 30, 10.0), second, "at 10% frame 300 (10 s of video) is 1 s into the flight");
+        assert_eq!(frame_time(60, 120, 50.0), Duration::from_millis(250));
         assert!(FRAME_RATES.starts_with(&[24, 30, 60]) && FRAME_RATES.ends_with(&[90, 120, 144, 240]));
     }
 
     #[test]
     fn the_tiers_keep_a_fixed_quality_for_the_player_they_are_for() {
         let has = |arguments: &[String], wanted: &[&str]| wanted.iter().all(|wanted| arguments.iter().any(|argument| argument.contains(wanted)));
-        //Computers: full color in 10 bits, on the GPU or the CPU; a fixed quantizer that follows the tier
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Computers, true, 60), &["hevc_nvenc", "yuv444p16le", "constqp", "20", "bt709"]));
-        assert!(has(&arguments(VideoQuality::UltraHigh, Playback::Computers, true, 60), &["16"]));
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Computers, false, 60), &["libx264", "yuv444p10le", "14"]));
-        //Phones: HEVC Main 10, half the color resolution made with a sharp filter; everywhere: 8-bit H.264
-        assert!(has(&arguments(VideoQuality::High, Playback::Phones, true, 60), &["hevc_nvenc", "p010le", "main10", "lanczos"]));
-        assert!(has(&arguments(VideoQuality::High, Playback::Phones, false, 60), &["libx265", "yuv420p10le"]));
-        assert!(has(&arguments(VideoQuality::High, Playback::Everywhere, true, 60), &["libx264", "yuv420p", "18"]));
+        //Maximum: full color in 10 bits, on the GPU or the CPU; a fixed quantizer that follows the tier
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, true, 60, None), &["hevc_nvenc", "yuv444p16le", "constqp", "20", "bt709"]));
+        assert!(has(&arguments(VideoQuality::UltraHigh, Playback::Maximum, true, 60, None), &["16"]));
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, false, 60, None), &["libx264", "yuv444p10le", "14"]));
+        //High quality: HEVC Main 10, half the color resolution made with a sharp filter; Most compatible: 8-bit H.264
+        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, true, 60, None), &["hevc_nvenc", "p010le", "main10", "lanczos"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, false, 60, None), &["libx265", "yuv420p10le"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60, None), &["libx264", "yuv420p", "18"]));
         //A keyframe every half second and the index at the start; lossless is FFV1 whatever the player
-        assert!(has(&arguments(VideoQuality::High, Playback::Everywhere, true, 60), &["-g", "30", "+faststart"]));
-        assert_eq!(arguments(VideoQuality::Lossless, Playback::Phones, true, 60), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
+        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60, None), &["-g", "30", "+faststart"]));
+        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60, None), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
+        //Max bitrate (issue #224): the GPU's encoder keeps its quality target under a variable rate, the CPU's keep their factor, both within a buffer of half a second
+        let capped = arguments(VideoQuality::VeryHigh, Playback::HighQuality, true, 60, Some(180));
+        assert!(has(&capped, &["hevc_nvenc", "vbr", "-cq", "20", "-b:v", "180M", "-maxrate", "-bufsize", "90000k"]) && !capped.iter().any(|argument| argument == "constqp"), "{capped:?}");
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::HighQuality, false, 60, Some(180)), &["libx265", "-crf", "14", "-maxrate", "180M", "-bufsize", "90000k"]));
+        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60, Some(180)), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"], "no limit for lossless");
         assert_eq!((extension(VideoQuality::Lossless), extension(VideoQuality::NearLossless)), ("mkv", "mp4"));
     }
 
     #[test]
+    fn a_video_that_fits_a_length_has_exactly_its_frames() {
+        //200 s at 60 FPS: 12,000 frame intervals, and the frames at both ends
+        let flight = Duration::from_secs_f64(37.3);
+        let speed = flight.as_secs_f64() * 100.0 / 200.0;
+        assert_eq!(frame_count(flight, 60, speed), 12_001);
+        assert_eq!(frame_count(Duration::from_secs(13), 60, 50.0), 1561, "a whole speed as before");
+        assert_eq!((speed_text(18.65), speed_text(50.0), length_text(Duration::from_secs(200)), length_text(Duration::from_secs(3723))), (String::from("18.6%"), String::from("50%"), String::from("3:20"), String::from("1:02:03")));
+    }
+
+    #[test]
+    fn the_climber_keeps_one_more_frame_at_once_only_when_it_is_faster() {
+        let mut climber = Climber::new(2, 4);
+        assert_eq!(climber.measured(10.0), 3, "after a measurement at 2: try 3");
+        assert_eq!(climber.measured(12.0), 4, "3 is faster: keep it, try 4");
+        assert_eq!(climber.measured(12.1), 3, "4 is not faster (by less than the noise): back to 3");
+        for _ in 0..HOLD_WINDOWS {
+            assert_eq!(climber.measured(12.0), 3, "and stay there for a while");
+        }
+        assert_eq!(climber.measured(11.0), 4, "then measure 3 again and try 4 again");
+        assert_eq!(climber.measured(13.0), 4, "now 4 pays, and it is the most the memory allows");
+        assert_eq!(climber.measured(13.0), 4);
+        assert_eq!(Climber::new(2, 1).measured(5.0), 1, "never more than the most");
+    }
+
+    #[test]
+    fn the_scheduler_lets_as_many_frames_start_as_allowed() {
+        let scheduler = FrameScheduler::new(2);
+        let cancel = AtomicBool::new(false);
+        assert!(scheduler.start_frame(&cancel) && scheduler.start_frame(&cancel));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(!scheduler.start_frame(&cancel), "no free place, cancelled");
+        scheduler.finish_frame(true);
+        assert!(scheduler.start_frame(&AtomicBool::new(false)), "a finished frame frees a place");
+        scheduler.set_allowed(3);
+        assert!(scheduler.start_frame(&AtomicBool::new(false)), "one more allowed");
+        assert_eq!(scheduler.finished.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn the_memory_bounds_the_frames_at_once() {
+        assert!((1..=MAX_AT_ONCE).contains(&frames_memory_allows(3840 * 2160)));
+        assert_eq!(frames_memory_allows(usize::MAX / 64), 1, "a frame too large for the memory still renders, one at a time");
+    }
+
+    #[test]
+    fn the_formats_are_found_by_their_names_and_by_the_names_they_had_before() {
+        for playback in Playback::ALL {
+            assert_eq!(Playback::of_name(playback.name()), Some(playback));
+        }
+        assert_eq!(Playback::of_name("Computers"), Some(Playback::Maximum));
+        assert_eq!(Playback::of_name("Phones and TVs"), Some(Playback::HighQuality));
+        assert_eq!(Playback::of_name("Everywhere"), Some(Playback::MostCompatible));
+        assert_eq!(Playback::of_name("Somewhere"), None);
+    }
+
+    #[test]
     fn the_estimate_has_the_exact_frames_and_length_and_a_size_that_grows_with_the_tier() {
-        let (frames, length, high) = estimate(Duration::from_secs(13), 60, 50, (1920, 1080), VideoQuality::High, Playback::Computers);
+        let (frames, length, high) = estimate(Duration::from_secs(13), 60, 50.0, (1920, 1080), VideoQuality::High, Playback::Maximum);
         assert_eq!((frames, length.as_secs()), (1561, 26), "13 s at half speed: 26 s, at 60 FPS");
-        let sizes: Vec<f64> = VideoQuality::ALL.iter().map(|quality| estimate(Duration::from_secs(13), 60, 50, (1920, 1080), *quality, Playback::Computers).2).collect();
+        let sizes: Vec<f64> = VideoQuality::ALL.iter().map(|quality| estimate(Duration::from_secs(13), 60, 50.0, (1920, 1080), *quality, Playback::Maximum).2).collect();
         assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]) && (sizes[0] - high).abs() < 1.0);
         //Lossless: about 3.2 GB, as Jort measured (3 GB for 26 s)
         assert!((2.5e9..4e9).contains(&sizes[4]), "{}", sizes[4]);

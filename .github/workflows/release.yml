@@ -1,0 +1,51 @@
+name: Release builds
+
+# Builds the program for Linux, Windows and macOS (issue #191). A pushed tag starting with "v" (such as v0.4.0) attaches the packages to the GitHub release
+# of that tag; on a pull request that changes this workflow they are only built and kept as artifacts, to check the packaging
+on:
+  push:
+    tags: [ "v*" ]
+  pull_request:
+    paths: [ ".github/workflows/release.yml" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write #(To attach the packages to the release of a tag)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x86_64, binary: mandelbrot, archive: tar.gz }
+          - { os: windows-latest, name: windows-x86_64, binary: mandelbrot.exe, archive: zip }
+          - { os: macos-latest, name: macos-arm64, binary: mandelbrot, archive: tar.gz }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      # The program, the places it lists at startup, and what to read first
+      - name: Package
+        shell: bash
+        run: |
+          package="mandelbrot-${GITHUB_REF_NAME//\//-}-${{ matrix.name }}"
+          mkdir "$package"
+          cp "target/release/${{ matrix.binary }}" README.md LICENSE NOTICE "$package/"
+          cp -r points_of_interest "$package/"
+          if [ "${{ matrix.archive }}" = "zip" ]; then 7z a "$package.zip" "$package" > /dev/null; else tar czf "$package.tar.gz" "$package"; fi
+          echo "PACKAGE=$package.${{ matrix.archive }}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.PACKAGE }}
+      - name: Attach to the release of the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.PACKAGE }}

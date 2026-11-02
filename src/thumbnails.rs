@@ -70,6 +70,16 @@ impl ThumbnailRequest {
         feed(&self.location.imaginary.to_bits().to_le_bytes());
         feed(&self.location.scale.to_bits().to_le_bytes());
         feed(&self.location.max_iterations.min(MAX_THUMBNAIL_ITERATIONS).to_le_bytes());
+        //(A place in a Julia set, and a turned place, look different from the Mandelbrot place with the same numbers: issue #229)
+        feed(&self.location.rotation.to_bits().to_le_bytes());
+        match self.location.julia {
+            Some((x, y)) => {
+                feed(b"julia");
+                feed(&x.to_bits().to_le_bytes());
+                feed(&y.to_bits().to_le_bytes());
+            }
+            None => feed(b"mandelbrot"),
+        }
         feed(self.coloring.key().as_bytes());
         feed(format!("{:?}", self.color_channels).as_bytes());
         feed(&self.palette.divide.to_bits().to_le_bytes());
@@ -87,8 +97,11 @@ impl ThumbnailRequest {
 pub fn render_thumbnail(request: &ThumbnailRequest, orbit_radius: f64, cancel: &AtomicBool) -> Option<Vec<TrueColor>> {
     let mut plane = ComplexPlane::new(request.width, request.height);
     plane.set_view(&View::new(request.location.real, request.location.imaginary, request.location.scale));
+    plane.set_rotation(request.location.rotation.to_radians());
     let mut set = MandelbrotSet::new(request.location.max_iterations.min(MAX_THUMBNAIL_ITERATIONS), orbit_radius);
     set.palette = request.palette;
+    //A place saved in a Julia set shows that Julia set (issue #229)
+    set.julia = request.location.julia;
     let coloring_function = match request.coloring {
         Coloring::Hsv => TrueColor::new_from_hsv_colors,
         Coloring::Bernstein => TrueColor::new_from_bernstein_polynomials,
@@ -163,7 +176,7 @@ mod tests {
     use super::*;
 
     fn request() -> ThumbnailRequest {
-        ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.02, max_iterations: 300 }, coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, palette: ColorCycle::CYCLE, width: 36, height: 24 }
+        ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.02, max_iterations: 300, rotation: 0.0, julia: None }, coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, palette: ColorCycle::CYCLE, width: 36, height: 24 }
     }
 
     #[test]
@@ -196,9 +209,41 @@ mod tests {
         let mut other = request();
         other.width = 37;
         assert_ne!(other.key(), base.key());
+        let mut other = request();
+        other.location.rotation = 30.0;
+        assert_ne!(other.key(), base.key(), "a turned place");
+        let mut other = request();
+        other.location.julia = Some((-0.8, 0.156));
+        assert_ne!(other.key(), base.key(), "a place in a Julia set");
         let (mut high, mut higher) = (request(), request());
         (high.location.max_iterations, higher.location.max_iterations) = (MAX_THUMBNAIL_ITERATIONS, MAX_THUMBNAIL_ITERATIONS * 50);
         assert_eq!(high.key(), higher.key(), "iterations beyond the cap do not change the thumbnail");
+    }
+
+    #[test]
+    fn the_thumbnail_of_a_place_in_a_julia_set_shows_that_julia_set_and_a_turned_place_is_turned() {
+        //Issue #229: they showed the Mandelbrot set, unturned
+        let never = AtomicBool::new(false);
+        let colors = |request: &ThumbnailRequest| render_thumbnail(request, 2.0, &never).unwrap().iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>();
+        let mut julia = request();
+        julia.location = Location { real: 0.0, imaginary: 0.0, scale: 0.6, max_iterations: 300, rotation: 0.0, julia: Some((-0.8, 0.156)) };
+        let mut mandelbrot = julia.clone();
+        mandelbrot.location.julia = None;
+        let (julia_colors, mandelbrot_colors) = (colors(&julia), colors(&mandelbrot));
+        let differ = julia_colors.iter().zip(&mandelbrot_colors).filter(|(a, b)| a != b).count();
+        assert!(differ > julia_colors.len() / 4, "the Julia set, not the Mandelbrot set: {differ} of {} pixels differ", julia_colors.len());
+        //The same Julia set rendered as the main view renders it
+        let mut plane = ComplexPlane::new(julia.width, julia.height);
+        plane.set_view(&View::new(0.0, 0.0, 0.6));
+        let mut set = MandelbrotSet::new(300, 2.0);
+        set.palette = julia.palette;
+        set.julia = Some((-0.8, 0.156));
+        let mut main = None;
+        assert!(Render::new(&plane, &set, julia.width, julia.height, TrueColor::new_from_bernstein_polynomials).supersampling(THUMBNAIL_SAMPLES).run(|colors, _| main = Some(colors.to_vec())));
+        assert_eq!(main.unwrap().iter().map(|c| (c.red, c.green, c.blue)).collect::<Vec<_>>(), julia_colors);
+        let mut turned = request();
+        turned.location.rotation = 90.0;
+        assert_ne!(colors(&turned), colors(&request()), "a turned place shows turned");
     }
 
     #[test]

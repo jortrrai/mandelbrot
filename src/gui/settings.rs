@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::flight::{FlightRendering, Pace, Route, CONSTANT_SPEEDS, DIVE_ZOOMS, FLIGHT_SPEEDS};
-use super::video::{Playback, VideoQuality, FRAMES_AT_ONCE, FRAME_RATES, SPEEDS};
+use super::video::{Playback, VideoQuality, FRAME_RATES, SPEEDS};
 use crate::mandelbrot_set::{MAX_DIVIDE, MIN_DIVIDE, PALETTE_LENGTH};
+use super::save_size::SaveSizeChoice;
 use super::{MandelbrotApp, COLORING_FUNCTIONS};
 use crate::auto_iterations::AutoPreset;
 use crate::coloring::ColorChannelMapping;
@@ -63,11 +64,33 @@ pub(super) struct Settings {
     stretch_palette: Option<bool>,
     video_fps: Option<u32>,
     video_speed: Option<u16>,
+    video_fit_length: Option<bool>,
+    music_path: Option<String>,
+    follow_music: Option<bool>,
+    music_strength: Option<f64>,
+    video_length: Option<[String; 3]>,
     video_quality: Option<String>,
     video_playback: Option<String>,
+    /// *Max bitrate*: on or off, and the limit in megabits per second
+    video_max_bitrate: Option<bool>,
+    video_max_mbps: Option<u32>,
     video_pngs: Option<bool>,
     video_blend: Option<bool>,
-    video_frames_at_once: Option<usize>,
+    video_shutter: Option<f64>,
+    video_keyframe_dives: Option<bool>,
+    /// The unit of the rotation: "degrees" or "radians"
+    rotation_unit: Option<String>,
+    /// The lowest level of messages the status log shows (see `status::LogLevel`)
+    log_level: Option<String>,
+    show_minimap: Option<bool>,
+    show_orbit: Option<bool>,
+    /// Whether the Julia map is shown (off by default; a new name since review 5, when it was on by default for a while)
+    show_julia_map: Option<bool>,
+    /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
+    save_size: Option<String>,
+    save_width: Option<usize>,
+    save_height: Option<usize>,
+    save_portrait: Option<bool>,
 }
 
 /// The auto iterations presets, to find one by its name
@@ -153,11 +176,33 @@ impl MandelbrotApp {
             stretch_palette: Some(self.m.palette.stretch),
             video_fps: Some(self.video_fps),
             video_speed: Some(self.video_speed),
+            video_fit_length: Some(self.video_fit_length),
+            music_path: Some(self.music_path.clone()),
+            follow_music: Some(self.follow_music),
+            music_strength: Some(self.music_strength),
+            video_length: Some(self.video_length.clone()),
             video_quality: Some(self.video_quality.name().to_string()),
             video_playback: Some(self.video_playback.name().to_string()),
+            video_max_bitrate: Some(self.video_max_bitrate),
+            video_max_mbps: Some(self.video_max_mbps),
             video_pngs: Some(self.video_pngs),
             video_blend: Some(self.video_blend),
-            video_frames_at_once: Some(self.video_frames_at_once),
+            video_shutter: Some(self.video_shutter),
+            video_keyframe_dives: Some(self.video_keyframe_dives),
+            rotation_unit: Some(String::from(if self.rotation_in_degrees { "degrees" } else { "radians" })),
+            log_level: Some(self.log_level.name().to_string()),
+            show_minimap: Some(self.show_minimap),
+            show_orbit: Some(self.show_orbit),
+            show_julia_map: Some(self.show_julia),
+            save_size: Some(match &self.save_size.choice {
+                SaveSizeChoice::Standard => String::from("default"),
+                SaveSizeChoice::View => String::from("view"),
+                SaveSizeChoice::Custom => String::from("custom"),
+                SaveSizeChoice::Preset(name) => format!("preset:{name}"),
+            }),
+            save_width: Some(self.save_size.custom_width),
+            save_height: Some(self.save_size.custom_height),
+            save_portrait: Some(self.save_size.portrait),
         }
     }
 
@@ -261,17 +306,63 @@ impl MandelbrotApp {
         if let Some(speed) = settings.video_speed.filter(|speed| SPEEDS.contains(speed)) {
             self.video_speed = speed;
         }
+        if let Some(fit) = settings.video_fit_length {
+            self.video_fit_length = fit;
+        }
+        if let Some(path) = settings.music_path.clone() {
+            self.music_path = path;
+        }
+        if let Some(follow) = settings.follow_music {
+            self.follow_music = follow;
+        }
+        if let Some(strength) = settings.music_strength.filter(|strength| (0.0..=1.0).contains(strength)) {
+            self.music_strength = strength;
+        }
+        if let Some(length) = settings.video_length.clone() {
+            self.video_length = length;
+        }
         if let Some(quality) = settings.video_quality.as_deref().and_then(|name| VideoQuality::ALL.into_iter().find(|quality| quality.name() == name)) {
             self.video_quality = quality;
         }
-        if let Some(playback) = settings.video_playback.as_deref().and_then(|name| Playback::ALL.into_iter().find(|playback| playback.name() == name)) {
-            self.video_playback = playback;
+        set(settings.video_max_bitrate, &mut self.video_max_bitrate);
+        if let Some(mbps) = settings.video_max_mbps.filter(|mbps| (5..=1000).contains(mbps)) {
+            self.video_max_mbps = mbps;
         }
-        if let Some(at_once) = settings.video_frames_at_once.filter(|at_once| FRAMES_AT_ONCE.contains(at_once)) {
-            self.video_frames_at_once = at_once;
+        if let Some(playback) = settings.video_playback.as_deref().and_then(Playback::of_name) {
+            self.video_playback = playback;
         }
         set(settings.video_pngs, &mut self.video_pngs);
         set(settings.video_blend, &mut self.video_blend);
+        set(settings.show_minimap, &mut self.show_minimap);
+        set(settings.show_orbit, &mut self.show_orbit);
+        set(settings.show_julia_map, &mut self.show_julia);
+        set(settings.video_keyframe_dives, &mut self.video_keyframe_dives);
+        if let Some(level) = settings.log_level.as_deref().and_then(|name| super::status::LogLevel::ALL.into_iter().find(|level| level.name() == name)) {
+            self.log_level = level;
+        }
+        if let Some(unit) = settings.rotation_unit.as_deref() {
+            self.rotation_in_degrees = unit != "radians";
+        }
+        if let Some(shutter) = settings.video_shutter.filter(|shutter| (0.0..=360.0).contains(shutter)) {
+            self.video_shutter = shutter;
+        }
+        //(A preset that no longer exists, say a deleted custom one: the default size)
+        if let Some(choice) = settings.save_size.as_deref() {
+            self.save_size.choice = match choice.split_once(':') {
+                Some(("preset", name)) if self.save_size.all_presets().iter().any(|preset| preset.name == name) => SaveSizeChoice::Preset(name.to_string()),
+                _ if choice == "view" => SaveSizeChoice::View,
+                _ if choice == "custom" => SaveSizeChoice::Custom,
+                _ => SaveSizeChoice::Standard,
+            };
+        }
+        let sides = crate::resolution::MIN_SIDE..=crate::resolution::MAX_IMAGE_SIDE;
+        if let Some(width) = settings.save_width.filter(|width| sides.contains(width)) {
+            self.save_size.custom_width = width;
+        }
+        if let Some(height) = settings.save_height.filter(|height| sides.contains(height)) {
+            self.save_size.custom_height = height;
+        }
+        set(settings.save_portrait, &mut self.save_size.portrait);
     }
 
     /// Keeps the settings in the file `path` from now on: the settings as they are now are the defaults (for Reset settings), and those of the file are applied.
@@ -290,6 +381,7 @@ impl MandelbrotApp {
         }
         self.settings_saved = Some(self.settings());
         self.settings_path = path;
+        self.load_queue();
         loaded.is_some_and(|settings| settings != Settings::default()) && self.settings() != self.settings_defaults
     }
 

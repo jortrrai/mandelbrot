@@ -84,44 +84,95 @@ impl PixelBuffer {
     /// Also stores author and application metadata
     /// # Errors
     /// Returns the error if the `saved` folder or the file cannot be created, or the image cannot be encoded or written
-    pub fn save_as_png(&self, file_name_without_extension: &str, view: &View, m: &MandelbrotSet, supersampling_amount: u8) -> std::io::Result<()> {
+    pub fn save_as_png(&self, file_name_without_extension: &str, view: &View, m: &MandelbrotSet, supersampling_amount: u8, place: Option<&str>) -> std::io::Result<()> {
         let file_name_without_extension = file_name_without_extension.replace(':', "-").replace(' ', "_"); //Replace ':' with '-' for Windows file system. Replace ' ' with '_' because spaces are annoying in filenames.
         let file_name = format!("saved{}{}.png", std::path::MAIN_SEPARATOR_STR, file_name_without_extension);
         std::fs::create_dir_all("saved")?; //Create the saved folder if it does not exist
-        self.write_png(Path::new(&file_name), view, m, supersampling_amount)
+        self.write_png(Path::new(&file_name), view, m, supersampling_amount, place)
     }
 
-    /// Writes the `PixelBuffer` as an RGB png image to `path`, with the metadata of `save_as_png`
+    /// Writes the `PixelBuffer` as an RGB png image to `path`, with the metadata of `save_as_png`, and `place` (the view in the format of a point of interest
+    /// file, see `image_metadata`) in an `iTXt` chunk
     /// # Errors
     /// Returns the error if the file cannot be created, or the image cannot be encoded or written
-    fn write_png(&self, path: &Path, view: &View, m: &MandelbrotSet, supersampling_amount: u8) -> std::io::Result<()> {
-        let file = File::create(path)?;
-        let w = &mut BufWriter::new(file);
-        let mut encoder = png::Encoder::new(w, self.pixel_plane.width as u32, self.pixel_plane.height as u32);
+    fn write_png(&self, path: &Path, view: &View, m: &MandelbrotSet, supersampling_amount: u8, place: Option<&str>) -> std::io::Result<()> {
+        let metadata = PngMetadata { view, m, supersampling_amount, color_channel_mapping: self.color_channel_mapping, place };
+        let mut png = PngRows::create(path, self.pixel_plane.width, self.pixel_plane.height, &metadata)?;
+        png.write_rows(&self.colors, self.color_channel_mapping)?;
+        png.finish()
+    }
+}
+
+/// What a saved PNG image says about itself: its view and settings, as texts (see `PngRows::create`)
+pub struct PngMetadata<'a> {
+    /// The view of the image
+    pub view: &'a View,
+    /// The set: its limit and colors
+    pub m: &'a MandelbrotSet,
+    /// The samples per pixel
+    pub supersampling_amount: u8,
+    /// How the channels of the colors are placed in the pixels
+    pub color_channel_mapping: ColorChannelMapping,
+    /// The view in the format of a point of interest file (see `image_metadata`), in an `iTXt` chunk
+    pub place: Option<&'a str>,
+}
+
+/// A PNG image that is written row by row, so a large image never has to be in memory as a whole: the rows are filtered and compressed as they come
+pub struct PngRows {
+    writer: png::StreamWriter<'static, BufWriter<File>>,
+}
+
+impl PngRows {
+    /// Creates the file at `path` for an RGB image of `width` x `height` pixels, with the texts of `metadata` before the pixels
+    /// # Errors
+    /// The file cannot be created or the header cannot be written
+    pub fn create(path: &Path, width: usize, height: usize, metadata: &PngMetadata) -> std::io::Result<PngRows> {
+        let side = |side: usize| u32::try_from(side).map_err(std::io::Error::other);
+        let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), side(width)?, side(height)?);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         let texts = [
-            ("view", format!("{view:?}")),
-            ("mandelbrot_set", format!("{m:?}")),
-            ("supersampling_amount", format!("{supersampling_amount}x")),
+            ("view", format!("{:?}", metadata.view)),
+            ("mandelbrot_set", format!("{:?}", metadata.m)),
+            ("supersampling_amount", format!("{}x", metadata.supersampling_amount)),
             ("application", String::from("Mandelbrot by Jort (https://github.com/jortrr/mandelbrot)")),
             ("author", String::from("jortrr (https://github.com/jortrr/)")),
-            ("color_channel_mapping", format!("{:?}", self.color_channel_mapping)),
+            ("color_channel_mapping", format!("{:?}", metadata.color_channel_mapping)),
         ];
         for (keyword, text) in texts {
             encoder.add_text_chunk(String::from(keyword), text).map_err(std::io::Error::other)?;
         }
-        let mut data: Vec<u8> = Vec::with_capacity(self.colors.len() * 3);
-        let [r_source, g_source, b_source] = self.color_channel_mapping.sources();
-        for color in &self.colors {
-            data.push(color.channel(r_source));
-            data.push(color.channel(g_source));
-            data.push(color.channel(b_source));
+        if let Some(place) = metadata.place {
+            encoder.add_itxt_chunk(String::from(crate::image_metadata::KEYWORD), place.to_string()).map_err(std::io::Error::other)?;
         }
-        let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
-        writer.write_image_data(&data).map_err(std::io::Error::other)?;
-        writer.finish().map_err(std::io::Error::other)
+        let writer = encoder.write_header().and_then(png::Writer::into_stream_writer).map_err(std::io::Error::other)?;
+        Ok(PngRows { writer })
     }
+
+    /// Writes the next whole rows of the image: `colors`, row by row, with their channels placed by `mapping`
+    /// # Errors
+    /// The rows cannot be written, or they are more than the image has
+    pub fn write_rows(&mut self, colors: &[TrueColor], mapping: ColorChannelMapping) -> std::io::Result<()> {
+        use std::io::Write;
+        self.writer.write_all(&rgb_bytes(colors, mapping))
+    }
+
+    /// Finishes the image after its last row
+    /// # Errors
+    /// Fewer rows were written than the image has, or the end cannot be written
+    pub fn finish(self) -> std::io::Result<()> {
+        self.writer.finish().map_err(std::io::Error::other)
+    }
+}
+
+/// The bytes of `colors` in a PNG of RGB pixels: red, green and blue of every pixel, with the channels placed by `mapping`
+pub fn rgb_bytes(colors: &[TrueColor], mapping: ColorChannelMapping) -> Vec<u8> {
+    let [r_source, g_source, b_source] = mapping.sources();
+    let mut data: Vec<u8> = Vec::with_capacity(colors.len() * 3);
+    for color in colors {
+        data.extend([color.channel(r_source), color.channel(g_source), color.channel(b_source)]);
+    }
+    data
 }
 
 #[cfg(test)]
@@ -142,18 +193,41 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_image_opens_at_its_view_again() {
+        //Issue #183: the view chunk of `write_png` is read back exactly by `image_metadata`
+        let buffer = numbered_buffer();
+        let (view, m) = (View::new(-0.749_810_000_000_000_1, -0.020_300_000_000_000_054, 6.4e-5), MandelbrotSet::new(321, 2.0));
+        let point = crate::points_of_interest::PointOfInterest {
+            name: String::from("Saved"),
+            description: String::new(),
+            location: crate::points_of_interest::Location { real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale: 6.4e-5, max_iterations: 321, rotation: 0.0, julia: None },
+            appearance: Some(crate::points_of_interest::Appearance { iteration_divide: Some(0.113), color_offset: Some(278.0), ..Default::default() }),
+            file_name: String::new(),
+        };
+        let path = std::env::temp_dir().join(format!("mandelbrot-view-png-{}.png", std::process::id()));
+        buffer.write_png(&path, &view, &m, 4, Some(&crate::points_of_interest::to_json(&point))).unwrap();
+        let read = crate::image_metadata::view_of_png(&path).unwrap();
+        assert_eq!((read.location, read.appearance), (point.location, point.appearance));
+        //Without the chunk (an image of an older version) the readable texts give the view and the limit
+        buffer.write_png(&path, &view, &m, 4, None).unwrap();
+        let old = crate::image_metadata::view_of_png(&path).unwrap();
+        assert_eq!((old.location.real, old.location.imaginary, old.location.scale, old.location.max_iterations), (-0.749_810_000_000_000_1, -0.020_300_000_000_000_054, 6.4e-5, 321));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn writing_a_png_reports_errors_instead_of_panicking() {
         let buffer = numbered_buffer();
         let (view, m) = (View::new(-0.75, 0.0, 1.0), MandelbrotSet::new(10, 2.0));
         let folder = std::env::temp_dir().join(format!("mandelbrot-png-test-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join("ok.png");
-        buffer.write_png(&path, &view, &m, 1).expect("a png can be written to an existing folder");
+        buffer.write_png(&path, &view, &m, 1, Some("{}")).expect("a png can be written to an existing folder");
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[1..4], b"PNG");
         assert!(bytes.windows(4).any(|window| window == b"view"), "the view is stored in the metadata");
         let missing = folder.join("no-such-folder").join("x.png");
-        assert!(buffer.write_png(&missing, &view, &m, 1).is_err(), "a folder that does not exist is an error, not a panic");
+        assert!(buffer.write_png(&missing, &view, &m, 1, None).is_err(), "a folder that does not exist is an error, not a panic");
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

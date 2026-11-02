@@ -113,10 +113,16 @@ impl Blur {
     }
 }
 
+/// How many pixels a tap of the blur of `sigma` pixels reaches from its center (2.5 sigma, from 1 to `MAX_RADIUS`): the rows of a strip that `blurred` needs
+/// from the strips next to it (see `export`)
+pub(super) fn blur_radius(sigma: f32) -> usize {
+    ((2.5 * sigma).ceil() as usize).clamp(1, MAX_RADIUS.unsigned_abs() as usize)
+}
+
 /// The colors of a `width` x `height` image blurred by a Gaussian of `sigma` pixels, like the shader of `Blur` (gamma-space colors, radius 2.5 sigma at most
 /// `MAX_RADIUS`, the edge pixels repeated), on all render threads: for saving an image of the blurred quality preset
 pub(super) fn blurred(colors: &[crate::coloring::TrueColor], width: usize, height: usize, sigma: f32) -> Vec<crate::coloring::TrueColor> {
-    let radius: isize = ((2.5 * sigma).ceil() as isize).clamp(1, isize::try_from(MAX_RADIUS).unwrap_or(6));
+    let radius = blur_radius(sigma).cast_signed();
     let weights: Vec<f32> = (-radius..=radius).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
     let total: f32 = weights.iter().sum();
     let weights: Vec<f32> = weights.iter().map(|weight| weight / total).collect();
@@ -158,16 +164,22 @@ pub(super) struct Quality {
 
 impl Quality {
     /// The presets of the quality lists, fastest first
-    pub(super) const PRESETS: [Quality; 8] = [
+    /// The blurred ones blur by `blur_sigma(1, samples)`: measured in issue #186 as the best of three strengths, 4x + blur came close to 8x in 57% of its time,
+    /// and 8x + blur halfway between 8x and 16x in about half the time of 16x
+    pub(super) const PRESETS: [Quality; 11] = [
         Quality { samples: 1, blurred: false }, Quality { samples: 1, blurred: true }, Quality { samples: 2, blurred: false }, Quality { samples: 4, blurred: false },
-        Quality { samples: 8, blurred: false }, Quality { samples: 16, blurred: false }, Quality { samples: 32, blurred: false }, Quality { samples: 64, blurred: false },
+        Quality { samples: 4, blurred: true }, Quality { samples: 8, blurred: false }, Quality { samples: 8, blurred: true }, Quality { samples: 16, blurred: false },
+        Quality { samples: 16, blurred: true }, Quality { samples: 32, blurred: false }, Quality { samples: 64, blurred: false },
     ];
 
     /// The name in the list
     pub(super) fn name(self) -> String {
         match (self.samples, self.blurred) {
             (1, false) => String::from("1x (fastest)"),
-            (_, true) => format!("{}x + blur (smooth, fast)", self.samples),
+            (1, true) => String::from("1x + blur (smooth, fast)"),
+            (4, true) => String::from("4x + blur (close to 8x)"),
+            (8, true) => String::from("8x + blur (between 8x and 16x)"),
+            (_, true) => format!("{}x + blur", self.samples),
             (64, false) => String::from("64x (best)"),
             (samples, false) => format!("{samples}x"),
         }

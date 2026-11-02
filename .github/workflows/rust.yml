@@ -22,17 +22,27 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
   test:
-    # Only Linux: the other systems do not matter for this project. Linux runs the AVX2 loops; the generic loops are compared with them bit for bit by a test
+    # Linux, Windows and macOS (issue #191; macOS on Apple Silicon runs the generic loops, Linux and Windows the AVX2 ones). ffmpeg is installed for the
+    # tests of video files
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
       - run: cargo build --all-targets --verbose
       - run: cargo test --verbose
 

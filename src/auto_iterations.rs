@@ -19,7 +19,7 @@ use crate::mandelbrot_set::MandelbrotSet;
 /// The parameters of the automatic iteration limit: where it starts, how it grows with the zoom, and the bounds of the refinement (see the module documentation).
 ///
 /// The named presets are `AutoPreset::settings`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AutoIterationSettings {
     /// Limit at magnification 1
     pub start: u32,
