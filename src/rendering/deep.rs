@@ -146,27 +146,137 @@ pub fn reference_orbit(real: &Fixed, imaginary: &Fixed, max_iterations: u32) -> 
     orbit
 }
 
-/// The smooth position (see `MandelbrotSet::position`) of the point at offset `(dcx, dcy)` from the center of `orbit`, by perturbation with rebasing.
+/// How small the dropped term `z²` of a step must stay against the terms that are kept, for a bilinear approximation (see `Reference`) to stand in for
+/// the steps: below 10⁻¹³ of them (measured on issue #141: about 1 pixel in 100 changes its color in the most chaotic views, where a move of a thousandth
+/// of a pixel changes a third of them)
+const BLA_TOLERANCE: f64 = 1e-13;
+
+fn bla_tolerance() -> f64 {
+    #[cfg(test)]
+    if let Some(tolerance) = std::env::var("MANDELBROT_BLA_TOLERANCE").ok().and_then(|text| text.parse().ok()) {
+        return tolerance;
+    }
+    BLA_TOLERANCE
+}
+
+/// A bilinear approximation of some steps of the perturbation from one step of the reference orbit on: `z ← A·z + B·c`, valid while `|z| < radius`
+#[derive(Clone, Copy, Debug)]
+struct Bla {
+    a: (f64, f64),
+    b: (f64, f64),
+    radius: f64,
+    radius_squared: f64,
+}
+
+impl Bla {
+    /// `self` (first) followed by `then`, where `max_offset` is the largest `|c|` of the view
+    fn then(&self, then: &Bla, max_offset: f64) -> Bla {
+        let a = times(then.a, self.a);
+        let b = times(then.a, self.b);
+        let size_a = self.a.0.hypot(self.a.1);
+        let size_b = self.b.0.hypot(self.b.1);
+        let radius = self.radius.min(((then.radius - size_b * max_offset) / size_a).max(0.0));
+        Bla { a, b: (b.0 + then.b.0, b.1 + then.b.1), radius, radius_squared: radius * radius }
+    }
+}
+
+fn times((x, y): (f64, f64), (u, v): (f64, f64)) -> (f64, f64) {
+    (x * u - y * v, x * v + y * u)
+}
+
+/// The orbit of the center of a view (see `reference_orbit`) and, for speed, a table of bilinear approximations (BLA) of its steps.
 ///
-/// `center` is the center in 64-bit floats, for the steps after the point escaped; see the module
-pub fn position(m: &MandelbrotSet, orbit: &[(f64, f64)], center: (f64, f64), (dcx, dcy): (f64, f64)) -> f64 {
+/// **Bilinear approximation** (Zhuoran, 2021): while a pixel's difference `z` from the reference orbit is tiny, the step `z ← 2·Z·z + z² + c` is nearly
+/// linear, `z ← A·z + B·c`, and many such steps compose into one: `A₂·(A₁·z + B₁·c) + B₂·c`. The table holds the compositions of 2, 4, 8, ... steps, each
+/// with the largest `|z|` at which it is still accurate (`BLA_TOLERANCE`); deep in a view, where the orbits of the pixels follow the center's for
+/// thousands of steps, a pixel then skips most of them. The positions differ from step by step perturbation only by that tolerance
+pub struct Reference {
+    orbit: Vec<(f64, f64)>,
+    /// `levels[l][k]`: the approximation of the `2^(l + 1)` steps from step `1 + k · 2^(l + 1)` of the orbit
+    levels: Vec<Vec<Bla>>,
+}
+
+impl Reference {
+    /// The reference orbit of the center `(real, imaginary)`, for a view whose pixels are at most `max_offset` from it; with `approximate` also its table
+    /// of bilinear approximations (without it, every step is iterated, as in `position` before BLA)
+    pub fn new(m: &MandelbrotSet, (real, imaginary): (&Fixed, &Fixed), max_offset: f64, approximate: bool) -> Reference {
+        let orbit = reference_orbit(real, imaginary, m.max_iterations);
+        let levels = if approximate { Self::table(&orbit, max_offset, m.orbit_radius) } else { Vec::new() };
+        Reference { orbit, levels }
+    }
+
+    fn table(orbit: &[(f64, f64)], max_offset: f64, orbit_radius: f64) -> Vec<Vec<Bla>> {
+        //Single steps from step n = 1, 2, ... (step 0, from Z = 0, is not linear): A = 2·Z, B = 1, valid while |z²| stays below the tolerance of |2·Z·z|,
+        //and never where the orbit comes within 0.1% of the orbit radius: a pixel, which is that close to the orbit (|z| ≪ |Z|), could escape inside a skip
+        let singles: Vec<Bla> = (1..orbit.len().saturating_sub(1))
+            .map(|n| {
+                let (x, y) = orbit[n];
+                let next = orbit[n + 1];
+                let size = x.hypot(y);
+                let radius = if next.0.hypot(next.1) < 0.999 * orbit_radius { 2.0 * bla_tolerance() * size } else { 0.0 };
+                Bla { a: (2.0 * x, 2.0 * y), b: (1.0, 0.0), radius, radius_squared: radius * radius }
+            })
+            .collect();
+        //Each level composes pairs of the level below
+        let mut levels: Vec<Vec<Bla>> = Vec::new();
+        loop {
+            let below = levels.last().unwrap_or(&singles);
+            if below.len() < 2 {
+                return levels;
+            }
+            let level = below.as_chunks::<2>().0.iter().map(|[first, then]| first.then(then, max_offset)).collect();
+            levels.push(level);
+        }
+    }
+
+    /// The longest approximation that a difference of `|z|² = size_squared` at step `at` of the orbit may take, of at most `left` steps: it and its steps
+    fn skip(&self, at: usize, size_squared: f64, left: u32) -> Option<(&Bla, u32)> {
+        if at == 0 || self.levels.is_empty() {
+            return None;
+        }
+        let aligned = ((at - 1).trailing_zeros() as usize).min(self.levels.len());
+        for level in (1..=aligned).rev() {
+            let steps = 1_usize << level;
+            let Some(bla) = self.levels[level - 1].get((at - 1) >> level) else { continue };
+            if steps as u64 <= u64::from(left) && size_squared < bla.radius_squared {
+                return Some((bla, steps as u32));
+            }
+        }
+        None
+    }
+}
+
+/// The smooth position (see `MandelbrotSet::position`) of the point at offset `(dcx, dcy)` from the center of `reference`, by perturbation with rebasing.
+///
+/// `center` is the center in 64-bit floats, for the steps after the point escaped; see the module, and `Reference` for the steps it skips
+pub fn position(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (dcx, dcy): (f64, f64)) -> f64 {
+    let orbit = &reference.orbit;
     let radius_squared = m.orbit_radius * m.orbit_radius;
     let (mut zx, mut zy) = (0.0_f64, 0.0_f64); //The difference from the reference orbit
-    let mut reference = 0; //The step of the reference orbit that the difference is from
-    for step in 0..m.max_iterations {
-        let (ox, oy) = orbit[reference];
-        //z ← 2·Z·z + z² + c
-        (zx, zy) = (2.0 * (ox * zx - oy * zy) + (zx * zx - zy * zy) + dcx, 2.0 * (ox * zy + oy * zx) + 2.0 * zx * zy + dcy);
-        reference += 1;
-        let (fx, fy) = (orbit[reference].0 + zx, orbit[reference].1 + zy); //The pixel's orbit
+    let mut at = 0; //The step of the reference orbit that the difference is from
+    let mut step = 0;
+    while step < m.max_iterations {
+        if let Some((bla, steps)) = reference.skip(at, zx * zx + zy * zy, m.max_iterations - step) {
+            //z ← A·z + B·c, for `steps` steps at once
+            (zx, zy) = (bla.a.0 * zx - bla.a.1 * zy + (bla.b.0 * dcx - bla.b.1 * dcy), bla.a.0 * zy + bla.a.1 * zx + (bla.b.0 * dcy + bla.b.1 * dcx));
+            at += steps as usize;
+            step += steps;
+        } else {
+            let (ox, oy) = orbit[at];
+            //z ← 2·Z·z + z² + c
+            (zx, zy) = (2.0 * (ox * zx - oy * zy) + (zx * zx - zy * zy) + dcx, 2.0 * (ox * zy + oy * zx) + 2.0 * zx * zy + dcy);
+            at += 1;
+            step += 1;
+        }
+        let (fx, fy) = (orbit[at].0 + zx, orbit[at].1 + zy); //The pixel's orbit
         let full = fx * fx + fy * fy;
         if full > radius_squared {
-            return m.smooth_position_of(step + 1, (fx, fy), (center.0 + dcx, center.1 + dcy));
+            return m.smooth_position_of(step, (fx, fy), (center.0 + dcx, center.1 + dcy));
         }
         //Rebasing: the pixel's orbit is closer to 0 than its difference, or the reference orbit ends
-        if full < zx * zx + zy * zy || reference + 1 >= orbit.len() {
+        if full < zx * zx + zy * zy || at + 1 >= orbit.len() {
             (zx, zy) = (fx, fy);
-            reference = 0;
+            at = 0;
         }
     }
     f64::from(m.max_iterations)
@@ -189,20 +299,21 @@ pub fn turned((right, up): (f64, f64), rotation: f64) -> (f64, f64) {
 pub fn render_positions(m: &MandelbrotSet, real: &str, imaginary: &str, scale: f64, width: usize, height: usize) -> Option<Vec<f64>> {
     let bits = bits_for(scale, width);
     let (center_real, center_imaginary) = (Fixed::parse(real, bits)?, Fixed::parse(imaginary, bits)?);
-    render_fixed(m, &center_real, &center_imaginary, (scale, 0.0), width, height, &std::sync::atomic::AtomicBool::new(false))
+    render_fixed(m, &center_real, &center_imaginary, (scale, 0.0), width, height, false, &std::sync::atomic::AtomicBool::new(false))
 }
 
 /// The colors of a view like `render_fixed`, averaged over `samples` samples a pixel, one layer after the other.
 ///
 /// The samples are at the jitter of the 64-bit renderer (see `jitter`); `on_layer` gets the average after every layer and its number (from 1), and
-/// `color_of` colors a smooth position. The view is turned counterclockwise by `rotation` radians. False when `cancel` stopped it
+/// `color_of` colors a smooth position. The view is turned counterclockwise by `rotation` radians; `approximate` skips steps by bilinear approximation
+/// (see `Reference`). False when `cancel` stopped it
 #[allow(clippy::too_many_arguments)] // The view, its size and samples, how to color, when to stop and where the layers go
 pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (scale, rotation): (f64, f64), (width, height): (usize, usize), samples: u8, color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync),
-    cancel: &std::sync::atomic::AtomicBool, mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
+    approximate: bool, cancel: &std::sync::atomic::AtomicBool, mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
     use std::sync::atomic::Ordering;
-    let orbit = reference_orbit(center_real, center_imaginary, m.max_iterations);
-    let center = (center_real.to_f64(), center_imaginary.to_f64());
     let pixel = 2.5 * scale / width as f64;
+    let reference = Reference::new(m, (center_real, center_imaginary), max_offset(pixel, width, height), approximate);
+    let center = (center_real.to_f64(), center_imaginary.to_f64());
     let threads = super::render_thread_count().max(1);
     let rows_per_thread = height.div_ceil(threads);
     let mut sums = vec![[0_u32; 3]; width * height];
@@ -210,7 +321,7 @@ pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &
     for sample in 0..samples.max(1) {
         std::thread::scope(|scope| {
             for (chunk, (rows, out)) in sums.chunks_mut(rows_per_thread * width).zip(colors.chunks_mut(rows_per_thread * width)).enumerate() {
-                let orbit = &orbit;
+                let reference = &reference;
                 scope.spawn(move || {
                     for (index, (sum, color)) in rows.iter_mut().zip(out.iter_mut()).enumerate() {
                         if index % width == 0 && cancel.load(Ordering::Relaxed) {
@@ -220,7 +331,7 @@ pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &
                         //The first sample in the middle of the pixel, the others at the jitter of the 64-bit renderer
                         let (jx, jy) = if sample == 0 { (0.5, 0.5) } else { super::jitter::sample_jitter(x, y, sample) };
                         let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), rotation);
-                        let new = color_of(position(m, orbit, center, offset));
+                        let new = color_of(position(m, reference, center, offset));
                         for (total, channel) in sum.iter_mut().zip([new.red, new.green, new.blue]) {
                             *total += u32::from(channel);
                         }
@@ -238,19 +349,27 @@ pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &
     true
 }
 
-/// Like `render_positions`, for a center in fixed point (with at least `bits_for(scale, width)` bits), turned counterclockwise by `rotation` radians;
-/// `None` when `cancel` was set before it finished
-pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (scale, rotation): (f64, f64), width: usize, height: usize, cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
+/// The largest distance of a pixel of a `width` x `height` view with pixels of size `pixel` from its center (with a pixel to spare for the jitter)
+fn max_offset(pixel: f64, width: usize, height: usize) -> f64 {
+    pixel * (width as f64 / 2.0 + 1.0).hypot(height as f64 / 2.0 + 1.0)
+}
+
+/// Like `render_positions`, for a center in fixed point (with at least `bits_for(scale, width)` bits); `None` when `cancel` was set before it finished.
+///
+/// The view is turned counterclockwise by `rotation` radians, and `approximate` is as in `render_layers`
+#[allow(clippy::too_many_arguments)] // The view, its size, how and when to stop
+pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (scale, rotation): (f64, f64), width: usize, height: usize, approximate: bool,
+    cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
     use std::sync::atomic::Ordering;
-    let orbit = reference_orbit(center_real, center_imaginary, m.max_iterations);
-    let center = (center_real.to_f64(), center_imaginary.to_f64());
     let pixel = 2.5 * scale / width as f64;
+    let reference = Reference::new(m, (center_real, center_imaginary), max_offset(pixel, width, height), approximate);
+    let center = (center_real.to_f64(), center_imaginary.to_f64());
     let mut positions = vec![0.0; width * height];
     let threads = super::render_thread_count().max(1);
     let rows_per_thread = height.div_ceil(threads);
     std::thread::scope(|scope| {
         for (chunk, rows) in positions.chunks_mut(rows_per_thread * width).enumerate() {
-            let orbit = &orbit;
+            let reference = &reference;
             scope.spawn(move || {
                 for (index, out) in rows.iter_mut().enumerate() {
                     if index % width == 0 && cancel.load(Ordering::Relaxed) {
@@ -258,7 +377,7 @@ pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &F
                     }
                     let (x, y) = (index % width, chunk * rows_per_thread + index / width);
                     let offset = turned(((x as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - 0.5) * pixel), rotation);
-                    *out = position(m, orbit, center, offset);
+                    *out = position(m, reference, center, offset);
                 }
             });
         }
@@ -330,8 +449,8 @@ mod tests {
         let m = MandelbrotSet::new(500, 2.0);
         let (real, imaginary) = (Fixed::parse("-0.7498100000000001", 80).unwrap(), Fixed::parse("-0.020300000000000054", 80).unwrap());
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        let unturned = render_fixed(&m, &real, &imaginary, (6.4e-5, 0.0), 16, 12, &cancel).unwrap();
-        let half_turned = render_fixed(&m, &real, &imaginary, (6.4e-5, std::f64::consts::PI), 16, 12, &cancel).unwrap();
+        let unturned = render_fixed(&m, &real, &imaginary, (6.4e-5, 0.0), 16, 12, false, &cancel).unwrap();
+        let half_turned = render_fixed(&m, &real, &imaginary, (6.4e-5, std::f64::consts::PI), 16, 12, false, &cancel).unwrap();
         let reversed: Vec<f64> = unturned.iter().rev().copied().collect();
         let close = half_turned.iter().zip(&reversed).filter(|(a, b)| (*a - *b).abs() < 0.01).count();
         assert!(close * 100 >= unturned.len() * 95, "{close} of {} pixels agree", unturned.len());
@@ -344,11 +463,85 @@ mod tests {
         let (real, imaginary) = (Fixed::parse("0.0000000000000000000000000000003", bits).unwrap(), Fixed::parse("1.0000000000000000000000000000002", bits).unwrap());
         let color_of = |position: f64| crate::coloring::TrueColor::new((position * 3.0) as u8, 0, 0);
         let mut layers = Vec::new();
-        assert!(render_layers(&m, &real, &imaginary, (1e-30, 0.0), (32, 24), 4, &color_of, &std::sync::atomic::AtomicBool::new(false), |colors, layer| layers.push((layer, colors.to_vec()))));
+        assert!(render_layers(&m, &real, &imaginary, (1e-30, 0.0), (32, 24), 4, &color_of, false, &std::sync::atomic::AtomicBool::new(false), |colors, layer| layers.push((layer, colors.to_vec()))));
         assert_eq!(layers.iter().map(|(layer, _)| *layer).collect::<Vec<_>>(), [1, 2, 3, 4]);
-        let first = render_fixed(&m, &real, &imaginary, (1e-30, 0.0), 32, 24, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        let first = render_fixed(&m, &real, &imaginary, (1e-30, 0.0), 32, 24, false, &std::sync::atomic::AtomicBool::new(false)).unwrap();
         assert!(layers[0].1.iter().zip(&first).all(|(color, position)| color.red == (position * 3.0) as u8), "the first layer: one sample in the middle of every pixel");
         assert!(layers[0].1.iter().zip(&layers[3].1).any(|(a, b)| a.red != b.red), "more samples change the image");
+    }
+
+    /// The center of a minibrot of period 8007, 6·10⁻³³ from the seahorse point -0.743643887037158704752191506114774 + 0.131825904205311970493132056385139i
+    /// (found by Newton's method on issue #141): a deep view where pixels follow the center's orbit for thousands of steps
+    const MINIBROT: (&str, &str) = ("-0.7436438870371587047521915061147797782152562079481812898168839018185", "0.13182590420531197049313205638514067897295227932891896620912767746551");
+
+    fn minibrot_views(scale: f64, (width, height): (usize, usize), iterations: u32) -> (Vec<f64>, Vec<f64>) {
+        let m = MandelbrotSet::new(iterations, 2.0);
+        let bits = bits_for(scale, width);
+        let (real, imaginary) = (Fixed::parse(MINIBROT.0, bits).unwrap(), Fixed::parse(MINIBROT.1, bits).unwrap());
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let step_by_step = render_fixed(&m, &real, &imaginary, (scale, 0.0), width, height, false, &cancel).unwrap();
+        (step_by_step, render_fixed(&m, &real, &imaginary, (scale, 0.0), width, height, true, &cancel).unwrap())
+    }
+
+    #[test]
+    fn bilinear_approximation_skips_the_steps_inside_a_deep_minibrot_with_the_same_result() {
+        //Every pixel inside the minibrot: all 100 000 steps, of which the approximation skips nearly all (40 times as fast, measured on issue #141)
+        let (step_by_step, approximate) = minibrot_views(1e-33, (32, 18), 100_000);
+        assert!(step_by_step.iter().all(|position| *position >= 100_000.0), "inside");
+        assert_eq!(step_by_step, approximate);
+        let m = MandelbrotSet::new(100_000, 2.0);
+        let (real, imaginary) = (Fixed::parse(MINIBROT.0, 200).unwrap(), Fixed::parse(MINIBROT.1, 200).unwrap());
+        let reference = Reference::new(&m, (&real, &imaginary), 1e-33, true);
+        //From the first step a skip of 512 steps: the orbit passes near 0 at step 998 (a minibrot of period 998 is near), where no approximation holds
+        let longest = reference.skip(1, 1e-40, 100_000).map(|(_, steps)| steps);
+        assert_eq!(longest, Some(512));
+    }
+
+    #[test]
+    fn bilinear_approximation_changes_few_pixels_at_the_edge_of_a_deep_minibrot() {
+        //At its edge, where a move of a thousandth of a pixel changes a third of the pixels by more than a step (chaos), the approximation changes about 1%
+        let (step_by_step, approximate) = minibrot_views(1e-31, (48, 27), 200_000);
+        let moved = step_by_step.iter().zip(&approximate).filter(|(a, b)| (*a - *b).abs() > 1.0).count();
+        let distinct: std::collections::BTreeSet<u64> = step_by_step.iter().map(|position| *position as u64).collect();
+        assert!(distinct.len() > 100, "a view with structure: {} different counts", distinct.len());
+        assert!(moved * 100 <= step_by_step.len() * 3, "{moved} of {} pixels moved by more than a step", step_by_step.len());
+    }
+
+    /// Measures BLA (issue #141): the time of a deep view with and without bilinear approximation, and how far its pixels move. Run by hand:
+    /// `MANDELBROT_DEEP="real imaginary scale iterations width height" cargo test --release measure_bla -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn measure_bla() {
+        let spec = std::env::var("MANDELBROT_DEEP").unwrap_or_else(|_| String::from("-0.743643887037158704752191506114774 0.131825904205311970493132056385139 1e-25 20000 320 180"));
+        let parts: Vec<&str> = spec.split_whitespace().collect();
+        let (scale, iterations, width, height): (f64, u32, usize, usize) = (parts[2].parse().unwrap(), parts[3].parse().unwrap(), parts[4].parse().unwrap(), parts[5].parse().unwrap());
+        let m = MandelbrotSet::new(iterations, 2.0);
+        let bits = bits_for(scale, width);
+        let (real, imaginary) = (Fixed::parse(parts[0], bits).unwrap(), Fixed::parse(parts[1], bits).unwrap());
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let orbit = reference_orbit(&real, &imaginary, iterations);
+        let orbit_time = started.elapsed();
+        let started = std::time::Instant::now();
+        let reference = Reference::new(&m, (&real, &imaginary), 2.5 * scale, true);
+        println!("reference orbit: {} steps in {orbit_time:.2?}; orbit and BLA table {:.2?}, {} levels", orbit.len(), started.elapsed(), reference.levels.len());
+        let started = std::time::Instant::now();
+        let exact = render_fixed(&m, &real, &imaginary, (scale, 0.0), width, height, false, &cancel).unwrap();
+        let exact_time = started.elapsed();
+        let started = std::time::Instant::now();
+        let approximate = render_fixed(&m, &real, &imaginary, (scale, 0.0), width, height, true, &cancel).unwrap();
+        let approximate_time = started.elapsed();
+        let moved_by = |other: &[f64], limit: f64| exact.iter().zip(other).filter(|(a, b)| (*a - *b).abs() > limit).count() as f64 * 100.0 / exact.len() as f64;
+        let differences: Vec<f64> = exact.iter().zip(&approximate).map(|(a, b)| (a - b).abs()).collect();
+        let moved = |limit: f64| moved_by(&approximate, limit);
+        //The baseline: how far the pixels move when the view moves by a thousandth of a pixel (what no one sees)
+        let pixel = 2.5 * scale / width as f64;
+        let shifted = render_fixed(&m, &real.plus(pixel * 1e-3), &imaginary.plus(pixel * 1e-3), (scale, 0.0), width, height, false, &cancel).unwrap();
+        println!("baseline, a shift of 1/1000 pixel: moved by over 0.01: {:.2}%, 1: {:.2}%", moved_by(&shifted, 0.01), moved_by(&shifted, 1.0));
+        let inside = exact.iter().filter(|position| **position >= f64::from(iterations)).count() as f64 * 100.0 / exact.len() as f64;
+        let mean = exact.iter().filter(|position| **position < f64::from(iterations)).sum::<f64>() / exact.iter().filter(|position| **position < f64::from(iterations)).count().max(1) as f64;
+        println!("{spec}: {inside:.1}% inside, mean position {mean:.0}; step by step {exact_time:.2?}, BLA {approximate_time:.2?} ({:.1}x); pixels moved by over 0.001: {:.2}%, 0.01: {:.2}%, 0.1: {:.2}%, 1: {:.2}%; largest {:.3}",
+            exact_time.as_secs_f64() / approximate_time.as_secs_f64(), moved(0.001), moved(0.01), moved(0.1), moved(1.0), differences.iter().copied().fold(0.0, f64::max));
     }
 
     #[test]

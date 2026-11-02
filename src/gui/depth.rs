@@ -105,5 +105,9 @@ impl MandelbrotApp {
             }
             ui.checkbox(&mut self.lock_center, "Lock center").on_hover_text("The mouse keeps the center of the view too: the wheel zooms around the center instead of the cursor, and dragging and right-clicking do not move the view");
         });
+        let response = ui.checkbox(&mut self.fast_deep, "Fast deep zoom (BLA)").on_hover_text("Off by default. Deeper than ×10¹³, where 64-bit numbers run out and the deep renderer takes over, skip most of the iterations by bilinear approximation: several times as fast, up to 40 times inside the set, while about 1 pixel in 100 gets another color in the most chaotic parts (fewer than a move of a thousandth of a pixel changes). Also for saved images and videos.");
+        if response.changed() && self.deep_shown().is_some() {
+            self.render(&format!("Turned fast deep zoom {}", if self.fast_deep { "on" } else { "off" }));
+        }
     }
 }

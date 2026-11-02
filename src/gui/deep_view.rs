@@ -125,7 +125,7 @@ impl MandelbrotApp {
         if self.auto_iterations {
             m.max_iterations = self.auto_settings.initial_limit(scale); //(The starting limit of auto iterations, which grows with the zoom)
         }
-        let (c, coloring_function) = (self.c.clone(), self.coloring_function);
+        let (c, coloring_function, fast_deep) = (self.c.clone(), self.coloring_function, self.fast_deep);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let (sender, receiver) = mpsc::channel();
@@ -135,7 +135,7 @@ impl MandelbrotApp {
             let started = Instant::now();
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut layer_started = Instant::now();
-            let completed = deep::render_layers(&m, &real, &imaginary, (scale, c.rotation()), (width, height), samples, &color_of, &thread_cancel, |colors, layer| {
+            let completed = deep::render_layers(&m, &real, &imaginary, (scale, c.rotation()), (width, height), samples, &color_of, fast_deep, &thread_cancel, |colors, layer| {
                 let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass: layer, total: samples, layer_time: layer_started.elapsed(), whole: true });
                 layer_started = Instant::now();
             });
@@ -174,13 +174,13 @@ impl MandelbrotApp {
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
         let place = crate::points_of_interest::to_json(&self.current_point(file_name.clone(), String::new()));
         let (m, coloring_function, mapping, samples) = (self.m.clone(), self.coloring_function, self.p.color_channel_mapping, self.image_supersampling_amount);
-        let rotation = self.c.rotation();
+        let (rotation, fast_deep) = (self.c.rotation(), self.fast_deep);
         let sender = self.notice_sender.clone();
         std::thread::spawn(move || {
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut image = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(width, height));
             image.color_channel_mapping = mapping;
-            deep::render_layers(&m, &real, &imaginary, (scale, rotation), (width, height), samples, &color_of, &AtomicBool::new(false), |colors, layer| {
+            deep::render_layers(&m, &real, &imaginary, (scale, rotation), (width, height), samples, &color_of, fast_deep, &AtomicBool::new(false), |colors, layer| {
                 if layer == samples.max(1) {
                     image.colors.copy_from_slice(colors);
                 }

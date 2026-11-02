@@ -1674,6 +1674,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     app.flight_rendering = super::flight::FlightRendering::Resolution(37);
     (app.route, app.constant_speed, app.dive_zoom) = (super::flight::Route::Straight, 7.5, 250.0);
     (app.frames_ahead, app.blend_frames, app.f32_frames, app.quality_blur, app.neighborhood_margin) = (1, true, false, true, 250);
+    app.fast_deep = true;
     (app.video_fps, app.video_speed, app.video_quality, app.video_playback, app.video_pngs) = (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true);
     app.video_blend = true;
     (app.video_fit_length, app.video_length) = (true, [String::from("1"), String::new(), String::from("7.5")]);
@@ -1693,6 +1694,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
         (super::flight::Pace::Cinematic, false, 16, false, super::flight::FlightRendering::Resolution(37)));
     assert_eq!((next.route, next.constant_speed, next.dive_zoom), (super::flight::Route::Straight, 7.5, 250.0));
     assert_eq!((next.frames_ahead, next.blend_frames, next.f32_frames, next.quality_blur, next.neighborhood_margin), (1, true, false, true, 250));
+    assert!(next.fast_deep, "fast deep zoom is saved");
     assert_eq!((next.video_fps, next.video_speed, next.video_quality, next.video_playback, next.video_pngs), (144, 10, super::video::VideoQuality::Lossless, super::video::Playback::HighQuality, true));
     assert!(next.video_blend);
     assert_eq!((next.video_fit_length, next.target_length()), (true, Some(Duration::from_secs_f64(3607.5))));

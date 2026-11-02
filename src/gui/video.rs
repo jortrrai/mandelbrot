@@ -465,6 +465,9 @@ pub(super) struct VideoSpec {
     pub(super) auto: Option<crate::auto_iterations::AutoIterationSettings>,
     pub(super) use_gpu: bool,
     pub(super) fast_gpu: bool,
+    /// Whether frames deeper than 64-bit floats skip steps by bilinear approximation, see `rendering::deep::Reference`
+    #[serde(default)]
+    pub(super) fast_deep: bool,
     /// The name of the video file (without extension), given when it is first started: a resumed video keeps its name (see `chunks`)
     #[serde(default)]
     pub(super) output: Option<String>,
@@ -599,6 +602,7 @@ impl MandelbrotApp {
             auto: self.auto_iterations.then(|| self.auto_settings.clone()),
             use_gpu: self.use_gpu,
             fast_gpu: self.fast_gpu,
+            fast_deep: self.fast_deep,
             output: None,
             music,
             shutter: self.video_shutter,
@@ -624,7 +628,7 @@ impl MandelbrotApp {
         let job_name = name.clone();
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music, shutter, keyframe_dives } = spec;
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, fast_deep, output: _, music, shutter, keyframe_dives } = spec;
         let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
@@ -911,7 +915,7 @@ impl MandelbrotApp {
                                     (Some(real), Some(imaginary)) => {
                                         let (real, imaginary) = (real.plus(camera.x - flight.to.x), imaginary.plus(camera.y - flight.to.y));
                                         let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
-                                        crate::rendering::deep::render_layers(&m, &real, &imaginary, (camera.scale, plane.rotation()), (width, height), samples, &color_of, thread_cancel, |layer, number| {
+                                        crate::rendering::deep::render_layers(&m, &real, &imaginary, (camera.scale, plane.rotation()), (width, height), samples, &color_of, fast_deep, thread_cancel, |layer, number| {
                                             if number == samples.max(1) {
                                                 colors = layer.to_vec();
                                             }
