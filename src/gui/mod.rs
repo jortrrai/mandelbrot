@@ -788,6 +788,14 @@ impl eframe::App for MandelbrotApp {
 
         //A narrow screen (a phone, issue #219): the image fills it, and the controls slide in from a button
         let narrow = ui.available_rect_before_wrap().width() < NARROW_SCREEN;
+        //The Back button of a phone (and of a mouse): closes the controls of a narrow screen, or leaves a Julia set
+        if ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
+            if narrow && self.show_controls {
+                self.show_controls = false;
+            } else {
+                self.leave_julia();
+            }
+        }
         if !narrow || self.show_controls {
             egui::Panel::right("side_panel").default_size(if narrow { ui.available_rect_before_wrap().width() * 0.85 } else { SIDE_PANEL_WIDTH }).min_size(280.0).show(ui, |ui| self.side_panel_ui(ui));
         }

@@ -3432,3 +3432,22 @@ fn the_julia_set_of_the_center_or_the_pinned_point_is_one_button_away_and_back()
     let texts = controls_texts(&mut app);
     assert!(texts.iter().any(|text| text == "Back to the Mandelbrot set") && texts.iter().any(|text| text.starts_with("Julia set of c = -0.120000 + 0.740000i")));
 }
+
+#[test]
+fn the_back_button_closes_the_controls_of_a_narrow_screen_then_leaves_a_julia_set() {
+    //Issue #219: a phone's Back button
+    let config = Config::sized(64, 48, 50, 32);
+    let mut app = manual_app(&config);
+    let ctx = egui::Context::default();
+    let back = |app: &mut MandelbrotApp, width: f32| {
+        let key = |pressed| egui::Event::Key { key: egui::Key::BrowserBack, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::default() };
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 800.0))), events: vec![key(true), key(false)], ..Default::default() };
+        let _ = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut eframe::Frame::_new_kittest()));
+    };
+    app.enter_julia((-0.12, 0.74));
+    app.show_controls = true;
+    back(&mut app, 400.0);
+    assert!(!app.show_controls && app.m.julia.is_some(), "first the controls close");
+    back(&mut app, 400.0);
+    assert_eq!(app.m.julia, None, "then the Julia set is left");
+}
