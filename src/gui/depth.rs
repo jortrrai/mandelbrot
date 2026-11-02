@@ -76,6 +76,13 @@ impl MandelbrotApp {
             }
         });
         ui.horizontal(|ui| {
+            if ui.button(if self.rotation_cycling { "Stop turning" } else { "Turn by itself" }).on_hover_text("Turns the view by itself around the center of the screen, without end, until you stop it; the image shows one sample per pixel (blurred with Auto blur) until then. Put a feature in the center first to spin it in place").clicked() {
+                self.toggle_rotation_cycle();
+            }
+            ui.add(egui::DragValue::new(&mut self.rotation_speed).range(super::cycle::ROTATION_SPEEDS).speed(0.5).max_decimals(1).suffix(" °/s"))
+                .on_hover_text("How fast the view turns, in degrees per second (type a value; negative: clockwise; 360 is a whole turn)");
+        });
+        ui.horizontal(|ui| {
             ui.checkbox(&mut self.center_marker, "Center marker").on_hover_text("Draws a circle around the exact center of the view, to put a feature right in the middle before turning or diving around it. Only on the screen: saved images and videos do not show it");
             if self.center_marker {
                 ui.add(egui::Slider::new(&mut self.center_marker_radius, CENTER_MARKER_RADII).logarithmic(true).integer().suffix(" px").text("size")).on_hover_text("The radius of the circle on the screen");

@@ -1741,7 +1741,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     //The saved image size (asked by Jort in the review of review-4)
     (app.save_size.choice, app.save_size.portrait, app.save_size.custom_width, app.save_size.custom_height) = (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000);
     assert!(!app.center_marker, "issue #223: the center marker is off by default");
-    (app.center_marker, app.center_marker_radius) = (true, 60.0);
+    (app.center_marker, app.center_marker_radius, app.rotation_speed) = (true, 60.0, -45.5);
     let now = std::time::Instant::now();
     app.keep_settings(now);
     assert!(!path.exists(), "not on every frame of a drag");
@@ -1761,7 +1761,7 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     assert_eq!((next.save_size.choice.clone(), next.save_size.portrait, next.save_size.custom_width, next.save_size.custom_height), (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000));
     assert_eq!(next.save_size.resolve(next.default_save_resolution(), next.view_resolution()), Ok(crate::resolution::Resolution::new(17_280, 30_720)), "32K upright, as it was");
-    assert_eq!((next.center_marker, next.center_marker_radius), (true, 60.0));
+    assert_eq!((next.center_marker, next.center_marker_radius, next.rotation_speed), (true, 60.0, -45.5));
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3, "save_size": "preset:A deleted preset" }"#).unwrap();
     let mut partial = manual_app(&Config::sized(64, 48, 50, 4));
@@ -2734,6 +2734,39 @@ fn cycling_the_divide_breathes_around_where_it_started_and_ends_with_a_full_rend
     assert!(!app.cycling());
     assert_eq!(app.m.palette.divide, divide, "stopping keeps the divide it reached");
     assert!(app.buffer_is_complete, "and renders the view to its full quality");
+}
+
+#[test]
+fn the_rotation_cycle_turns_the_view_around_its_center_with_the_clock_and_ends_with_a_full_render() {
+    //Issue #228
+    let ctx = egui::Context::default();
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    let center = app.c.center();
+    app.rotation_speed = -90.0;
+    app.toggle_rotation_cycle();
+    assert!(app.cycling());
+    let start = std::time::Instant::now();
+    app.cycle_colors(&ctx, start); //(The first call starts the clock)
+    //Every step turns by the time since the last one, at most a quarter of a second, and waits until the last step is on the screen
+    for step in 1..=3 {
+        app.cycle_colors(&ctx, start + Duration::from_millis(200 * step));
+        wait_for_job(&mut app);
+    }
+    assert!(!app.buffer_is_complete, "the steps are one-sample frames");
+    assert!((app.c.rotation().to_degrees() + 54.0).abs() < 1e-9, "0.6 s at 90° a second clockwise: {}°", app.c.rotation().to_degrees());
+    assert_eq!(app.rotation_slider, app.c.rotation(), "the slider shows the angle");
+    let turned = app.c.center();
+    assert!((turned.x - center.x).abs() < 1e-12 && (turned.y - center.y).abs() < 1e-12, "around the center: {turned:?} {center:?}");
+    //Without end: past -180° it goes on from 180°
+    for step in 1..=6 {
+        app.cycle_colors(&ctx, start + Duration::from_millis(600 + 250 * step));
+        wait_for_job(&mut app);
+    }
+    assert!((app.c.rotation().to_degrees() + 189.0 - 360.0).abs() < 1e-9, "-54° - 135° = -189° = 171°: {}°", app.c.rotation().to_degrees());
+    app.toggle_rotation_cycle();
+    wait_for_job(&mut app);
+    assert!(!app.cycling() && app.buffer_is_complete, "stopping renders the view to its full quality");
+    assert!((app.c.rotation().to_degrees() - 171.0).abs() < 1e-9, "at the angle it reached");
 }
 
 #[test]

@@ -52,6 +52,8 @@ pub(super) struct Settings {
     immersion: Option<bool>,
     auto_blur: Option<bool>,
     cycle_rate: Option<f64>,
+    /// The speed of the rotation cycle, in degrees per second
+    rotation_speed: Option<f64>,
     frames_ahead: Option<usize>,
     blend_frames: Option<bool>,
     f32_frames: Option<bool>,
@@ -167,6 +169,7 @@ impl MandelbrotApp {
             immersion: Some(self.immersion),
             auto_blur: Some(self.auto_blur),
             cycle_rate: Some(self.cycle_rate),
+            rotation_speed: Some(self.rotation_speed),
             frames_ahead: Some(self.frames_ahead),
             blend_frames: Some(self.blend_frames),
             f32_frames: Some(self.f32_frames),
@@ -283,6 +286,9 @@ impl MandelbrotApp {
         }
         set(settings.immersion, &mut self.immersion);
         set(settings.auto_blur, &mut self.auto_blur);
+        if let Some(speed) = settings.rotation_speed.filter(|speed| super::cycle::ROTATION_SPEEDS.contains(speed)) {
+            self.rotation_speed = speed;
+        }
         if let Some(rate) = settings.cycle_rate.filter(|rate| super::cycle::CYCLE_RATES.contains(rate)) {
             self.cycle_rate = rate;
         }

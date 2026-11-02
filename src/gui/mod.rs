@@ -323,6 +323,9 @@ pub struct MandelbrotApp {
     divide_cycle: Option<(f64, f64)>,
     /// The time of a whole swing of the divide, in seconds
     divide_period: f64,
+    /// Whether the view turns by itself around the center of the screen, and how fast, in degrees per second (see `cycle`, issue #228)
+    rotation_cycling: bool,
+    rotation_speed: f64,
     cycle_last: Option<std::time::Instant>,
     /// How many frames of a flight the flight job may render ahead of the one on the screen (0: none, it renders one frame at a time as before), see `flight_job`
     frames_ahead: usize,
@@ -525,6 +528,8 @@ impl MandelbrotApp {
             color_cycling: false,
             cycle_rate: cycle::CYCLE_RATE,
             divide_cycle: None,
+            rotation_cycling: false,
+            rotation_speed: cycle::ROTATION_SPEED,
             divide_period: cycle::DIVIDE_PERIOD,
             cycle_last: None,
             frames_ahead: 2,
@@ -680,7 +685,7 @@ impl MandelbrotApp {
         let target = transform::rect_of(self.drawn_fraction(), rect);
         //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
         self.draw_neighborhood(&ui.painter_at(rect), rect);
-        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.color_cycling || self.divide_cycle.is_some() || self.landing_blur)) || self.quality_blur) {
+        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.cycling() || self.landing_blur)) || self.quality_blur) {
             Some(blur) => {
                 let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
