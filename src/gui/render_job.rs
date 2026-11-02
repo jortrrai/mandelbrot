@@ -289,6 +289,9 @@ impl MandelbrotApp {
                     //In auto mode this holds the chosen limit; the manual value in `max_iterations_input` is kept, and so is the Smooth colors setting of the window
                     self.m = MandelbrotSet { smooth_coloring: self.m.smooth_coloring, ..m };
                     self.buffer_is_complete = completed && self.settle.is_none(); //A render during a gesture has only the first layer
+                    if self.buffer_is_complete && self.flight.is_none() {
+                        Self::release_free_memory(); //(Not for every frame of a flight)
+                    }
                     self.layer_shown |= completed;
                     if self.progress.take().is_some() {
                         if let Some(bars) = &mut self.bars {

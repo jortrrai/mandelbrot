@@ -3687,3 +3687,51 @@ fn a_view_of_a_julia_set_keeps_its_parameter_in_places_shared_text_and_images() 
     app.leave_julia();
     assert!((app.c.get_scale() - 0.3).abs() < 1e-12, "back at the Mandelbrot view before");
 }
+
+#[test]
+#[ignore = "a measurement of the memory the window holds after moving around and after a video, run by hand with --release"]
+fn memory_held_after_moving_around_and_after_a_video() {
+    //The memory the program holds (its own, not the files it maps), in MB
+    let held = || std::fs::read_to_string("/proc/self/status").ok().and_then(|status| status.lines().find(|line| line.starts_with("RssAnon:")).and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())).unwrap_or(0) / 1024;
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    //A window of a 4K screen at 125%
+    app.resize_view(crate::resolution::Resolution::new(3072, 1728));
+    (app.supersampling_amount, app.m.max_iterations, app.max_iterations_input) = (8, 500, 500);
+    app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+    app.render("Start");
+    wait_for_job(&mut app);
+    println!("at the start: {} MB", held());
+    let mut most = 0;
+    for round in 0..3 {
+        //Zooms and pans, like the wheel and drags
+        for step in 0..30 {
+            if step % 3 == 0 {
+                app.c.scale(if step % 2 == 0 { 0.7 } else { 1.2 });
+                app.render("Zoomed");
+            } else {
+                crate::rendering::move_complex_plane_by_pixels(&mut app.c, if step % 2 == 0 { 40 } else { -25 }, 61);
+                app.render_moved("Moved");
+            }
+            wait_for_job(&mut app);
+            most = most.max(held());
+        }
+        println!("after moving around, round {round}: {} MB (at most {most} MB)", held());
+    }
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.pace) = (1920, 1080, 8, 30, super::flight::Pace::Fast);
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    wait_for_job(&mut app);
+    println!("before the video: {} MB", held());
+    app.start_video();
+    let (ctx, mut most) = (egui::Context::default(), 0);
+    while app.video_job.is_some() {
+        app.poll_video(&ctx);
+        most = most.max(held());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    println!("after the video: {} MB (at most {most} MB during it); {}", held(), app.log.last().unwrap());
+    let _ = std::fs::remove_dir_all(folder);
+}

@@ -32,6 +32,9 @@ cpu-time = "1"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.17"
 ureq = "2"
+# The memory allocator: it gives freed memory back to the system, which glibc's malloc kept per thread (gigabytes after videos and moving around)
+mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 
 # The Android app: eframe on Android's native activity
 [target.'cfg(target_os = "android")'.dependencies]
