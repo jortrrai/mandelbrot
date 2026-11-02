@@ -3737,3 +3737,31 @@ fn memory_held_after_moving_around_and_after_a_video() {
     println!("after the video: {} MB (at most {most} MB during it); {}", held(), app.log.last().unwrap());
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn a_drag_with_the_default_settings_keeps_the_layers() {
+    //Review 6: with auto iterations, adaptive supersampling and the GPU (the defaults), drag frames that follow each other without waiting, diagonally, also in
+    //a turned view: the render the drag settles on continues the samples of every pixel
+    for rotation in [0.0, -0.1] {
+        let config = Config::sized(320, 200, 100, 16);
+        let mut app = MandelbrotApp::new(&config);
+        wait_for_job(&mut app);
+        app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+        app.c.set_rotation(rotation);
+        app.render("Sixteen layers");
+        wait_for_job(&mut app);
+        app.gesture_active = true;
+        for _ in 0..5 {
+            crate::rendering::move_complex_plane_by_pixels(&mut app.c, 2, 3);
+            app.render_moved("Moved by dragging");
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll_job();
+        }
+        wait_for_job(&mut app);
+        app.gesture_active = false;
+        app.settle = app.settle.take().map(|(message, _, moved)| (message, std::time::Instant::now().checked_sub(Duration::from_secs(5)).unwrap(), moved));
+        app.settle_gesture(&egui::Context::default());
+        wait_for_job(&mut app);
+        assert!(app.log.last().unwrap().starts_with(&format!("Moved by dragging (continued the samples of {} pixels) in ", 320 * 200)), "rotation {rotation}: {:?}", app.log.last());
+    }
+}
