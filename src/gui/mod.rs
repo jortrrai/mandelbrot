@@ -596,8 +596,9 @@ impl MandelbrotApp {
     /// Adds `message` to the status log with the time, and prints it with the time if its level is shown (see `status::LogLevel`)
     pub(super) fn log(&mut self, message: impl Into<String>) {
         let (message, now) = (message.into(), chrono::Local::now());
-        if status::LogLevel::of(&message) >= self.log_level {
-            let line = format!("[{}] {message}", now.format("%H:%M:%S"));
+        let level = status::LogLevel::of(&message);
+        if level >= self.log_level {
+            let line = format!("[{}] {} {message}", now.format("%H:%M:%S"), level.tag());
             //(On the command line stdout is for its JSON: the log goes to stderr there, see `cli`)
             if cli::quiet() { eprintln!("{line}") } else { println!("{line}") }
         }

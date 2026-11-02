@@ -36,6 +36,28 @@ impl LogLevel {
         }
     }
 
+    /// The short tag of the level in front of each message of the log (issue #204 feedback): DEBUG, INFO, WARN or ERROR
+    pub const fn tag(self) -> &'static str {
+        match self {
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Info => "INFO",
+            LogLevel::Warning => "WARN",
+            LogLevel::Error => "ERROR",
+        }
+    }
+
+    /// The color of the tag, and of the message of a warning or an error, given the color of normal text: Debug gray, Info normal, Warning yellow, Error red
+    pub fn color(self, text: egui::Color32, dark: bool) -> egui::Color32 {
+        match (self, dark) {
+            (LogLevel::Debug, _) => egui::Color32::GRAY,
+            (LogLevel::Info, _) => text,
+            (LogLevel::Warning, true) => egui::Color32::from_rgb(240, 200, 60),
+            (LogLevel::Warning, false) => egui::Color32::from_rgb(160, 110, 0),
+            (LogLevel::Error, true) => egui::Color32::from_rgb(255, 100, 90),
+            (LogLevel::Error, false) => egui::Color32::from_rgb(190, 30, 30),
+        }
+    }
+
     /// The level of `message`, by what it says (the messages are sentences, see `MandelbrotApp::log`)
     pub fn of(message: &str) -> LogLevel {
         let lower = message.to_lowercase();
@@ -279,9 +301,22 @@ impl MandelbrotApp {
             ui.add_space(4.0);
         }
         egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-            for (index, message) in self.log.iter().enumerate().filter(|(_, message)| LogLevel::of(message) >= self.log_level) {
-                let time = self.log_times.get(index).map_or_else(String::new, |time| time.format("%H:%M:%S ").to_string());
-                ui.add(egui::Label::new(format!("{time}{message}")).wrap());
+            //Every line: its time, its level as a colored tag, and the message (in the level's color for warnings and errors)
+            let (text, dark, weak) = (ui.visuals().text_color(), ui.visuals().dark_mode, ui.visuals().weak_text_color());
+            let (body, mono) = (egui::TextStyle::Body.resolve(ui.style()), egui::TextStyle::Monospace.resolve(ui.style()));
+            for (index, message) in self.log.iter().enumerate() {
+                let level = LogLevel::of(message);
+                if level < self.log_level {
+                    continue;
+                }
+                let mut job = egui::text::LayoutJob::default();
+                if let Some(time) = self.log_times.get(index) {
+                    job.append(&time.format("%H:%M:%S ").to_string(), 0.0, egui::TextFormat::simple(body.clone(), weak));
+                }
+                job.append(level.tag(), 0.0, egui::TextFormat::simple(mono.clone(), level.color(text, dark)));
+                let color = if level >= LogLevel::Warning { level.color(text, dark) } else { text };
+                job.append(&format!(" {message}"), 0.0, egui::TextFormat::simple(body.clone(), color));
+                ui.add(egui::Label::new(job).wrap());
             }
         });
     }

@@ -2887,7 +2887,17 @@ fn the_status_log_has_the_time_of_every_message_and_shows_the_chosen_levels() {
     };
     let shown = texts(&mut app);
     let time = app.log_times[before].format("%H:%M:%S").to_string();
-    assert!(shown.contains(&format!("{time} Saved the image to saved/x.png")), "{shown}");
+    assert!(shown.contains(&format!("{time} INFO Saved the image to saved/x.png")), "every line shows its time and level: {shown}");
+    assert!(shown.contains(" ERROR Could not join the chunks of the video"), "{shown}");
+    //The tag and the message of an error are red (in either theme)
+    let ctx = egui::Context::default();
+    let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 2000.0))), ..Default::default() }, |ui| app.log_ui(ui));
+    let red = output.shapes.iter().filter_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) if text.galley.text().contains("Could not join") => Some(text.galley.job.sections.iter().filter(|section| section.format.color.r() > 150 && section.format.color.g() < 120).count()),
+        _ => None,
+    }).sum::<usize>();
+    output.drop_without_applying_deltas();
+    assert_eq!(red, 2, "the ERROR tag and its message are red");
     assert!(!shown.contains("Rendered the default view"), "Info hides the renders: {shown}");
     app.log_level = LogLevel::Error;
     let shown = texts(&mut app);
