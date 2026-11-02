@@ -3056,6 +3056,9 @@ fn the_mini_map_is_off_at_first_and_shows_the_whole_set_with_the_view_on_it() {
     app.m.julia = Some((0.285, 0.01));
     let _ = draw(&mut app);
     assert_ne!(app.minimap.as_ref().map(|(key, _, _)| key.clone()), julia_key, "another Julia set: its map");
+    app.m.julia = None;
+    let _ = draw(&mut app);
+    assert_eq!(app.minimap.as_ref().map(|(key, _, _)| key.clone()), key, "back in the Mandelbrot set: its map again");
 }
 
 #[test]
