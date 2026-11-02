@@ -2574,8 +2574,8 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
     app.toggle_color_cycle();
     let started = std::time::Instant::now();
     let mut steps = 0;
-    //(Until enough steps, at least 300 ms: a sleep of 5 ms takes about 15 on Windows)
-    while (started.elapsed() < Duration::from_millis(300) || steps < 8) && started.elapsed() < Duration::from_secs(3) {
+    //(Until enough steps, at least 300 ms: a sleep of 5 ms takes about 15 on Windows, and a busy runner of CI once made only 4 steps in 3 s)
+    while (started.elapsed() < Duration::from_millis(300) || steps < 8) && started.elapsed() < Duration::from_secs(10) {
         let offset = app.m.palette.offset;
         app.cycle_colors(&ctx, std::time::Instant::now());
         steps += usize::from((app.m.palette.offset - offset).abs() > 1e-9);
@@ -2634,8 +2634,8 @@ fn cycling_colors_in_the_window_keeps_its_one_sample_steps_and_the_history() {
     app.toggle_color_cycle();
     let started = std::time::Instant::now();
     let mut steps = 0;
-    //(Until enough steps, at least 300 ms: a sleep of 5 ms takes about 15 on Windows)
-    while (started.elapsed() < Duration::from_millis(300) || steps < 8) && started.elapsed() < Duration::from_secs(3) {
+    //(Until enough steps, at least 300 ms: a sleep of 5 ms takes about 15 on Windows, and a busy runner of CI once made only 4 steps in 3 s)
+    while (started.elapsed() < Duration::from_millis(300) || steps < 8) && started.elapsed() < Duration::from_secs(10) {
         let offset = app.m.palette.offset;
         app.poll_job();
         app.cycle_colors(&ctx, std::time::Instant::now());
