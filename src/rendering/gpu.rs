@@ -178,7 +178,9 @@ impl GpuIterator {
     fn open() -> Result<GpuIterator, String> {
         //Vulkan, Metal and DX12 only: the loops need f64 shaders and SPIR-V, which OpenGL does not have, and looking at OpenGL's adapters through EGL could
         //panic in the EGL library while the window's OpenGL context is current on another thread (seen on X11 with NVIDIA), leaving the window without a GPU
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+        //No debug labels or validation (wgpu turns them on in debug builds): naming a Vulkan object crashed inside the Vulkan loader while another thread
+        //opened or closed another instance (issue #200: the tests, each with a GPU, in a debug build), and nothing reads the names
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, flags: wgpu::InstanceFlags::empty(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).map_err(|err| format!("no GPU: {err}"))?;
         let info = adapter.get_info();
         let name = format!("{} ({:?})", info.name, info.backend);
