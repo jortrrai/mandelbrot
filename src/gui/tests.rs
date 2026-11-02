@@ -2619,20 +2619,24 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
     (app.cycle_rate, app.color_cycling) = (100.0, false);
     app.toggle_color_cycle();
     let started = std::time::Instant::now();
-    let mut steps = 0;
+    let (mut steps, mut travelled) = (0, 0.0);
     //(Until enough steps, at least 300 ms: a sleep of 5 ms takes about 15 on Windows, and a busy runner of CI once made only 4 steps in 3 s)
     while (started.elapsed() < Duration::from_millis(300) || steps < 8) && started.elapsed() < Duration::from_secs(10) {
         let offset = app.m.palette.offset;
         app.cycle_colors(&ctx, std::time::Instant::now());
-        steps += usize::from((app.m.palette.offset - offset).abs() > 1e-9);
+        //(The distance, also across the end of the palette, where the offset starts again from 0)
+        let moved = (app.m.palette.offset - offset).rem_euclid(crate::mandelbrot_set::PALETTE_LENGTH);
+        (steps, travelled) = (steps + usize::from(moved > 1e-9), travelled + moved);
         app.poll_job();
         std::thread::sleep(Duration::from_millis(5));
     }
     let offset = app.m.palette.offset;
     assert!(steps >= 5, "the colors moved in steps: {steps}");
-    //(Never ahead of the clock; behind it only while the steps wait for their renders, which a busy runner of CI slowed to 68% once)
+    //(Never ahead of the clock. Behind it while the steps wait for their renders: a step catches up with at most a quarter of a second, so on a runner of CI
+    //that made only a few steps in seconds the colors fell far behind the clock, by design)
     let clock = 100.0 * started.elapsed().as_secs_f64();
-    assert!(offset < clock + 10.0 + 0.15 * clock && offset > 0.5 * clock - 10.0, "about 100 steps per second: {offset} after {:?}", started.elapsed());
+    let least = (0.5 * clock).min(0.9 * 100.0 * 0.25 * steps as f64) - 10.0;
+    assert!(travelled < clock + 10.0 + 0.15 * clock && travelled > least, "about 100 steps per second: {travelled} after {:?} and {steps} steps", started.elapsed());
     app.toggle_color_cycle();
     wait_for_job(&mut app);
     assert_eq!(app.m.palette.offset, offset, "stopping keeps the colors it reached");
