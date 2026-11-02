@@ -115,5 +115,7 @@ fn run_with(config: &Config, options: eframe::NativeOptions) -> Result<(), Box<d
         app.use_gl(creation_context.gl.as_deref());
         Ok(Box::new(app))
     }))?;
+    //Renders still under way in the background must not use the GPU while the program ends (issue #200)
+    rendering::gpu::close_gpus();
     Ok(())
 }

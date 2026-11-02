@@ -108,6 +108,38 @@ struct Buffers {
 /// The bytes of the parameters of a dispatch (the most, those of `submit_pixels`)
 const PARAMS_CAPACITY: u64 = 96;
 
+/// Every use of the GPU holds this gate open (shared), and `close_gpus` shuts it for good when the program ends: then it waits for the dispatches under way,
+/// and render threads that want the GPU after that wait for ever, while the process ends. Without it a render thread could call into Vulkan while the
+/// program's exit tears down the Vulkan loader, which crashed (issue #200: a window closed during a GPU render, a test ending while its app still rendered).
+/// A thread takes the gate once, never twice (a second shared lock could wait for a waiting `close_gpus`)
+static GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn gate() -> std::sync::RwLockReadGuard<'static, ()> {
+    GATE.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Shuts the gate of the GPUs (see `GATE`) when the program ends, once for good.
+///
+/// Called when the window closes and the command line ends, and at exit (on Linux, also for the tests)
+pub fn close_gpus() {
+    static CLOSED: std::sync::Once = std::sync::Once::new();
+    CLOSED.call_once(|| std::mem::forget(GATE.write().unwrap_or_else(std::sync::PoisonError::into_inner)));
+}
+
+/// Closes the gate (see `close_gpus`) at the program's exit too, before the Vulkan loader is torn down: the handler is registered after the loader is
+/// loaded, so it runs before the loader's own handlers
+#[cfg(target_os = "linux")]
+fn close_gpus_at_exit() {
+    extern "C" fn at_exit() {
+        close_gpus();
+    }
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    //SAFETY: `at_exit` is a plain function that never unwinds
+    REGISTERED.call_once(|| unsafe {
+        libc::atexit(at_exit);
+    });
+}
+
 /// A GPU that iterates points exactly like the CPU, see the module
 pub struct GpuIterator {
     /// The device and its queue are never dropped: dropping the last of them destroys the Vulkan instance, and NVIDIA's driver crashed doing that on a
@@ -132,6 +164,18 @@ impl GpuIterator {
     /// # Errors
     /// The reason the GPU cannot be used: no adapter, a missing feature, a failed request, or an outcome that differs from the CPU's
     pub fn new() -> Result<GpuIterator, String> {
+        let gpu = {
+            let _gate = gate();
+            Self::open()?
+        };
+        #[cfg(target_os = "linux")]
+        close_gpus_at_exit();
+        gpu.self_test()?;
+        Ok(gpu)
+    }
+
+    /// Opens the GPU and its pipelines (see `new`)
+    fn open() -> Result<GpuIterator, String> {
         //Vulkan, Metal and DX12 only: the loops need f64 shaders and SPIR-V, which OpenGL does not have, and looking at OpenGL's adapters through EGL could
         //panic in the EGL library while the window's OpenGL context is current on another thread (seen on X11 with NVIDIA), leaving the window without a GPU
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
@@ -163,9 +207,7 @@ impl GpuIterator {
         };
         let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?, pipeline(include_str!("gpu_f32.wgsl"))?);
         let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
-        let gpu = GpuIterator { device, queue, exact, fast, single, layout, name, spare: std::sync::Mutex::new(Vec::new()) };
-        gpu.self_test()?;
-        Ok(gpu)
+        Ok(GpuIterator { device, queue, exact, fast, single, layout, name, spare: std::sync::Mutex::new(Vec::new()) })
     }
 
     /// The name and the backend of the GPU
@@ -267,6 +309,7 @@ impl GpuIterator {
     /// `count` points (see `params.count`), so buffers larger than the dispatch serve it as they are
     fn dispatch(&self, pipeline: &wgpu::ComputePipeline, params: &[u8], input: &[u8], count: usize, outcome_size: usize) -> Result<Submitted, String> {
         let count = u32::try_from(count).map_err(|_| String::from("too many points"))?;
+        let _gate = gate();
         //Every GPU error of the dispatch (a buffer the driver could not create, a lost device) is caught here and returned, so the CPU computes the batch instead
         //(the window once crashed with a buffer that could not be mapped, see issue #119); the buffers are written by the queue, not mapped when they are created
         let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
@@ -301,6 +344,7 @@ impl GpuIterator {
     /// buffers are kept for the next dispatch
     pub(crate) fn finish<T: bytemuck::Pod>(&self, submitted: Submitted) -> Result<Vec<T>, String> {
         let Submitted { buffers, size, index } = submitted;
+        let _gate = gate();
         self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
         if size == 0 {
             return Ok(Vec::new());
