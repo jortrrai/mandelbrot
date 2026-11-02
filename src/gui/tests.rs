@@ -3772,3 +3772,49 @@ fn a_drag_with_the_default_settings_keeps_the_layers() {
         assert!(app.log.last().unwrap().starts_with(&format!("Moved by dragging (continued the samples of {} pixels) in ", 320 * 200)), "rotation {rotation}, {view:?}: {:?}", app.log.last());
     }
 }
+
+#[test]
+#[ignore = "a drag with a settings file (MANDELBROT_SETTINGS, a copy: it is written to) at a window size, run by hand with --release"]
+fn a_drag_with_a_settings_file_keeps_the_layers() {
+    let Ok(path) = std::env::var("MANDELBROT_SETTINGS") else { return };
+    let config = Config::sized(2080, 1340, 1000, 32);
+    let mut app = MandelbrotApp::new(&config);
+    wait_for_job(&mut app);
+    app.use_settings_file(Some(std::path::PathBuf::from(path)));
+    app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+    for (name, view) in [("Frost", crate::complex_plane::View::new(-0.660_416_666_666_666_7, 0.443_75, 0.1)), ("Wow", crate::complex_plane::View::new(-0.803_102_981_044_643_7, 0.178_500_232_700_653_38, 1.486_058_621_097_152_7e-11))] {
+        app.c.set_view(&view);
+        app.render("At the place");
+        wait_for_job(&mut app);
+        println!("{name}: {:?}", app.log.last());
+        app.gesture_active = true;
+        for _ in 0..20 {
+            crate::rendering::move_complex_plane_by_pixels(&mut app.c, 1, 4);
+            app.render_moved("Moved by dragging");
+            std::thread::sleep(Duration::from_millis(16));
+            app.poll_job();
+            app.settle_gesture(&egui::Context::default());
+        }
+        wait_for_job(&mut app);
+        app.gesture_active = false;
+        app.settle = app.settle.take().map(|(message, _, moved)| (message, std::time::Instant::now().checked_sub(Duration::from_secs(5)).unwrap(), moved));
+        app.settle_gesture(&egui::Context::default());
+        wait_for_job(&mut app);
+        println!("{name} after the drag: {:?}", app.log.last());
+        //Back again
+        app.gesture_active = true;
+        for _ in 0..20 {
+            crate::rendering::move_complex_plane_by_pixels(&mut app.c, -1, -4);
+            app.render_moved("Moved back by dragging");
+            std::thread::sleep(Duration::from_millis(16));
+            app.poll_job();
+            app.settle_gesture(&egui::Context::default());
+        }
+        wait_for_job(&mut app);
+        app.gesture_active = false;
+        app.settle = app.settle.take().map(|(message, _, moved)| (message, std::time::Instant::now().checked_sub(Duration::from_secs(5)).unwrap(), moved));
+        app.settle_gesture(&egui::Context::default());
+        wait_for_job(&mut app);
+        println!("{name} after the drag back: {:?}", app.log.last());
+    }
+}
