@@ -65,7 +65,7 @@ impl MandelbrotApp {
 
     /// The angle the rotation slider shows: the one it was last set to while the view still has that angle (180° stays 180°), otherwise the view's own
     fn shown_rotation(&self) -> f64 {
-        if crate::complex_plane::normalized_angle(self.rotation_slider) == self.c.rotation() { self.rotation_slider } else { self.c.rotation() }
+        if crate::complex_plane::normalized_angle(self.rotation_slider).to_bits() == self.c.rotation().to_bits() { self.rotation_slider } else { self.c.rotation() }
     }
 
     /// Turns the view to `radians` (from the rotation controls) and renders it

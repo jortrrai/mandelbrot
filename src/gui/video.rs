@@ -1350,7 +1350,7 @@ mod tests {
     #[test]
     fn a_render_time_reads_in_seconds_minutes_or_hours() {
         assert_eq!(super::render_time(Duration::from_millis(42_345)), "42.3 s");
-        assert_eq!(super::render_time(Duration::from_millis(187_000)), "3 min 7.0 s");
+        assert_eq!(super::render_time(Duration::from_secs(187)), "3 min 7.0 s");
         assert_eq!(super::render_time(Duration::from_secs(3723)), "1 h 2 min 3 s");
     }
 

@@ -10,6 +10,7 @@ use eframe::egui::{self, Color32};
 use crate::coloring::TrueColor;
 use crate::complex::Complex;
 use crate::complex_plane::ComplexPlane;
+#[cfg(test)]
 use crate::mandelbrot_set::MandelbrotSet;
 
 use super::MandelbrotApp;

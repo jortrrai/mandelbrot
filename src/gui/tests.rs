@@ -2362,7 +2362,7 @@ fn a_sequence_made_in_a_julia_set_stays_in_it_when_flown_rendered_and_saved() {
     assert_eq!(flight.julia, Some((-0.8, 0.156)));
     let saved = super::flight_files::parse(&super::flight_files::to_json(&flight, None), "julia.json").unwrap();
     assert_eq!(saved.flight, flight, "a flight file keeps the Julia set");
-    assert!(!super::flight_files::to_json(&super::video::VideoFlight { julia: None, sequence: None, ..flight.clone() }, None).contains("julia"), "a Mandelbrot flight is written as before");
+    assert!(!super::flight_files::to_json(&super::video::VideoFlight { julia: None, sequence: None, ..flight }, None).contains("julia"), "a Mandelbrot flight is written as before");
     app.video_folder = folder.join("saved");
     app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
     (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs) = (48, 32, 1, 24, true);
@@ -3044,7 +3044,7 @@ fn the_julia_map_is_on_at_first_and_draws_the_pinned_point_or_the_center_in_the_
     app.julia_pinned = None;
     let center = app.c.center();
     let started = std::time::Instant::now();
-    while !app.julia_map.as_ref().is_some_and(|(key, _, done)| *done && f64::from_bits(key.0) == center.x && f64::from_bits(key.1) == center.y) {
+    while !app.julia_map.as_ref().is_some_and(|(key, _, done)| *done && key.0 == center.x.to_bits() && key.1 == center.y.to_bits()) {
         assert!(started.elapsed() < Duration::from_secs(20), "the map of the center did not come");
         let _ = draw(&mut app);
         std::thread::sleep(Duration::from_millis(5));
