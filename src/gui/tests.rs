@@ -1291,6 +1291,19 @@ fn every_point_of_interest_shows_its_zoom_in_the_list() {
 }
 
 #[test]
+fn a_place_in_a_julia_set_says_so_in_the_list() {
+    let (app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    let mut place = app.points[0].clone();
+    place.description = String::from("A spiral");
+    assert_eq!(super::points::place_hover_text(&place), "A spiral", "a place in the Mandelbrot set: only its description");
+    place.location.julia = Some((-0.8, -0.156));
+    assert_eq!(super::points::place_hover_text(&place), "A spiral\n\nJulia set of c = -0.8 - 0.156i");
+    place.description.clear();
+    assert_eq!(super::points::place_hover_text(&place), "Julia set of c = -0.8 - 0.156i");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn the_depth_color_runs_from_cool_for_the_shallowest_place_to_hot_for_the_deepest() {
     let config = Config::sized(64, 48, 50, 32);
     let app = MandelbrotApp::new(&config);

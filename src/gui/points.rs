@@ -188,6 +188,20 @@ pub(super) fn draw_markers(painter: &egui::Painter, markers: &[(String, egui::Po
     }
 }
 
+/// The text shown when the mouse is over a place in the list: its description, and the parameter of its Julia set if it is in one
+pub(super) fn place_hover_text(point: &PointOfInterest) -> String {
+    let julia = point.location.julia.map(|(x, y)| format!("Julia set of c = {x} {} {}i", if y < 0.0 { '-' } else { '+' }, y.abs()));
+    [Some(point.description.clone()).filter(|description| !description.is_empty()), julia].into_iter().flatten().collect::<Vec<_>>().join("\n\n")
+}
+
+/// A small tag with `text` whose top left corner is at `position`, readable in the dark and the light theme
+fn draw_tag(painter: &egui::Painter, position: egui::Pos2, text: &str, visuals: &egui::Visuals) {
+    let galley = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(11.0), visuals.strong_text_color());
+    let rect = egui::Rect::from_min_size(position, galley.size() + egui::vec2(10.0, 4.0));
+    painter.rect_filled(rect, 4.0, visuals.selection.bg_fill.gamma_multiply(0.6));
+    painter.galley(position + egui::vec2(5.0, 2.0), galley, visuals.strong_text_color());
+}
+
 /// The zoom of a point of interest as the list shows it, like the zoom of the current view (see `status::format_zoom`)
 pub(super) fn point_zoom_text(point: &PointOfInterest) -> String {
     format!("Zoom {}", super::status::format_zoom(1.0 / point.location.scale))
@@ -321,7 +335,12 @@ impl MandelbrotApp {
                 painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 2.0), egui::Align2::LEFT_TOP, &point.name, egui::FontId::proportional(14.0), ui.visuals().strong_text_color());
                 //The zoom of the place, before it is clicked: a deep place can take long to render. Its color is its depth among the places, see `DepthScale`
                 painter.text(egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 22.0), egui::Align2::LEFT_TOP, point_zoom_text(point), egui::FontId::proportional(12.0), depth.color(point));
-                let response = if point.description.is_empty() { response } else { response.on_hover_text(&point.description) };
+                //A place in a Julia set (#227) gets a small tag under its zoom; the Mandelbrot set is the usual case and gets none
+                if point.location.julia.is_some() {
+                    draw_tag(&painter, egui::pos2(thumbnail_rect.right() + 8.0, thumbnail_rect.top() + 42.0), "Julia set", ui.visuals());
+                }
+                let hover = place_hover_text(point);
+                let response = if hover.is_empty() { response } else { response.on_hover_text(hover) };
                 if response.clicked() {
                     frame.chosen = Some(index);
                 }
