@@ -455,6 +455,9 @@ impl MandelbrotApp {
                     }
                 }
             }
+            //A frame of a drag that keeps exact samples (every layer of the view it moves) computes its exposed strip with them instead of the f32 loop: samples of
+            //the f32 loop make a render start over, so the frame would discard every layer, and the render the drag settles on would discard the frame
+            let f32_frames = f32_frames && !samples.would_keep(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), false);
             let kept = samples.prepare_for(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), f32_frames && fast_gpu && gpu.is_some());
             let whole = kept == 0;
             if kept > 0 {

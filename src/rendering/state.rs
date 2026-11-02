@@ -122,6 +122,17 @@ impl SampleState {
         if self.prepare(plane, width, height, SampleKey::new(m, coloring_function, fast_gpu, single)) == Prepared::Empty { 0 } else { self.counts.iter().filter(|count| **count > 0).count() }
     }
 
+    /// Whether a render of `plane` with these settings (see `prepare_for`) would keep samples of this state: it is this view moved by whole pixels, and some pixel
+    /// that stays visible has samples
+    #[allow(clippy::too_many_arguments)] // The same as `prepare_for`
+    pub fn would_keep(&self, plane: &ComplexPlane, width: usize, height: usize, m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor, fast_gpu: bool, single: bool) -> bool {
+        let Some((rows_up, columns_right)) = self.kept_shift(plane, width, height, &SampleKey::new(m, coloring_function, fast_gpu, single)) else { return false };
+        //(The pixels that stay visible, in the view of the state)
+        let columns = if columns_right >= 0 { 0..width - columns_right.unsigned_abs() } else { columns_right.unsigned_abs()..width };
+        let rows = if rows_up >= 0 { 0..height - rows_up.unsigned_abs() } else { rows_up.unsigned_abs()..height };
+        rows.into_iter().any(|y| self.counts.get(y * width + columns.start..y * width + columns.end).is_some_and(|row| row.iter().any(|count| *count > 0 && *count != FOREIGN)))
+    }
+
     /// The shift that turns this state into the state of a render of `plane` with `key`, if that render keeps samples of it
     fn kept_shift(&self, plane: &ComplexPlane, width: usize, height: usize, key: &SampleKey) -> Option<(isize, isize)> {
         let same_render = self.width == width && self.height == height && self.key.as_ref() == Some(key);

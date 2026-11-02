@@ -959,6 +959,39 @@ fn a_drag_shifts_the_shown_image_even_when_its_render_was_interrupted() {
 }
 
 #[test]
+fn a_drag_keeps_every_supersampling_layer_of_the_pixels_that_stay_visible() {
+    //Without a GPU, and with the GPU, its fast math and the f32 loop for moving frames (the defaults): a frame of the drag may not use the f32 loop for the pixels
+    //that keep their samples, as samples of the f32 loop would make the drag start over, and so would the render it settles on after them
+    let gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+    for gpu in [None, gpu].into_iter().enumerate().filter_map(|(index, gpu)| (index == 0 || gpu.is_some()).then_some(gpu)) {
+        let config = Config::sized(120, 80, 100, 4);
+        let mut app = manual_app(&config);
+        (app.gpu, app.use_gpu, app.fast_gpu, app.f32_frames) = (gpu.clone(), true, true, true);
+        app.render("Four layers");
+        wait_for_job(&mut app);
+        let old = app.p.pixels.clone();
+
+        app.gesture_active = true;
+        crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, 5);
+        app.render_moved("Moved by dragging");
+        wait_for_job(&mut app);
+        //The frame of the drag computes one sample of the exposed columns only: the other pixels show all four layers, the old image moved 5 columns left
+        let label = if gpu.is_some() { "with the GPU" } else { "without a GPU" };
+        for y in 0..80 {
+            assert_eq!(app.p.pixels[y * 120..y * 120 + 115], old[y * 120 + 5..(y + 1) * 120], "{label}: row {y} keeps its layers during the drag");
+        }
+        app.gesture_active = false;
+        app.settle_gesture(&egui::Context::default());
+        wait_for_job(&mut app);
+        assert!(app.buffer_is_complete);
+        assert!(app.log.last().unwrap().starts_with(&format!("Moved by dragging (continued the samples of {} pixels) in ", 120 * 80)), "{label}: {:?}", app.log.last());
+        for y in 0..80 {
+            assert_eq!(app.p.pixels[y * 120..y * 120 + 115], old[y * 120 + 5..(y + 1) * 120], "{label}: row {y} after the drag");
+        }
+    }
+}
+
+#[test]
 fn a_coarse_preview_is_uploaded_with_one_texel_per_block_centered_on_its_pixel() {
     let (width, height, block) = (10, 6, 4);
     let colors: Vec<TrueColor> = (0..width * height).map(|i| TrueColor::new(i as u8, 0, 0)).collect();
