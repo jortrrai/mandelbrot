@@ -434,6 +434,19 @@ impl VideoFlight {
     }
 }
 
+/// A render time for the log: `42.3 s`, `3 min 7.0 s` or `1 h 2 min 3 s`
+pub(super) fn render_time(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs_f64();
+    if seconds < 60.0 {
+        format!("{seconds:.1} s")
+    } else if seconds < 3600.0 {
+        format!("{} min {:.1} s", (seconds / 60.0).floor(), seconds % 60.0)
+    } else {
+        let whole = elapsed.as_secs();
+        format!("{} h {} min {} s", whole / 3600, whole % 3600 / 60, whole % 60)
+    }
+}
+
 /// Everything a video is made of: the flight and every setting of the render, taken when the video is started or added to the queue, so later changes of
 /// the controls do not change it
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1020,6 +1033,8 @@ impl MandelbrotApp {
             //(By the result, not by Pause video: pressed while the chunks are joined, the video is still finished)
             let finished = message.starts_with("Video of the flight:") && !message.contains("(stopped");
             let discard = (job.discard && !finished).then(|| job.name.clone());
+            //A finished video says how long its rendering took, to compare settings such as Fast dives (a resumed video: the time since it was resumed)
+            let message = if finished { format!("{message}, rendered in {}", render_time(job.started.elapsed())) } else { message };
             self.video_job = None;
             self.log(message);
             if let Some(name) = discard {
@@ -1295,6 +1310,13 @@ fn megabytes(bytes: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_render_time_reads_in_seconds_minutes_or_hours() {
+        assert_eq!(super::render_time(Duration::from_millis(42_345)), "42.3 s");
+        assert_eq!(super::render_time(Duration::from_millis(187_000)), "3 min 7.0 s");
+        assert_eq!(super::render_time(Duration::from_secs(3723)), "1 h 2 min 3 s");
+    }
+
     use super::*;
 
     #[test]

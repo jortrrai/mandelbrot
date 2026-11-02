@@ -1789,6 +1789,7 @@ fn a_video_of_the_last_flight_has_a_frame_for_every_step_of_its_frame_rate() {
     let frames = (duration.as_secs_f64() * 24.0).ceil() as usize + 1;
     let message = app.log.iter().rev().find(|line| line.starts_with("Video of the flight")).unwrap();
     assert!(message.starts_with(&format!("Video of the flight: {frames} of {frames} frames at 24 FPS")), "{message}");
+    assert!(message.contains(", rendered in ") && message.ends_with(" s"), "a finished video says how long it took: {message}");
     if std::process::Command::new("ffmpeg").arg("-version").output().is_ok_and(|output| output.status.success()) {
         assert!(message.contains(".mp4"), "the default format makes an .mp4: {message}");
     }
