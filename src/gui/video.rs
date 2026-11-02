@@ -74,7 +74,7 @@ pub(super) struct FrameScheduler {
     under_way: std::sync::Mutex<usize>,
     free: std::sync::Condvar,
     /// The frames finished by the renderers
-    finished: AtomicUsize,
+    pub(super) finished: AtomicUsize,
     /// The CPU use of the render threads in the last measurement, in percent, for the progress line
     pub(super) cpu_percent: AtomicUsize,
 }
@@ -259,7 +259,7 @@ impl Playback {
 }
 
 /// The extension of the file of a video of `quality`
-const fn extension(quality: VideoQuality) -> &'static str {
+pub(super) const fn extension(quality: VideoQuality) -> &'static str {
     match quality {
         VideoQuality::Lossless => "mkv",
         _ => "mp4",
@@ -342,6 +342,42 @@ impl FrameClock {
     }
 }
 
+/// The moments of the `samples` samples of a frame at `time` with motion blur: spread over `shutter` degrees of the `interval` between frames (360: all of it),
+/// centered on the frame and within the flight (`duration`). The fraction of sample `k` is the radical inverse of `k` in base 2, so the first samples, which
+/// every pixel gets (the adaptive ones only where there is detail), are spread over the shutter too: sample 0 is at the frame itself, sample 1 half a shutter away
+pub(super) fn sample_times(samples: u8, time: Duration, interval: Duration, shutter: f64, duration: Duration) -> Vec<Duration> {
+    let count = f64::from(samples.max(1));
+    (0..u32::from(samples.max(1))).map(|k| {
+        let fraction = (f64::from(k.reverse_bits()) / f64::from(u32::MAX) + 0.5).fract() + 0.5 / count - 0.5;
+        let moment = time.as_secs_f64() + fraction * (shutter / 360.0) * interval.as_secs_f64();
+        Duration::from_secs_f64(moment.clamp(0.0, duration.as_secs_f64()))
+    }).collect()
+}
+
+/// The moments a frame of a dive composed from keyframes averages with motion blur (composing is cheap, see `dive_keyframes`)
+const DIVE_MOMENTS: u8 = 8;
+
+/// The average of the colors of `frames` (all the same size)
+fn average_frames(frames: &[Vec<crate::coloring::TrueColor>]) -> Vec<crate::coloring::TrueColor> {
+    if frames.len() == 1 {
+        return frames[0].clone();
+    }
+    let count = frames.len() as f32;
+    (0..frames[0].len()).map(|index| {
+        let mut sum = [0.0_f32; 3];
+        for frame in frames {
+            let color = frame[index];
+            sum[0] += f32::from(color.red);
+            sum[1] += f32::from(color.green);
+            sum[2] += f32::from(color.blue);
+        }
+        crate::coloring::TrueColor::new((sum[0] / count).round() as u8, (sum[1] / count).round() as u8, (sum[2] / count).round() as u8)
+    }).collect()
+}
+
+/// The shutters of the *Motion blur* list: off, then quarter to whole frames
+pub(super) const SHUTTERS: [f64; 5] = [0.0, 90.0, 180.0, 270.0, 360.0];
+
 /// A speed in percent as the video controls and the log show it: whole percents without decimals
 pub(super) fn speed_text(speed: f64) -> String {
     if (speed - speed.round()).abs() < 0.05 { format!("{speed:.0}%") } else { format!("{speed:.1}%") }
@@ -373,6 +409,9 @@ pub(super) struct VideoFlight {
     /// A flight through keyframes instead (see `sequence`): then `from` and `to` are its first and last keyframes
     #[serde(default)]
     pub(super) sequence: Option<super::sequence::Sequence>,
+    /// The rotation at the start and at the place, in radians, turned the short way on the way (issue #217)
+    #[serde(default)]
+    pub(super) rotations: (f64, f64),
 }
 
 impl VideoFlight {
@@ -387,6 +426,11 @@ impl VideoFlight {
     /// The colors of the frame `time` into the flight: from its keyframes, or blended from those at the start to the place's
     pub(super) fn palette_at(&self, path: &Flight, time: Duration) -> crate::mandelbrot_set::ColorCycle {
         path.palette_at(time).unwrap_or_else(|| self.palettes.0.blend(self.palettes.1, path.share_of_path(time)))
+    }
+
+    /// The rotation of the frame `time` into the flight, in radians: from its keyframes, or turned from the one at the start to the place's
+    pub(super) fn rotation_at(&self, path: &Flight, time: Duration) -> f64 {
+        path.rotation_at(time).unwrap_or_else(|| super::flight::blend_angles(self.rotations.0, self.rotations.1, path.share_of_path(time)))
     }
 }
 
@@ -423,6 +467,12 @@ pub(super) struct VideoSpec {
     /// The audio track the video follows and has as its sound (see `music`)
     #[serde(default)]
     pub(super) music: Option<super::music::Music>,
+    /// Motion blur: the shutter angle in degrees (0: sharp frames, 180: the shutter of film), see `sample_times`
+    #[serde(default)]
+    pub(super) shutter: f64,
+    /// Whether a dive into a fixed center is composed from keyframe images (see `dive_keyframes`, issue #209)
+    #[serde(default)]
+    pub(super) keyframe_dives: bool,
 }
 
 /// The name of a new video of `flight` in `folder` (without extension): the time and the name of the place, with a number when a video of that name (or its
@@ -454,10 +504,14 @@ mod mapping_text {
 
 /// A video job: its progress (frames written of all) and cancel flag, and the receiver of its final message
 pub(super) struct VideoJob {
-    done: Arc<AtomicUsize>,
+    /// The name of the video (its file and its chunks, see `chunks`)
+    pub(super) name: String,
+    /// Set by *Cancel video*: the chunks are deleted when the job has stopped (see `poll_video`)
+    pub(super) discard: bool,
+    pub(super) done: Arc<AtomicUsize>,
     /// How many frames render at once, and the CPU use (see `FrameScheduler`)
     pub(super) scheduler: Arc<FrameScheduler>,
-    total: usize,
+    pub(super) total: usize,
     pub(super) cancel: Arc<AtomicBool>,
     started: Instant,
     result: mpsc::Receiver<String>,
@@ -543,6 +597,8 @@ impl MandelbrotApp {
             fast_gpu: self.fast_gpu,
             output: None,
             music,
+            shutter: self.video_shutter,
+            keyframe_dives: self.video_keyframe_dives,
         })
     }
 
@@ -561,9 +617,10 @@ impl MandelbrotApp {
     #[allow(clippy::too_many_lines)] // The settings of the job, its two writers and its loop over the frames
     pub(super) fn start_video_of(&mut self, spec: VideoSpec) -> bool {
         let name = spec.output.clone().unwrap_or_else(|| video_name(&spec.flight, &self.video_folder));
+        let job_name = name.clone();
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music } = spec;
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music, shutter, keyframe_dives } = spec;
         let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
@@ -584,7 +641,17 @@ impl MandelbrotApp {
         let auto_settings = auto;
         let gpu = self.gpu.clone().filter(|_| use_gpu);
         //With a GPU, one more renderer renders whole frames on the GPU alone (see the renderers below)
-        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer;
+        //A dive into a fixed center with the same colors all the way, at most 4K: composed from keyframe images (see `dive_keyframes`)
+        let dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1)
+            .then(|| super::dive_keyframes::DivePlan::of((0..total).map(|frame| clock.time(frame)), |time| {
+                let camera = path.camera_at(time);
+                ((camera.x, camera.y), camera.scale)
+            }))
+            .flatten();
+        if keyframe_dives && dive.is_none() {
+            self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
+        }
+        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none();
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
         let (sender, result) = mpsc::channel();
@@ -637,7 +704,7 @@ impl MandelbrotApp {
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
                             description: format!("Frame {} of {total} of the video {name}", frame + 1),
-                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))) },
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))), rotation: flight.rotation_at(&path, time).to_degrees(), julia: None },
                             appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
                             file_name: String::new(),
                         });
@@ -720,6 +787,28 @@ impl MandelbrotApp {
             //GPU-only renderer, say) stay few
             let written = AtomicUsize::new(rendered);
             let ahead = most_at_once * 2 + 2;
+            //A dive: its keyframe images first, then every frame is composed from them (see `dive_keyframes`)
+            let keyframes = match dive {
+                Some(plan) => {
+                    let set_at = |scale: f64| {
+                        let mut set = m.clone();
+                        set.palette = flight.palettes.0;
+                        if let Some(settings) = &auto_settings {
+                            set.max_iterations = limit_at(scale, &flight, settings);
+                        }
+                        set
+                    };
+                    match super::dive_keyframes::DiveKeyframes::render(plan, (width, height), samples, adaptive, coloring_function, set_at, gpu.as_deref(), fast_gpu, &thread_cancel, |_, _| {}) {
+                        Some(keyframes) => Some(keyframes),
+                        None => {
+                            let _ = sender.send(format!("Video of the flight paused before its first chunk of {} frames was finished: no frames are kept yet, and Resume starts it again from the beginning with the same settings", manifest.chunk_frames));
+                            return;
+                        }
+                    }
+                }
+                None => None,
+            };
+            let keyframes = &keyframes;
             std::thread::scope(|scope| {
                 //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
                 let (next_ref, steering_cancel) = (&next, &thread_cancel);
@@ -773,19 +862,56 @@ impl MandelbrotApp {
                             let time = clock.time(frame);
                             let camera = path.camera_at(time);
                             plane.set_view(&camera.view());
+                            plane.set_rotation(flight.rotation_at(path, time));
+                            //A dive: the frame composed from its keyframe (with motion blur: from the moments of its shutter)
+                            if let Some(keyframes) = keyframes {
+                                let moments = if shutter > 0.0 {
+                                    let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
+                                    sample_times(DIVE_MOMENTS, time, interval, shutter, path.duration())
+                                } else {
+                                    vec![time]
+                                };
+                                let composed: Vec<Vec<crate::coloring::TrueColor>> = moments.iter().map(|moment| keyframes.compose(path.camera_at(*moment).scale, flight.rotation_at(path, *moment))).collect();
+                                let colors = average_frames(&composed);
+                                scheduler.finish_frame(true);
+                                if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
                             if let Some(limit) = path.limit_at(time) {
                                 m.max_iterations = limit; //The limits of the keyframes
                             } else if let Some(settings) = auto_settings {
                                 m.max_iterations = limit_at(camera.scale, flight, settings);
                             }
                             m.palette = flight.palette_at(path, time);
+                            //Motion blur: every sample in the view of its own moment within the shutter (the limit and the colors stay those of the frame)
+                            let planes: Vec<ComplexPlane> = if shutter > 0.0 && samples > 1 && !blend {
+                                let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
+                                sample_times(samples, time, interval, shutter, path.duration()).into_iter().map(|moment| {
+                                    let mut sample_plane = ComplexPlane::new(width, height);
+                                    sample_plane.set_view(&path.camera_at(moment).view());
+                                    sample_plane.set_rotation(flight.rotation_at(path, moment));
+                                    sample_plane
+                                }).collect()
+                            } else {
+                                Vec::new()
+                            };
                             let mut colors = Vec::new();
                             let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
                                 .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
+                            let render = if planes.is_empty() { render } else { render.sample_planes(&planes) };
                             //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
                             let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
-                            let render = if on_the_gpu { render.on_the_gpu_only() } else { render };
-                            let completed = render.run(|layer, _| colors = layer.to_vec());
+                            //(The CPU workers below the threads that feed the GPU, see `Render::in_the_background`)
+                            let render = if on_the_gpu { render.on_the_gpu_only() } else { render.in_the_background() };
+                            //Only the last pass is kept: copying the whole frame after each of its passes cost 64 copies of 25 MB per 4K frame at 64x (#212)
+                            let last_pass = if blend && samples <= 1 { 1 } else { samples.clamp(1, 64) };
+                            let completed = render.run(|layer, pass| {
+                                if pass >= last_pass {
+                                    colors = layer.to_vec();
+                                }
+                            });
                             if on_the_gpu {
                                 scheduler.finished.fetch_add(usize::from(completed), Ordering::Relaxed);
                             } else {
@@ -855,7 +981,13 @@ impl MandelbrotApp {
             }
             manifest = chunks::read_manifest(&parts).unwrap_or(manifest);
             if manifest.chunks_done < manifest.chunks() {
-                let _ = sender.send(format!("Video of the flight paused at {} of {total} frames: {} of {} chunks are kept in {}, and Resume continues it", manifest.first_frame(), manifest.chunks_done, manifest.chunks(), parts.display()));
+                let message = if manifest.chunks_done == 0 {
+                    //(A chunk is kept once all its frames are encoded: before the first, there is nothing yet)
+                    format!("Video of the flight paused before its first chunk of {} frames was finished: no frames are kept yet, and Resume starts it again from the beginning with the same settings", manifest.chunk_frames)
+                } else {
+                    format!("Video of the flight paused at {} of {total} frames: {} of {} chunks are kept in {}, and Resume continues it", manifest.first_frame(), manifest.chunks_done, manifest.chunks(), parts.display())
+                };
+                let _ = sender.send(message);
                 return;
             }
             let hevc = arguments(quality, playback, manifest.nvenc, fps).iter().any(|argument| argument == "hevc_nvenc" || argument == "libx265");
@@ -875,7 +1007,7 @@ impl MandelbrotApp {
             let _ = sender.send(format!("Video of the flight: {total} of {total} frames at {fps} FPS, {speed} speed{resumed}{written} as {}{with_music}", video.display()));
         });
         self.log(format!("Rendering a video of the flight to {destination}: {total} frames of {width} x {height} at {fps} FPS, {} speed, {}, {}", speed_text(speed), quality.name(), playback.name()));
-        self.video_job = Some(VideoJob { done, scheduler, total, cancel, started: Instant::now(), result });
+        self.video_job = Some(VideoJob { name: job_name, discard: false, done, scheduler, total, cancel, started: Instant::now(), result });
         true
     }
 
@@ -887,15 +1019,32 @@ impl MandelbrotApp {
             //A video that was cancelled, stopped or could not start has not finished (for the queue)
             //(By the result, not by Pause video: pressed while the chunks are joined, the video is still finished)
             let finished = message.starts_with("Video of the flight:") && !message.contains("(stopped");
+            let discard = (job.discard && !finished).then(|| job.name.clone());
             self.video_job = None;
             self.log(message);
+            if let Some(name) = discard {
+                //Cancel video: nothing of it is kept (issue #215)
+                self.delete_unfinished(&name);
+            }
             self.unfinished_videos = None; //Read again (see `unfinished_ui`)
             self.queue_video_ended(finished);
         }
     }
 
     /// The progress of a video under way, with its button to cancel it
-    pub(super) fn video_progress_ui(&self, ui: &mut egui::Ui) {
+    pub(super) fn video_progress_ui(&mut self, ui: &mut egui::Ui) {
+        let mut cancel_video = false;
+        self.video_progress_row(ui, &mut cancel_video);
+        if cancel_video {
+            if let Some(job) = &mut self.video_job {
+                job.discard = true;
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The row of `video_progress_ui`; `cancel_video` is set when *Cancel video* is pressed
+    fn video_progress_row(&self, ui: &mut egui::Ui, cancel_video: &mut bool) {
         let Some(job) = &self.video_job else { return };
         ui.horizontal(|ui| {
             let done = job.done.load(Ordering::Relaxed);
@@ -903,6 +1052,9 @@ impl MandelbrotApp {
             let left = if done > 0 { elapsed / done as f64 * (job.total - done) as f64 } else { 0.0 };
             if ui.button("Pause video").on_hover_text("Stops the video: its finished chunks (10 seconds of video each) are kept, and Resume continues it later, also after the program was closed").clicked() {
                 job.cancel.store(true, Ordering::Relaxed);
+            }
+            if ui.button("Cancel video").on_hover_text("Stops the video and deletes what it rendered so far (Pause video keeps it)").clicked() {
+                *cancel_video = true;
             }
             let (at_once, cpu) = (job.scheduler.allowed(), job.scheduler.cpu_percent.load(Ordering::Relaxed));
             ui.add(egui::ProgressBar::new(done as f32 / job.total.max(1) as f32).text(format!("Video: {done} of {} frames, {left:.0} s left ({at_once} at once, CPU {cpu}%)", job.total)))
@@ -957,18 +1109,61 @@ impl MandelbrotApp {
     /// The videos that were stopped before they were finished, each with *Resume* (the list is read again when a video ends)
     fn unfinished_ui(&mut self, ui: &mut egui::Ui) {
         let videos = self.unfinished_videos.get_or_insert_with(|| super::chunks::unfinished(&self.video_folder).into_iter().map(|(name, manifest)| (name, manifest.first_frame(), manifest.total)).collect());
-        let mut resume = None;
+        let (mut resume, mut delete, mut confirm) = (None, None, self.confirm_delete.clone());
         for (name, done, total) in videos.iter() {
             ui.horizontal(|ui| {
-                if ui.button("Resume").on_hover_text("Continues this video from its first unfinished chunk, with the settings it was started with").clicked() {
+                //Delete, after a second click that says how much it frees (issue #215)
+                if confirm.as_deref() == Some(name.as_str()) {
+                    let size = super::chunks::folder_size(&super::chunks::parts_folder(&self.video_folder, name));
+                    ui.label(format!("Delete {name} and its {}?", megabytes(size as f64)));
+                    if ui.button("Delete").clicked() {
+                        delete = Some(name.clone());
+                    }
+                    if ui.button("Keep").clicked() {
+                        confirm = None;
+                    }
+                    return;
+                }
+                if ui.small_button("Delete…").on_hover_text("Deletes what was rendered of this video (its chunks); asks first").clicked() {
+                    confirm = Some(name.clone());
+                }
+                //Every frame rendered, the chunks not joined (the join failed or was interrupted): Resume only joins them
+                let (button, tooltip, label) = if done == total {
+                    ("Join", "Joins the finished chunks of this video into its file; nothing is rendered again", format!("Rendered, not joined: {name} (all {total} frames)"))
+                } else {
+                    ("Resume", "Continues this video from its first unfinished chunk, with the settings it was started with", format!("Unfinished: {name} ({done} of {total} frames)"))
+                };
+                if ui.button(button).on_hover_text(tooltip).clicked() {
                     resume = Some(name.clone());
                 }
-                ui.label(format!("Unfinished: {name} ({done} of {total} frames)"));
+                ui.label(label);
             });
+        }
+        self.confirm_delete = confirm;
+        if let Some(name) = delete {
+            self.confirm_delete = None;
+            self.delete_unfinished(&name);
         }
         if let Some(name) = resume {
             self.resume_video(&name);
         }
+    }
+
+    /// Deletes the chunks of the unfinished video `name` (its `.parts` folder, nothing else) and takes it out of the queue
+    pub(super) fn delete_unfinished(&mut self, name: &str) {
+        let parts = super::chunks::parts_folder(&self.video_folder, name);
+        match std::fs::remove_dir_all(&parts) {
+            Ok(()) => self.log(format!("Deleted the unfinished video {name} ({})", parts.display())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => self.log(format!("Could not delete {}: {err}", parts.display())),
+        }
+        let queued = self.video_queue.len();
+        self.video_queue.retain(|spec| spec.output.as_deref() != Some(name));
+        if self.video_queue.len() != queued {
+            self.log(format!("Took {name} out of the queue"));
+            self.save_queue();
+        }
+        self.unfinished_videos = None;
     }
 
     /// The video controls: the button, the frame rate, the speed, the format and the PNG frames (the progress of a video under way is at the top, see
@@ -985,7 +1180,24 @@ impl MandelbrotApp {
         self.queue_ui(ui);
     }
 
+    /// Sets the video controls for a YouTube upload in 4K at 60 FPS (issue #213): the cheapest quality whose result after YouTube's re-encode measured as
+    /// good as 64x (#211: 32x adaptive), motion blur of film, HEVC in 10 bits that YouTube takes in full, the GPU on. Only these controls change
+    pub(super) fn use_youtube_preset(&mut self) {
+        self.save_size.choice = super::save_size::SaveSizeChoice::Preset(String::from("4K UHD"));
+        self.save_size.portrait = false;
+        (self.video_fps, self.image_supersampling_amount, self.image_quality_blur, self.adaptive_supersampling) = (60, 32, false, true);
+        (self.video_shutter, self.video_blend, self.video_pngs) = (180.0, false, false);
+        (self.video_quality, self.video_playback) = (VideoQuality::VeryHigh, Playback::HighQuality);
+        (self.use_gpu, self.fast_gpu) = (true, true);
+        self.log("Set the video for YouTube: 4K UHD at 60 FPS, 32x adaptive, motion blur 180°, High quality (HEVC, 10 bits) Very High, the GPU on");
+    }
+
     fn video_settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("YouTube 4K60").on_hover_text("Sets the video for a YouTube upload: 4K at 60 FPS, 32x adaptive (after YouTube's own compression it measured as good as 64x in 60% of the time), motion blur 180°, High quality format, the GPU on. Change anything afterwards").clicked() {
+                self.use_youtube_preset();
+            }
+        });
         ui.horizontal(|ui| {
             let name = self.last_flight.as_ref().map_or_else(|| String::from("no flight yet"), |flight| flight.name.clone());
             if ui.add_enabled(self.last_flight.is_some(), egui::Button::new("Render video of the last flight")).on_hover_text(format!("The last flight ({name}) as a video: every frame rendered offline at the saved image size and quality, at a fixed frame rate, written as PNG frames to saved/ (and as an .mp4 when ffmpeg is installed)")).clicked() {
@@ -1000,6 +1212,12 @@ impl MandelbrotApp {
         ui.horizontal(|ui| {
             ui.add_enabled(!self.video_fit_length, egui::DragValue::new(&mut self.video_speed).range(SPEEDS).suffix("% speed")).on_hover_text("The speed of the video, in percent of the flight's (1% to 400%; type a value): 10% shows every moment of the flight ten times as long (ten times the frames, and the render time); 200% is twice as fast");
             ui.checkbox(&mut self.video_blend, "Blend frames").on_hover_text("Every frame is blended into the frames before it, moved to its view, as Blend frames does in flights: with the 1x qualities every frame takes another sample, so the video gathers samples over time and moves smoothly for the cost of one sample a frame (fine with 1x + blur). With more samples it smooths the motion");
+            egui::ComboBox::from_id_salt("video_shutter").selected_text(shutter_text(self.video_shutter)).show_ui(ui, |ui| {
+                for shutter in SHUTTERS {
+                    ui.selectable_value(&mut self.video_shutter, shutter, shutter_text(shutter));
+                }
+            }).response.on_hover_text("Motion blur: every sample of a pixel is taken at its own moment while the shutter is open, as a film camera does, so motion blurs along its direction and fine detail shimmers less, at no extra cost (the same samples). 180° is the shutter of film; more is smoother and softer at the edges of a fast zoom, whose center stays sharp. Needs 2 samples or more, without Blend frames");
+            ui.checkbox(&mut self.video_keyframe_dives, "Fast dives").on_hover_text("A dive into a fixed center (the same colors all the way, at most 4K, without Blend frames) is rendered as one large image per doubling of the zoom, and every frame is composed from the image of its depth: many times faster, a slightly different picture (each frame averages 1 to 4 keyframe pixels per pixel). Other flights render frame by frame");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
         });
         ui.horizontal(|ui| {
@@ -1065,6 +1283,11 @@ impl MandelbrotApp {
     }
 }
 
+/// The text of a shutter in the *Motion blur* list
+fn shutter_text(shutter: f64) -> String {
+    if shutter <= 0.0 { String::from("No motion blur") } else { format!("Motion blur {shutter:.0}°") }
+}
+
 /// A size in bytes, in MB or GB
 fn megabytes(bytes: f64) -> String {
     if bytes >= 1e9 { format!("{:.1} GB", bytes / 1e9) } else { format!("{:.0} MB", (bytes / 1e6).max(1.0)) }
@@ -1077,7 +1300,7 @@ mod tests {
     #[test]
     fn the_limit_of_a_video_frame_goes_from_the_limit_at_the_start_to_that_of_the_place() {
         let settings = crate::auto_iterations::AutoPreset::Balanced.settings();
-        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None };
+        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, rotations: (0.0, 0.0) };
         assert_eq!(limit_at(1.0, &flight, &settings), 300);
         assert_eq!(limit_at(6.4e-5, &flight, &settings), 5000);
         let middle = limit_at(8e-3, &flight, &settings);

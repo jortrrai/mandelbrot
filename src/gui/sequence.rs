@@ -30,6 +30,9 @@ pub(super) struct Keyframe {
     pub(super) offset: f64,
     #[serde(default)]
     pub(super) stretch: bool,
+    /// The rotation of the view, in radians (issue #217)
+    #[serde(default)]
+    pub(super) rotation: f64,
 }
 
 impl Keyframe {
@@ -74,7 +77,7 @@ impl MandelbrotApp {
     /// The current view as a keyframe: its exact center (see `depth`), scale, iteration limit and colors
     fn current_keyframe(&self) -> Keyframe {
         let location = self.current_point(String::new(), String::new()).location;
-        Keyframe { real: location.real, imaginary: location.imaginary, scale: location.scale, max_iterations: location.max_iterations, divide: self.m.palette.divide, offset: self.m.palette.offset, stretch: self.m.palette.stretch }
+        Keyframe { real: location.real, imaginary: location.imaginary, scale: location.scale, max_iterations: location.max_iterations, divide: self.m.palette.divide, offset: self.m.palette.offset, stretch: self.m.palette.stretch, rotation: self.c.rotation() }
     }
 
     /// The sequence of the keyframes and the typed times (a time that is not a positive number makes it incomplete)
@@ -95,6 +98,7 @@ impl MandelbrotApp {
     pub(super) fn go_to_keyframe(&mut self, index: usize) {
         let Some(keyframe) = self.sequence_keyframes.get(index).cloned() else { return };
         self.c.set_view(&crate::complex_plane::View::new(keyframe.real, keyframe.imaginary, keyframe.scale));
+        self.c.set_rotation(keyframe.rotation);
         self.depth_center = Some(crate::complex::Complex::new(keyframe.real, keyframe.imaginary));
         (self.m.max_iterations, self.max_iterations_input, self.m.palette) = (keyframe.max_iterations, keyframe.max_iterations, keyframe.palette());
         self.render(&format!("Went to keyframe {}", index + 1));
@@ -119,6 +123,7 @@ impl MandelbrotApp {
             name: if self.flight_name_input.trim().is_empty() { String::from("Sequence") } else { self.flight_name_input.trim().to_string() },
             limits: (first.max_iterations, last.max_iterations),
             palettes: (first.palette(), last.palette()),
+            rotations: (first.rotation, last.rotation),
             sequence: Some(sequence),
         };
         self.fly_video_flight(&flight);

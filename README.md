@@ -7,7 +7,9 @@ A Mandelbrot set viewer written in Rust, with a graphical window: explore the se
 - **Flights** to named places, with frame rates up to the screen's, and **videos** of them, rendered offline.
 - **Automatic iterations** that follow the zoom, or your own limit.
 
-![A wallpaper rendered with Mandelbrot by Jort](https://github.com/jortrr/mandelbrot/assets/38651009/d487285e-d233-4374-bb5c-c46d84f0d83f)
+[![A flight rendered with Mandelbrot by Jort: watch it on YouTube](docs/images/previews/video.jpg)](https://www.youtube.com/watch?v=xBHr8kl_cEg)
+
+![A spiral around a mini-Mandelbrot, rendered in 4K at 64 samples per pixel](docs/images/previews/spiral-orange-blue.jpg)
 
 More in the [gallery](docs/GALLERY.md).
 

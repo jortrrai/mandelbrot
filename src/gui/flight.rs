@@ -178,6 +178,12 @@ impl FlightRendering {
     }
 }
 
+/// The angle `share` (0 to 1) of the way from `from` to `to` (radians), turning the short way around (issue #217)
+pub fn blend_angles(from: f64, to: f64, share: f64) -> f64 {
+    let difference = (to - from + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+    if share >= 1.0 { to } else { from + difference * share.max(0.0) }
+}
+
 /// A view as the path sees it: the center and the width (the scale of the view)
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
@@ -335,6 +341,14 @@ impl Flight {
         Some(super::sequence::blend_palettes(keyframes[index].palette(), keyframes[index + 1].palette(), share))
     }
 
+    /// The rotation of a flight through keyframes `elapsed` after the start, in radians (`None` for other flights)
+    pub fn rotation_at(&self, elapsed: Duration) -> Option<f64> {
+        let path = self.sequence.as_ref()?;
+        let (index, share) = path.transition_at(elapsed.as_secs_f64());
+        let keyframes = &path.sequence.keyframes;
+        Some(blend_angles(keyframes[index].rotation, keyframes[index + 1].rotation, share))
+    }
+
     /// The iteration limit of a flight through keyframes `elapsed` after the start (`None` for other flights)
     pub fn limit_at(&self, elapsed: Duration) -> Option<u32> {
         let path = self.sequence.as_ref()?;
@@ -396,7 +410,7 @@ mod tests {
     #[test]
     fn a_sequence_passes_every_keyframe_at_its_time_and_a_dive_never_moves_sideways() {
         use super::super::sequence::{Keyframe, Sequence};
-        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false };
+        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false, rotation: 0.0 };
         let sequence = Sequence { keyframes: vec![keyframe(1.0, 1.0, 300), keyframe(1e-3, 0.5, 1000), keyframe(1e-6, 4.0, 5000)], seconds: vec![4.0, 6.0] };
         let flight = Flight::of_sequence(sequence.clone(), (3.0, 1.0));
         assert_eq!(flight.duration(), Duration::from_secs(10));

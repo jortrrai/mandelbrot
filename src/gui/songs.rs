@@ -6,6 +6,7 @@
 //! Only the length is used; the sound itself is not (see issue #185 for music that steers a flight).
 //!
 //! Spotify links are not supported: Spotify's Web API needs the credentials of a registered application, which this program does not have.
+#![cfg_attr(target_os = "android", allow(dead_code))] //(The song search is not in the Android app yet, see `search`)
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -70,6 +71,13 @@ pub(super) fn parse_answer(text: &str) -> Result<Vec<Recording>, String> {
 }
 
 /// Searches MusicBrainz for recordings of `query` (blocking: on a background thread)
+#[cfg(target_os = "android")]
+fn search(_query: &str) -> Result<Vec<Recording>, String> {
+    Err(String::from("The song search is not in the Android app yet (issue #219)"))
+}
+
+/// Searches MusicBrainz for recordings of `query` (blocking: on a background thread)
+#[cfg(not(target_os = "android"))]
 fn search(query: &str) -> Result<Vec<Recording>, String> {
     let answer = ureq::get("https://musicbrainz.org/ws/2/recording")
         .query("query", query)

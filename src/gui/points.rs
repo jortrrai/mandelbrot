@@ -40,6 +40,8 @@ pub(super) struct PointFlight {
     /// The color cycle where the flight starts and at the place: with "Restore the saved appearance", the place's divide and offset; the frames on the way blend
     /// them by the share of the path, so the colors change gradually and only on the way (see `palette_at`)
     pub(super) palettes: (ColorCycle, ColorCycle),
+    /// The rotation at the start and at the place, in radians, turned the short way by the share of the path (see `rotation_at`, issue #217)
+    pub(super) rotations: (f64, f64),
     /// Whether the status log already said that the flight waits for its first frame (see `FIRST_FRAME_WAIT`)
     pub(super) wait_logged: bool,
 }
@@ -48,6 +50,11 @@ impl PointFlight {
     /// The color cycle of the frame at `elapsed`, see `palettes`
     pub(super) fn palette_at(&self, elapsed: Duration) -> ColorCycle {
         self.flight.palette_at(elapsed).unwrap_or_else(|| self.palettes.0.blend(self.palettes.1, self.flight.share_of_path(elapsed)))
+    }
+
+    /// The rotation of the frame at `elapsed`, see `rotations`
+    pub(super) fn rotation_at(&self, elapsed: Duration) -> f64 {
+        self.flight.rotation_at(elapsed).unwrap_or_else(|| super::flight::blend_angles(self.rotations.0, self.rotations.1, self.flight.share_of_path(elapsed)))
     }
 
     /// The frames shown in the second before `now`
@@ -151,10 +158,13 @@ impl DepthScale {
 pub(super) fn marker_positions(points: &[PointOfInterest], plane: &ComplexPlane, image_rect: egui::Rect) -> Vec<(String, egui::Pos2, Color32)> {
     let (width, height) = ((plane.length_x / plane.increment_x).round(), (plane.length_y / plane.increment_y).round());
     let depth = DepthScale::of(points);
+    //(A turned view: the places turned back with it, see `ComplexPlane::unturned`)
+    let unturned = plane.unturned();
     points.iter().filter_map(|point| {
+        let location = plane.unturned_point(&crate::complex::Complex::new(point.location.real, point.location.imaginary));
         //The pixel of the point (see `ComplexPlane::complex_from_pixel_plane`: the screen y is the negative of the imaginary part)
-        let x = (point.location.real - plane.min_x) / plane.increment_x;
-        let y = (-point.location.imaginary - plane.min_y) / plane.increment_y;
+        let x = (location.x - unturned.min_x) / unturned.increment_x;
+        let y = (-location.y - unturned.min_y) / unturned.increment_y;
         let position = image_rect.lerp_inside(egui::vec2((x / width) as f32, (y / height) as f32));
         image_rect.contains(position).then(|| (point.name.clone(), position, depth.color(point)))
     }).collect()
@@ -322,6 +332,13 @@ impl MandelbrotApp {
 
     /// Loads the points of interest of `folder`, and logs how many were found and every problem (a skipped file, an ignored appearance)
     pub(super) fn load_points_of_interest(&mut self, folder: std::path::PathBuf) {
+        //(No folder to read, as in the Android app or when the program starts elsewhere: the places built into it)
+        if !folder.is_dir() {
+            self.points = points_of_interest::shipped();
+            self.log(format!("Points of interest: {} built into the program (there is no folder {})", self.points.len(), folder.display()));
+            self.points_folder = folder;
+            return;
+        }
         let report = points_of_interest::load_folder(&folder);
         self.log(format!("Points of interest: {} loaded from {}", report.points.len(), folder.display()));
         for problem in report.problems {
@@ -339,7 +356,7 @@ impl MandelbrotApp {
         PointOfInterest {
             name,
             description,
-            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations },
+            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations, rotation: self.c.rotation().to_degrees(), julia: self.m.julia },
             appearance: Some(points_of_interest::Appearance {
                 coloring: Some(coloring),
                 color_channels: Some(self.p.color_channel_mapping),
@@ -383,6 +400,8 @@ impl MandelbrotApp {
 
     /// Flies from the current view to `point` with the flight controls, the colors going from the current ones to `destination_palette` (see `PointFlight::palettes`)
     pub(super) fn fly_to(&mut self, point: PointOfInterest, destination_palette: ColorCycle) {
+        //(Flights are in the Mandelbrot set: one from a Julia set starts at the view before it, and a place in a Julia set is gone to without a flight)
+        self.back_to_the_mandelbrot_set();
         let center = self.c.center();
         let from = Camera { x: center.x, y: center.y, scale: self.c.get_scale() };
         let to = Camera { x: point.location.real, y: point.location.imaginary, scale: point.location.scale };
@@ -391,7 +410,7 @@ impl MandelbrotApp {
         if self.zoom_refused(&destination) {
             return; //Deeper than the zoom limit: no flight
         }
-        if self.pace == Pace::NoFlight {
+        if self.pace == Pace::NoFlight || point.location.julia.is_some() {
             self.m.palette = destination_palette;
             self.arrive_at(&point);
             return;
@@ -411,9 +430,10 @@ impl MandelbrotApp {
         let limits = self.auto_iterations.then(|| std::sync::Arc::new(std::sync::Mutex::new(self.flight_limits(to)))); //(Shared with the flight job, which a change of a setting restarts)
         let now = Instant::now();
         let palettes = (self.m.palette, destination_palette);
+        let rotations = (self.c.rotation(), point.location.rotation.to_radians());
         self.flight_name_input.clone_from(&point.name); //The name the flight is saved under, unless it is changed (see `flight_files`)
-        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None });
-        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes, wait_logged: false });
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None, rotations });
+        self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes, rotations, wait_logged: false });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
 
@@ -514,6 +534,7 @@ impl MandelbrotApp {
             return;
         }
         self.c.set_view(&flight.flight.camera_at(elapsed).view());
+        self.c.set_rotation(flight.rotation_at(elapsed));
         if let Some(limit) = flight.flight.limit_at(elapsed) {
             //The limits of the keyframes of a sequence, as its video has them (also the typed limit, which a render without auto iterations uses)
             (self.m.max_iterations, self.max_iterations_input) = (limit, limit);
@@ -543,8 +564,22 @@ impl MandelbrotApp {
     /// Goes to `point`: its center, scale and maximum iterations are applied, and with `restore_appearance` also the coloring, color channels and color cycle saved in its file.
     /// Otherwise the current appearance, and the supersampling, stay as they are.
     fn arrive_at(&mut self, point: &PointOfInterest) {
+        //A place in a Julia set (saved there, see `MandelbrotSet::julia`) goes into it; Back returns to the view of the Mandelbrot set before
+        match point.location.julia {
+            Some(c) => {
+                if self.m.julia.is_none() {
+                    self.mandelbrot_view = Some(self.c.get_view());
+                }
+                self.m.julia = Some(c);
+            }
+            None => {
+                self.m.julia = None;
+                self.mandelbrot_view = None;
+            }
+        }
         let location = &point.location;
         self.c.set_view(&View::new(location.real, location.imaginary, location.scale));
+        self.c.set_rotation(location.rotation.to_radians());
         self.m.max_iterations = location.max_iterations;
         self.max_iterations_input = location.max_iterations;
         let mut restored = String::new();

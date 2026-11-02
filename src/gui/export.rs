@@ -164,7 +164,7 @@ mod tests {
         let point = crate::points_of_interest::PointOfInterest {
             name: String::from("Seahorse"),
             description: String::new(),
-            location: crate::points_of_interest::Location { real: -0.7498, imaginary: 0.0203, scale: 6.4e-5, max_iterations: 1500 },
+            location: crate::points_of_interest::Location { real: -0.7498, imaginary: 0.0203, scale: 6.4e-5, max_iterations: 1500, rotation: 0.0, julia: None },
             appearance: None,
             file_name: String::new(),
         };

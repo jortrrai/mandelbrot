@@ -200,7 +200,7 @@ mod tests {
         let point = crate::points_of_interest::PointOfInterest {
             name: String::from("Saved"),
             description: String::new(),
-            location: crate::points_of_interest::Location { real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale: 6.4e-5, max_iterations: 321 },
+            location: crate::points_of_interest::Location { real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale: 6.4e-5, max_iterations: 321, rotation: 0.0, julia: None },
             appearance: Some(crate::points_of_interest::Appearance { iteration_divide: Some(0.113), color_offset: Some(278.0), ..Default::default() }),
             file_name: String::new(),
         };
