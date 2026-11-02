@@ -140,6 +140,8 @@ pub struct MandelbrotApp {
     history: ViewHistory,
     /// Whether the render size follows the size of the window, see `fit`
     fit: Fit,
+    /// Whether the image takes the shape of the saved image size (issue #226, off by default), see `fit::locked_area`
+    lock_aspect: bool,
     /// The size of the saved image, see `save_size`
     save_size: SaveSize,
     /// The save of an image that is running, if any (see `export`)
@@ -423,6 +425,7 @@ impl MandelbrotApp {
             drag_remainder: (0.0, 0.0),
             history: ViewHistory::default(),
             fit: Fit::new(config.fit_window),
+            lock_aspect: false,
             save_size,
             image_save: None,
             points: Vec::new(),
@@ -680,7 +683,14 @@ impl MandelbrotApp {
         let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
         let scale = (available.x / width).min(available.y / height);
         let size = egui::vec2(width * scale, height * scale);
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        //In the shape of the saved image size (issue #226) the image is centered, with bars beside it or above and below it
+        let (rect, response) = if self.lock_aspect {
+            let (area, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+            let rect = egui::Rect::from_center_size(area.center(), size);
+            (rect, ui.interact(rect, ui.scope_id().with("main_image"), egui::Sense::click_and_drag()))
+        } else {
+            ui.allocate_exact_size(size, egui::Sense::click_and_drag())
+        };
         //The image of the last render, at its place in the current view (the whole rectangle when they are the same view, or when the view is held, see `drawn_fraction`)
         let target = transform::rect_of(self.drawn_fraction(), rect);
         //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`

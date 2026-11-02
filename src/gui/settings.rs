@@ -87,6 +87,8 @@ pub(super) struct Settings {
     show_minimap: Option<bool>,
     show_orbit: Option<bool>,
     center_marker: Option<bool>,
+    /// Whether the image takes the shape of the saved image size (issue #226)
+    lock_aspect: Option<bool>,
     /// The radius of the center marker, in points
     center_marker_radius: Option<f32>,
     /// Whether the Julia map is shown (a new name: the map is on by default since review 5, and a saved `show_julia` from before was usually the old default)
@@ -200,6 +202,7 @@ impl MandelbrotApp {
             show_minimap: Some(self.show_minimap),
             show_orbit: Some(self.show_orbit),
             center_marker: Some(self.center_marker),
+            lock_aspect: Some(self.lock_aspect),
             center_marker_radius: Some(self.center_marker_radius),
             show_julia_map: Some(self.show_julia),
             save_size: Some(match &self.save_size.choice {
@@ -347,6 +350,7 @@ impl MandelbrotApp {
         set(settings.show_minimap, &mut self.show_minimap);
         set(settings.show_orbit, &mut self.show_orbit);
         set(settings.center_marker, &mut self.center_marker);
+        set(settings.lock_aspect, &mut self.lock_aspect);
         if let Some(radius) = settings.center_marker_radius.filter(|radius| super::depth::CENTER_MARKER_RADII.contains(radius)) {
             self.center_marker_radius = radius;
         }

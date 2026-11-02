@@ -320,6 +320,9 @@ impl MandelbrotApp {
             }
             ui.label(format!("({})", self.view_resolution()));
         });
+        ui.add_enabled(self.fit.enabled, egui::Checkbox::new(&mut self.lock_aspect, "Same shape as the saved image"))
+            .on_hover_text("The image on the screen takes the shape of the Saved image size (and video size), as large as fits, so what you compose is exactly what you save. Only the shape: the screen keeps its own resolution, and the zoom and center stay. Not with Same as the view")
+            .on_disabled_hover_text("Needs Match the window size");
         ui.horizontal(|ui| {
             ui.label("Max. iterations:");
             let response = ui.add_enabled(!self.auto_iterations, egui::DragValue::new(&mut self.max_iterations_input).range(1..=1_000_000).speed(10.0));

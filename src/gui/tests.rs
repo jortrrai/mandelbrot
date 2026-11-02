@@ -1304,6 +1304,31 @@ fn the_center_marker_is_a_circle_around_the_exact_center_of_the_image() {
 }
 
 #[test]
+fn the_image_can_take_the_shape_of_the_saved_image_size() {
+    //Issue #226: off by default; on, the largest area of that shape in the window, also upright; not for Same as the view
+    use super::save_size::SaveSizeChoice;
+    assert_eq!(super::fit::locked_area(egui::vec2(800.0, 600.0), crate::resolution::Resolution::new(3840, 2160)), egui::vec2(800.0, 450.0));
+    assert_eq!(super::fit::locked_area(egui::vec2(800.0, 600.0), crate::resolution::Resolution::new(2160, 3840)), egui::vec2(337.5, 600.0));
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    app.fit.set_enabled(true);
+    assert!(!app.lock_aspect);
+    let ctx = egui::Context::default();
+    let area = egui::vec2(800.0, 600.0);
+    app.fit_to_window(&ctx, area);
+    wait_for_job(&mut app);
+    assert_eq!(app.view_resolution(), crate::resolution::Resolution::new(800, 600), "off: the window's shape");
+    app.lock_aspect = true;
+    (app.save_size.choice, app.save_size.portrait) = (SaveSizeChoice::Preset(String::from("4K UHD")), true);
+    app.fit.set_enabled(false);
+    app.fit.set_enabled(true); //(The next fit is immediate)
+    app.fit_to_window(&ctx, area);
+    wait_for_job(&mut app);
+    assert_eq!(app.view_resolution(), crate::resolution::Resolution::new(337, 600), "on: 4K upright, as large as fits");
+    app.save_size.choice = SaveSizeChoice::View;
+    assert_eq!(app.locked_shape(), None, "the size of the view has no shape of its own");
+}
+
+#[test]
 fn a_place_in_a_julia_set_says_so_in_the_list() {
     let (app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     let mut place = app.points[0].clone();
