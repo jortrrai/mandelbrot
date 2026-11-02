@@ -2584,7 +2584,9 @@ fn cycling_colors_moves_the_offset_with_the_clock_and_ends_with_a_full_render() 
     }
     let offset = app.m.palette.offset;
     assert!(steps >= 5, "the colors moved in steps: {steps}");
-    assert!((offset - 100.0 * started.elapsed().as_secs_f64()).abs() < 10.0 + 15.0 * started.elapsed().as_secs_f64(), "about 100 steps per second: {offset} after {:?}", started.elapsed());
+    //(Never ahead of the clock; behind it only while the steps wait for their renders, which a busy runner of CI slowed to 68% once)
+    let clock = 100.0 * started.elapsed().as_secs_f64();
+    assert!(offset < clock + 10.0 + 0.15 * clock && offset > 0.5 * clock - 10.0, "about 100 steps per second: {offset} after {:?}", started.elapsed());
     app.toggle_color_cycle();
     wait_for_job(&mut app);
     assert_eq!(app.m.palette.offset, offset, "stopping keeps the colors it reached");
@@ -2605,7 +2607,8 @@ fn cycling_the_divide_breathes_around_where_it_started_and_ends_with_a_full_rend
     assert!(app.cycling());
     let started = std::time::Instant::now();
     let (mut lowest, mut highest) = (2.0_f64, 2.0_f64);
-    while started.elapsed() < Duration::from_millis(600) {
+    //(At least 600 ms, and until it swung both ways, at most 5 s: a busy runner of CI swung only one way in 600 ms once)
+    while (started.elapsed() < Duration::from_millis(600) || lowest >= 1.5 || highest <= 3.0) && started.elapsed() < Duration::from_secs(5) {
         app.cycle_colors(&ctx, std::time::Instant::now());
         (lowest, highest) = (lowest.min(app.m.palette.divide), highest.max(app.m.palette.divide));
         app.poll_job();
