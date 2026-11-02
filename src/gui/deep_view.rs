@@ -27,8 +27,12 @@ pub(super) struct DeepView {
 }
 
 impl MandelbrotApp {
-    /// Whether a view of `scale` around the current center is too deep for 64-bit floats
+    /// Whether a view of `scale` around the current center is too deep for 64-bit floats (a Julia set never is: the deep renderer draws the Mandelbrot set
+    /// only, so a Julia set stops at the depth of 64-bit floats as before)
     fn too_deep(&self, scale: f64) -> bool {
+        if self.m.julia.is_some() {
+            return false;
+        }
         let center = self.c.center();
         let mut plane = self.c.clone();
         plane.set_view(&View::new(center.x, center.y, scale));
@@ -84,7 +88,7 @@ impl MandelbrotApp {
         let (real, imaginary, scale) = self.exact_view();
         let (width, height) = (self.p.pixel_plane.width as f64, self.p.pixel_plane.height as f64);
         let pixel = 2.5 * scale / width;
-        let (anchor_x, anchor_y) = ((x - width / 2.0) * pixel, (height / 2.0 - y) * pixel);
+        let (anchor_x, anchor_y) = deep::turned(((x - width / 2.0) * pixel, (height / 2.0 - y) * pixel), self.c.rotation());
         self.set_deep(&real.plus(anchor_x * (1.0 - factor)), &imaginary.plus(anchor_y * (1.0 - factor)), scale * factor);
     }
 
@@ -92,7 +96,8 @@ impl MandelbrotApp {
     pub(super) fn pan_deep(&mut self, columns: i64, rows_up: i64) {
         let (real, imaginary, scale) = self.exact_view();
         let pixel = 2.5 * scale / self.p.pixel_plane.width as f64;
-        self.set_deep(&real.plus(columns as f64 * pixel), &imaginary.plus(rows_up as f64 * pixel), scale);
+        let (right, up) = deep::turned((columns as f64 * pixel, rows_up as f64 * pixel), self.c.rotation());
+        self.set_deep(&real.plus(right), &imaginary.plus(up), scale);
     }
 
     /// Sets the zoom to `zoom` around the exact center, in the deep view when it is too deep for 64-bit floats (for the depth control)
@@ -130,7 +135,7 @@ impl MandelbrotApp {
             let started = Instant::now();
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut layer_started = Instant::now();
-            let completed = deep::render_layers(&m, &real, &imaginary, scale, (width, height), samples, &color_of, &thread_cancel, |colors, layer| {
+            let completed = deep::render_layers(&m, &real, &imaginary, (scale, c.rotation()), (width, height), samples, &color_of, &thread_cancel, |colors, layer| {
                 let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass: layer, total: samples, layer_time: layer_started.elapsed(), whole: true });
                 layer_started = Instant::now();
             });
@@ -169,12 +174,13 @@ impl MandelbrotApp {
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
         let place = crate::points_of_interest::to_json(&self.current_point(file_name.clone(), String::new()));
         let (m, coloring_function, mapping, samples) = (self.m.clone(), self.coloring_function, self.p.color_channel_mapping, self.image_supersampling_amount);
+        let rotation = self.c.rotation();
         let sender = self.notice_sender.clone();
         std::thread::spawn(move || {
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut image = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(width, height));
             image.color_channel_mapping = mapping;
-            deep::render_layers(&m, &real, &imaginary, scale, (width, height), samples, &color_of, &AtomicBool::new(false), |colors, layer| {
+            deep::render_layers(&m, &real, &imaginary, (scale, rotation), (width, height), samples, &color_of, &AtomicBool::new(false), |colors, layer| {
                 if layer == samples.max(1) {
                     image.colors.copy_from_slice(colors);
                 }

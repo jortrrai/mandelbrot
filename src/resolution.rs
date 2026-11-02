@@ -17,10 +17,17 @@ use serde::{Deserialize, Serialize};
 
 /// The smallest width or height of an image in pixels
 pub const MIN_SIDE: usize = 16;
-/// The largest width or height of an image in pixels
+/// The largest width or height of a video frame in pixels
 pub const MAX_SIDE: usize = 16_384;
-/// The most pixels an image can have (100 megapixels): a render holds a few bytes per pixel in memory, so the limit keeps a typo from asking for tens of gigabytes
+/// The most pixels a video frame can have (100 megapixels): a video job holds whole frames in memory, so the limit keeps a typo from asking for tens of gigabytes
 pub const MAX_PIXELS: usize = 100_000_000;
+/// The largest width or height of a saved image in pixels: a saved image is rendered and written in strips (see `rendering::strips`), so its memory does not
+/// grow with its height
+pub const MAX_IMAGE_SIDE: usize = 32_768;
+/// The most pixels a saved image can have: those of the 32K preset (30720 x 17280, 531 megapixels), the largest for now
+pub const MAX_IMAGE_PIXELS: usize = 30_720 * 17_280;
+/// Above this many pixels (8K UHD) an image counts as large: the window says that many viewers cannot open it
+pub const LARGE_IMAGE_PIXELS: usize = 7680 * 4320;
 /// The only `format_version` of the custom presets file that is understood
 pub const FORMAT_VERSION: u32 = 1;
 /// The name of the custom presets file
@@ -46,18 +53,35 @@ impl Resolution {
         self.width.saturating_mul(self.height)
     }
 
-    /// Checks that the sides are from `MIN_SIDE` to `MAX_SIDE` and that there are at most `MAX_PIXELS` pixels
+    /// Checks that the sides are from `MIN_SIDE` to `MAX_SIDE` and that there are at most `MAX_PIXELS` pixels: the limits of a video frame
     /// # Errors
     /// The reason, as a sentence for the status log, if the resolution is not allowed
     pub fn validate(self) -> Result<Resolution, String> {
-        let sides = MIN_SIDE..=MAX_SIDE;
+        self.validate_within(MAX_SIDE, MAX_PIXELS, "that fit in memory")
+    }
+
+    /// Checks that the sides are from `MIN_SIDE` to `MAX_IMAGE_SIDE` and that there are at most `MAX_IMAGE_PIXELS` pixels: the limits of a saved image
+    /// # Errors
+    /// The reason, as a sentence for the status log, if the resolution is not allowed
+    pub fn validate_image(self) -> Result<Resolution, String> {
+        self.validate_within(MAX_IMAGE_SIDE, MAX_IMAGE_PIXELS, "of the largest image (32K)")
+    }
+
+    /// Checks that the sides are from `MIN_SIDE` to `max_side` and that there are at most `max_pixels` pixels (`why` ends the sentence about the pixels)
+    fn validate_within(self, max_side: usize, max_pixels: usize, why: &str) -> Result<Resolution, String> {
+        let sides = MIN_SIDE..=max_side;
         if !sides.contains(&self.width) || !sides.contains(&self.height) {
-            return Err(format!("{self} is not allowed: the width and the height are from {MIN_SIDE} to {MAX_SIDE} pixels"));
+            return Err(format!("{self} is not allowed: the width and the height are from {MIN_SIDE} to {max_side} pixels"));
         }
-        if self.pixels() > MAX_PIXELS {
-            return Err(format!("{self} is not allowed: {} megapixels is more than the {} megapixels that fit in memory", self.pixels() / 1_000_000, MAX_PIXELS / 1_000_000));
+        if self.pixels() > max_pixels {
+            return Err(format!("{self} is not allowed: {} megapixels is more than the {} megapixels {why}", self.pixels() / 1_000_000, max_pixels / 1_000_000));
         }
         Ok(self)
+    }
+
+    /// The resolution turned upright when `portrait` is set: taller than wide (a landscape size gets its sides swapped; a portrait or square one stays)
+    pub const fn oriented(self, portrait: bool) -> Resolution {
+        if portrait && self.width > self.height { Resolution::new(self.height, self.width) } else { self }
     }
 }
 
@@ -85,7 +109,7 @@ impl ResolutionPreset {
 }
 
 /// The presets that are always there, from small to large
-const BUILT_IN: [(&str, Resolution); 10] = [
+const BUILT_IN: [(&str, Resolution); 14] = [
     ("HD 720p", Resolution::new(1280, 720)),
     ("Full HD 1080p", Resolution::new(1920, 1080)),
     ("QHD 1440p", Resolution::new(2560, 1440)),
@@ -93,9 +117,15 @@ const BUILT_IN: [(&str, Resolution); 10] = [
     ("4K UHD", Resolution::new(3840, 2160)),
     ("5K", Resolution::new(5120, 2880)),
     ("8K UHD", Resolution::new(7680, 4320)),
+    //16:9 like 4K and 8K UHD: twice and four times 8K on a side. Images only (videos are at most `MAX_SIDE`)
+    ("16K", Resolution::new(15_360, 8640)),
+    ("32K", Resolution::new(30_720, 17_280)),
     ("Square 2048", Resolution::new(2048, 2048)),
     ("Square 4096", Resolution::new(4096, 4096)),
     ("Portrait 1080 x 1920", Resolution::new(1080, 1920)),
+    //The 20:9 screens of most phones now (Full HD+ and QHD+), for wallpapers
+    ("Phone 1080 x 2400", Resolution::new(1080, 2400)),
+    ("Phone QHD+ 1440 x 3200", Resolution::new(1440, 3200)),
 ];
 
 /// The built-in presets, see `BUILT_IN`
@@ -132,7 +162,7 @@ pub fn parse_custom_presets(text: &str) -> (Vec<ResolutionPreset>, Vec<String>) 
     let mut presets: Vec<ResolutionPreset> = Vec::new();
     let mut warnings = Vec::new();
     for entry in stored.presets {
-        match check_name(&entry.name, &presets).and_then(|()| Resolution::new(entry.width, entry.height).validate()) {
+        match check_name(&entry.name, &presets).and_then(|()| Resolution::new(entry.width, entry.height).validate_image()) {
             Ok(resolution) => presets.push(ResolutionPreset { name: entry.name.trim().to_string(), resolution }),
             Err(reason) => warnings.push(format!("Custom resolution \"{}\" is skipped: {reason}", entry.name)),
         }
@@ -170,12 +200,12 @@ fn check_name(name: &str, others: &[ResolutionPreset]) -> Result<(), String> {
 
 /// Adds the custom preset `name` with `resolution` to `presets`, or replaces the size of the one that has that name (ignoring case)
 /// # Errors
-/// The reason, if the name is empty or is the name of a built-in preset, or the resolution is not allowed (see `Resolution::validate`)
+/// The reason, if the name is empty or is the name of a built-in preset, or the resolution is not allowed for an image (see `Resolution::validate_image`)
 pub fn add_custom_preset(presets: &mut Vec<ResolutionPreset>, name: &str, resolution: Resolution) -> Result<(), String> {
     let name = name.trim();
     let others: Vec<ResolutionPreset> = presets.iter().filter(|preset| !preset.name.eq_ignore_ascii_case(name)).cloned().collect();
     check_name(name, &others)?;
-    let resolution = resolution.validate()?;
+    let resolution = resolution.validate_image()?;
     match presets.iter_mut().find(|preset| preset.name.eq_ignore_ascii_case(name)) {
         Some(existing) => existing.resolution = resolution,
         None => presets.push(ResolutionPreset { name: name.to_string(), resolution }),
@@ -236,16 +266,38 @@ mod tests {
     }
 
     #[test]
+    fn images_go_up_to_32k_and_videos_up_to_16384_pixels_a_side() {
+        let size = |name: &str| built_in_presets().into_iter().find(|preset| preset.name == name).unwrap().resolution;
+        //16:9 like the UHD presets: 8K, twice 8K and four times 8K on a side
+        assert_eq!((size("8K UHD"), size("16K"), size("32K")), (Resolution::new(7680, 4320), Resolution::new(15_360, 8640), Resolution::new(30_720, 17_280)));
+        assert_eq!(size("32K").pixels(), MAX_IMAGE_PIXELS, "32K is the largest image for now");
+        assert!(size("32K").validate_image().is_ok() && size("16K").validate_image().is_ok());
+        assert!(size("16K").validate().unwrap_err().contains("132 megapixels is more than the 100"), "a video frame of 16K is refused");
+        assert!(size("8K UHD").validate().is_ok());
+        assert!(Resolution::new(MAX_IMAGE_SIDE, 16_384).validate_image().unwrap_err().contains("536 megapixels is more than the 530 megapixels of the largest image (32K)"));
+        assert!(Resolution::new(MAX_IMAGE_SIDE + 1, 100).validate_image().unwrap_err().contains("from 16 to 32768"));
+        assert!(Resolution::new(17_280, 30_720).validate_image().is_ok(), "32K upright");
+    }
+
+    #[test]
+    fn portrait_turns_a_size_upright() {
+        assert_eq!(Resolution::new(30_720, 17_280).oriented(true), Resolution::new(17_280, 30_720));
+        assert_eq!(Resolution::new(7680, 4320).oriented(false), Resolution::new(7680, 4320));
+        assert_eq!(Resolution::new(1080, 2400).oriented(true), Resolution::new(1080, 2400), "a phone size is upright already");
+        assert_eq!(Resolution::new(2048, 2048).oriented(true), Resolution::new(2048, 2048));
+    }
+
+    #[test]
     fn the_built_in_presets_are_all_allowed_and_have_distinct_names() {
         let presets = built_in_presets();
-        assert_eq!(presets.len(), 10);
+        assert_eq!(presets.len(), 14);
         for preset in &presets {
-            assert!(preset.resolution.validate().is_ok(), "{}", preset.name);
+            assert!(preset.resolution.validate_image().is_ok(), "{}", preset.name);
         }
         let mut names: Vec<String> = presets.iter().map(|preset| preset.name.to_lowercase()).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 14);
         assert_eq!(presets[1].label(), "Full HD 1080p (1920 x 1080)");
     }
 
@@ -263,7 +315,7 @@ mod tests {
             { "name": "  ", "width": 800, "height": 600 },
             { "name": "full hd 1080P", "width": 800, "height": 600 },
             { "name": "GOOD", "width": 900, "height": 600 },
-            { "name": "Huge", "width": 16384, "height": 16384 },
+            { "name": "Huge", "width": 32768, "height": 32768 },
             { "name": "Thin", "width": 4, "height": 600 },
             { "name": "Padded ", "width": 640, "height": 480 }
         ] }"#;
@@ -291,7 +343,7 @@ mod tests {
         assert_eq!(presets, vec![preset("Poster", 7000, 5000), preset("Banner", 3000, 500)]);
         assert!(add_custom_preset(&mut presets, "4k uhd", Resolution::new(10, 10)).unwrap_err().contains("built-in"));
         assert!(add_custom_preset(&mut presets, "", Resolution::new(800, 600)).is_err());
-        assert!(add_custom_preset(&mut presets, "Too big", Resolution::new(20000, 600)).is_err());
+        assert!(add_custom_preset(&mut presets, "Too big", Resolution::new(40_000, 600)).is_err());
         assert_eq!(presets.len(), 2, "a refused preset changes nothing");
     }
 

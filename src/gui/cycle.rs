@@ -20,13 +20,20 @@ pub(super) const CYCLE_RATES: std::ops::RangeInclusive<f64> = -250.0..=250.0;
 /// The cycling speed at first: a cycle of the palette in 50 seconds
 pub(super) const CYCLE_RATE: f64 = 10.0;
 
+/// How far the cycling divide goes from where it started, in doublings either way (2: from a quarter to four times it)
+pub(super) const DIVIDE_SWING: f64 = 2.0;
+
+/// The range of the time of a whole swing of the divide, in seconds, and the time at first
+pub(super) const DIVIDE_PERIODS: std::ops::RangeInclusive<f64> = 1.0..=600.0;
+pub(super) const DIVIDE_PERIOD: f64 = 20.0;
+
 /// The longest time one step catches up with (a pause of the window does not make the colors jump)
 const MAX_STEP_SECONDS: f64 = 0.25;
 
 impl MandelbrotApp {
     /// Moves the color offset on with the clock while the colors cycle, see the module
     pub(super) fn cycle_colors(&mut self, ctx: &egui::Context, now: Instant) {
-        if !self.color_cycling {
+        if !self.color_cycling && self.divide_cycle.is_none() {
             return;
         }
         let last = *self.cycle_last.get_or_insert(now);
@@ -42,9 +49,36 @@ impl MandelbrotApp {
         if seconds <= 0.0 {
             return;
         }
-        self.m.palette.offset = (self.m.palette.offset + self.cycle_rate * seconds).rem_euclid(PALETTE_LENGTH);
+        if self.color_cycling {
+            self.m.palette.offset = (self.m.palette.offset + self.cycle_rate * seconds).rem_euclid(PALETTE_LENGTH);
+        }
+        //The divide breathes around the one it started at: up and down DIVIDE_SWING doublings, a whole swing in `divide_period` seconds (issue #203)
+        if let Some((start, phase)) = self.divide_cycle {
+            let phase = phase + seconds / self.divide_period.max(0.1);
+            let doublings = DIVIDE_SWING * (std::f64::consts::TAU * phase).sin();
+            self.m.palette.divide = (start * doublings.exp2()).clamp(crate::mandelbrot_set::MIN_DIVIDE, crate::mandelbrot_set::MAX_DIVIDE);
+            self.divide_cycle = Some((start, phase.fract()));
+        }
         self.cycle_last = Some(now);
         self.start_render_as("Cycling the colors", RenderKind::GestureFrame { moved: true });
+    }
+
+    /// Whether the colors or the divide cycle (then every step is a one-sample frame, see `cycle_colors`)
+    pub(super) const fn cycling(&self) -> bool {
+        self.color_cycling || self.divide_cycle.is_some()
+    }
+
+    /// Starts or stops the cycling of the iteration divide (issue #203); when it stops, the view is rendered with its full quality from the divide it has
+    /// reached
+    pub(super) fn toggle_divide_cycle(&mut self) {
+        self.cycle_last = None;
+        self.divide_cycle = match self.divide_cycle {
+            Some(_) => None,
+            None => Some((self.m.palette.divide, 0.0)),
+        };
+        if self.divide_cycle.is_none() {
+            self.render_moved(&format!("Cycled the divide to {}", super::points::palette_description(self.m.palette)));
+        }
     }
 
     /// Starts or stops the color cycling; when it stops, the view is rendered with its full quality from the colors it has reached

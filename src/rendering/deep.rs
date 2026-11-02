@@ -172,21 +172,32 @@ pub fn position(m: &MandelbrotSet, orbit: &[(f64, f64)], center: (f64, f64), (dc
     f64::from(m.max_iterations)
 }
 
+/// The offset from the center of the point at the offset `(right, up)` on the screen, in a view turned counterclockwise by `rotation` radians.
+///
+/// Turned as the 64-bit renderer turns it, see `ComplexPlane::complex_from_pixel_plane`
+pub fn turned((right, up): (f64, f64), rotation: f64) -> (f64, f64) {
+    if rotation == 0.0 {
+        return (right, up);
+    }
+    let (sin, cos) = rotation.sin_cos();
+    (right.mul_add(cos, up * sin), up.mul_add(cos, -(right * sin)))
+}
+
 /// The smooth positions of a `width` x `height` view of the center `(real, imaginary)` and `scale`, row by row from the top.
 ///
 /// The center is decimal text, as precise as needed; the view is `2.5 · scale` wide. One sample in the middle of every pixel, on all the render threads
 pub fn render_positions(m: &MandelbrotSet, real: &str, imaginary: &str, scale: f64, width: usize, height: usize) -> Option<Vec<f64>> {
     let bits = bits_for(scale, width);
     let (center_real, center_imaginary) = (Fixed::parse(real, bits)?, Fixed::parse(imaginary, bits)?);
-    render_fixed(m, &center_real, &center_imaginary, scale, width, height, &std::sync::atomic::AtomicBool::new(false))
+    render_fixed(m, &center_real, &center_imaginary, (scale, 0.0), width, height, &std::sync::atomic::AtomicBool::new(false))
 }
 
 /// The colors of a view like `render_fixed`, averaged over `samples` samples a pixel, one layer after the other.
 ///
 /// The samples are at the jitter of the 64-bit renderer (see `jitter`); `on_layer` gets the average after every layer and its number (from 1), and
-/// `color_of` colors a smooth position. False when `cancel` stopped it
+/// `color_of` colors a smooth position. The view is turned counterclockwise by `rotation` radians. False when `cancel` stopped it
 #[allow(clippy::too_many_arguments)] // The view, its size and samples, how to color, when to stop and where the layers go
-pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, scale: f64, (width, height): (usize, usize), samples: u8, color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync),
+pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (scale, rotation): (f64, f64), (width, height): (usize, usize), samples: u8, color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync),
     cancel: &std::sync::atomic::AtomicBool, mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
     use std::sync::atomic::Ordering;
     let orbit = reference_orbit(center_real, center_imaginary, m.max_iterations);
@@ -208,7 +219,7 @@ pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &
                         let (x, y) = (index % width, chunk * rows_per_thread + index / width);
                         //The first sample in the middle of the pixel, the others at the jitter of the 64-bit renderer
                         let (jx, jy) = if sample == 0 { (0.5, 0.5) } else { super::jitter::sample_jitter(x, y, sample) };
-                        let offset = ((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel);
+                        let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), rotation);
                         let new = color_of(position(m, orbit, center, offset));
                         for (total, channel) in sum.iter_mut().zip([new.red, new.green, new.blue]) {
                             *total += u32::from(channel);
@@ -227,8 +238,9 @@ pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &
     true
 }
 
-/// Like `render_positions`, for a center in fixed point (with at least `bits_for(scale, width)` bits); `None` when `cancel` was set before it finished
-pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, scale: f64, width: usize, height: usize, cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
+/// Like `render_positions`, for a center in fixed point (with at least `bits_for(scale, width)` bits), turned counterclockwise by `rotation` radians;
+/// `None` when `cancel` was set before it finished
+pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (scale, rotation): (f64, f64), width: usize, height: usize, cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
     use std::sync::atomic::Ordering;
     let orbit = reference_orbit(center_real, center_imaginary, m.max_iterations);
     let center = (center_real.to_f64(), center_imaginary.to_f64());
@@ -245,7 +257,7 @@ pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &F
                         return;
                     }
                     let (x, y) = (index % width, chunk * rows_per_thread + index / width);
-                    let offset = ((x as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - 0.5) * pixel);
+                    let offset = turned(((x as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - 0.5) * pixel), rotation);
                     *out = position(m, orbit, center, offset);
                 }
             });
@@ -302,15 +314,39 @@ mod tests {
     }
 
     #[test]
+    fn a_turned_deep_view_shows_the_points_of_the_turned_64_bit_view() {
+        //Turned like the 64-bit renderer turns a view, so a deep view looks the same turned as the view just above it
+        let mut plane = crate::complex_plane::ComplexPlane::new(64, 48);
+        plane.set_view(&crate::complex_plane::View::new(-0.75, 0.1, 0.01));
+        for rotation in [0.0, 0.7, -2.5, std::f64::consts::PI] {
+            plane.set_rotation(rotation);
+            for (right, up) in [(1e-3, 0.0), (0.0, -2e-3), (3e-3, 4e-3)] {
+                let (x, y) = turned((right, up), rotation);
+                let (ex, ey) = plane.screen_offset(right, up);
+                assert!((x - ex).abs() < 1e-18 && (y - ey).abs() < 1e-18, "{rotation}: ({x}, {y}) is not ({ex}, {ey})");
+            }
+        }
+        //And a turned render is the unturned render turned: half a turn shows every pixel at the opposite one
+        let m = MandelbrotSet::new(500, 2.0);
+        let (real, imaginary) = (Fixed::parse("-0.7498100000000001", 80).unwrap(), Fixed::parse("-0.020300000000000054", 80).unwrap());
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let unturned = render_fixed(&m, &real, &imaginary, (6.4e-5, 0.0), 16, 12, &cancel).unwrap();
+        let half_turned = render_fixed(&m, &real, &imaginary, (6.4e-5, std::f64::consts::PI), 16, 12, &cancel).unwrap();
+        let reversed: Vec<f64> = unturned.iter().rev().copied().collect();
+        let close = half_turned.iter().zip(&reversed).filter(|(a, b)| (*a - *b).abs() < 0.01).count();
+        assert!(close * 100 >= unturned.len() * 95, "{close} of {} pixels agree", unturned.len());
+    }
+
+    #[test]
     fn supersampled_layers_average_their_samples_and_the_first_is_the_middle_of_the_pixels() {
         let m = MandelbrotSet::new(2000, 2.0);
         let bits = bits_for(1e-30, 32);
         let (real, imaginary) = (Fixed::parse("0.0000000000000000000000000000003", bits).unwrap(), Fixed::parse("1.0000000000000000000000000000002", bits).unwrap());
         let color_of = |position: f64| crate::coloring::TrueColor::new((position * 3.0) as u8, 0, 0);
         let mut layers = Vec::new();
-        assert!(render_layers(&m, &real, &imaginary, 1e-30, (32, 24), 4, &color_of, &std::sync::atomic::AtomicBool::new(false), |colors, layer| layers.push((layer, colors.to_vec()))));
+        assert!(render_layers(&m, &real, &imaginary, (1e-30, 0.0), (32, 24), 4, &color_of, &std::sync::atomic::AtomicBool::new(false), |colors, layer| layers.push((layer, colors.to_vec()))));
         assert_eq!(layers.iter().map(|(layer, _)| *layer).collect::<Vec<_>>(), [1, 2, 3, 4]);
-        let first = render_fixed(&m, &real, &imaginary, 1e-30, 32, 24, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        let first = render_fixed(&m, &real, &imaginary, (1e-30, 0.0), 32, 24, &std::sync::atomic::AtomicBool::new(false)).unwrap();
         assert!(layers[0].1.iter().zip(&first).all(|(color, position)| color.red == (position * 3.0) as u8), "the first layer: one sample in the middle of every pixel");
         assert!(layers[0].1.iter().zip(&layers[3].1).any(|(a, b)| a.red != b.red), "more samples change the image");
     }

@@ -113,10 +113,16 @@ impl Blur {
     }
 }
 
+/// How many pixels a tap of the blur of `sigma` pixels reaches from its center (2.5 sigma, from 1 to `MAX_RADIUS`): the rows of a strip that `blurred` needs
+/// from the strips next to it (see `export`)
+pub(super) fn blur_radius(sigma: f32) -> usize {
+    ((2.5 * sigma).ceil() as usize).clamp(1, MAX_RADIUS.unsigned_abs() as usize)
+}
+
 /// The colors of a `width` x `height` image blurred by a Gaussian of `sigma` pixels, like the shader of `Blur` (gamma-space colors, radius 2.5 sigma at most
 /// `MAX_RADIUS`, the edge pixels repeated), on all render threads: for saving an image of the blurred quality preset
 pub(super) fn blurred(colors: &[crate::coloring::TrueColor], width: usize, height: usize, sigma: f32) -> Vec<crate::coloring::TrueColor> {
-    let radius: isize = ((2.5 * sigma).ceil() as isize).clamp(1, isize::try_from(MAX_RADIUS).unwrap_or(6));
+    let radius = blur_radius(sigma).cast_signed();
     let weights: Vec<f32> = (-radius..=radius).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
     let total: f32 = weights.iter().sum();
     let weights: Vec<f32> = weights.iter().map(|weight| weight / total).collect();

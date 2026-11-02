@@ -50,7 +50,7 @@ impl MandelbrotApp {
         self.section(ui, "Benchmark", false, Self::benchmark_ui);
 
         ui.separator();
-        ui.label("Click the fractal to see a point's coordinates, right-click to center the view on it.");
+        ui.label("Click the fractal to see a point's coordinates, right-click (or a long press) to center the view on it, double-click (or double-tap) to zoom in. On a touch screen: pinch to zoom, twist to turn, drag to move.");
     }
 
     /// A section of the controls with a title that opens and closes it (`open`: open at first; every section is open in the tests, which read the controls)
@@ -88,6 +88,8 @@ impl MandelbrotApp {
         });
         self.sharing_controls(ui);
         self.depth_controls(ui);
+        self.rotation_controls(ui);
+        self.julia_controls(ui);
     }
 
     /// How flights fly: the pace, the route and the rendering of their frames, frames ahead, and blending and blurring their frames
@@ -383,19 +385,21 @@ impl MandelbrotApp {
                 }
             });
         });
-        //The color cycle (see `ColorCycle`): how the iteration counts map onto the palette, the same with a manual and an automatic limit
+        //The color cycle (see `ColorCycle`): how the iteration counts map onto the palette, the same with a manual and an automatic limit.
+        //The sliders only clamp and round what is typed or dragged (`SliderClamping::Edits`): by default egui rounds the value to the slider's step on every
+        //frame, which turned the in-between colors of a flight (or of a place) into a change of the colors, and the render of it stopped the flight (#192)
         let before = self.m.palette;
         ui.add_enabled_ui(!self.m.palette.stretch, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Iteration divide:");
                 //Logarithmic: 0.1, 1, 10, 100 and 1000 are equally far apart; the number next to it can be typed
-                ui.add(egui::Slider::new(&mut self.m.palette.divide, MIN_DIVIDE..=MAX_DIVIDE).logarithmic(true).max_decimals(3))
+                ui.add(egui::Slider::new(&mut self.m.palette.divide, MIN_DIVIDE..=MAX_DIVIDE).logarithmic(true).max_decimals(3).clamping(egui::SliderClamping::Edits))
                     .on_hover_text("How many iterations one step of the palette takes (0.1 to 1000; type a value in the box): below 1 the colors change several times per iteration, more gives broader, calmer bands. Deep views, whose iteration counts are high and far apart, often look best with more. A point keeps its color however far you zoom and whatever the iteration limit.");
             });
             ui.horizontal(|ui| {
                 ui.label("Offset:");
                 //(To 499: 500 steps are the whole palette, the same colors as 0)
-                ui.add(egui::Slider::new(&mut self.m.palette.offset, 0.0..=PALETTE_LENGTH - 1.0).step_by(1.0).max_decimals(0))
+                ui.add(egui::Slider::new(&mut self.m.palette.offset, 0.0..=PALETTE_LENGTH - 1.0).step_by(1.0).max_decimals(0).clamping(egui::SliderClamping::Edits))
                     .on_hover_text("Where the palette starts, in steps (0 to 499 of 500): shifts every color along the palette; the colors change at once while you drag");
             });
             ui.horizontal(|ui| {
@@ -404,6 +408,13 @@ impl MandelbrotApp {
                 }
                 ui.add(egui::DragValue::new(&mut self.cycle_rate).range(super::cycle::CYCLE_RATES).speed(0.5).max_decimals(1).suffix(" steps/s"))
                     .on_hover_text("How fast the colors cycle, in steps of the palette per second (type a value; negative: backwards; 500 steps are the whole palette)");
+            });
+            ui.horizontal(|ui| {
+                if ui.button(if self.divide_cycle.is_some() { "Stop the divide" } else { "Cycle the divide" }).on_hover_text("The iteration divide breathes by itself: it grows to four times what it is and shrinks to a quarter and back, so the bands of colors widen and narrow while the view stays where it is (with Cycle the colors too, both move)").clicked() {
+                    self.toggle_divide_cycle();
+                }
+                ui.add(egui::DragValue::new(&mut self.divide_period).range(super::cycle::DIVIDE_PERIODS).speed(0.5).max_decimals(1).suffix(" s a swing"))
+                    .on_hover_text("How long a whole swing of the divide takes, in seconds (type a value)");
             });
         });
         ui.checkbox(&mut self.m.palette.stretch, "Stretch the palette over the limit")
@@ -463,8 +474,21 @@ impl MandelbrotApp {
             (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
         });
         self.save_size_controls(ui);
-        if ui.button("Save image").clicked() {
-            self.save_image();
+        match &self.image_save {
+            None => {
+                if ui.button("Save image").clicked() {
+                    self.save_image();
+                }
+            }
+            Some(save) => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::ProgressBar::new(save.fraction() as f32).text(save.text()).desired_width(260.0));
+                    if ui.button("Cancel").on_hover_text("Stops saving the image; nothing of it is kept").clicked() {
+                        save.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
         }
     }
 
@@ -474,28 +498,43 @@ impl MandelbrotApp {
         ui.horizontal(|ui| {
             ui.label("Saved image size:");
             egui::ComboBox::from_id_salt("save_size").selected_text(self.save_size.selected_text(default_size, view)).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::Standard, format!("Default ({default_size})"));
+                ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::Standard, format!("Default ({})", default_size.oriented(self.save_size.portrait)));
                 ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::View, format!("Same as the view ({view})"));
                 ui.separator();
                 for preset in self.save_size.all_presets() {
                     let custom = self.save_size.is_custom_preset(&preset.name);
-                    let label = if custom { format!("{} (custom)", preset.label()) } else { preset.label() };
+                    let label = if custom { format!("{} (custom)", self.save_size.label(&preset)) } else { self.save_size.label(&preset) };
                     ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::Preset(preset.name), label);
                 }
                 ui.separator();
                 ui.selectable_value(&mut self.save_size.choice, SaveSizeChoice::Custom, "Custom size...");
             });
+            let oriented = matches!(self.save_size.choice, SaveSizeChoice::Standard | SaveSizeChoice::Preset(_));
+            ui.add_enabled(oriented, egui::Checkbox::new(&mut self.save_size.portrait, "Portrait"))
+                .on_hover_text("Turns the presets and the default size upright, taller than wide, for phone wallpapers: 8K UHD becomes 4320 x 7680")
+                .on_disabled_hover_text("The size of the view and a custom size are used as they are; a custom size turns with Swap");
         });
         match self.save_size.resolve(default_size, view) {
-            Ok(resolution) => ui.label(format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6)),
-            Err(reason) => ui.colored_label(egui::Color32::from_rgb(230, 70, 60), reason),
-        };
+            Ok(resolution) => {
+                ui.label(format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6));
+                if resolution.pixels() > resolution::LARGE_IMAGE_PIXELS {
+                    ui.weak("A large image: rendered in strips, so it needs little memory, but slow at high quality. Many phone galleries and image viewers cannot open \
+                        images this large: use a viewer for large images, or print it");
+                }
+            }
+            Err(reason) => {
+                ui.colored_label(egui::Color32::from_rgb(230, 70, 60), reason);
+            }
+        }
         if self.save_size.choice == SaveSizeChoice::Custom {
             ui.horizontal(|ui| {
                 ui.label("Width:");
-                ui.add(egui::DragValue::new(&mut self.save_size.custom_width).range(resolution::MIN_SIDE..=resolution::MAX_SIDE));
+                ui.add(egui::DragValue::new(&mut self.save_size.custom_width).range(resolution::MIN_SIDE..=resolution::MAX_IMAGE_SIDE));
                 ui.label("Height:");
-                ui.add(egui::DragValue::new(&mut self.save_size.custom_height).range(resolution::MIN_SIDE..=resolution::MAX_SIDE));
+                ui.add(egui::DragValue::new(&mut self.save_size.custom_height).range(resolution::MIN_SIDE..=resolution::MAX_IMAGE_SIDE));
+                if ui.button("Swap").on_hover_text("Swaps the width and the height: portrait or landscape").clicked() {
+                    (self.save_size.custom_width, self.save_size.custom_height) = (self.save_size.custom_height, self.save_size.custom_width);
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Preset name:");

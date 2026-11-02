@@ -47,11 +47,19 @@ struct End {
     /// The center as decimal text, when it is deeper than 64-bit floats (see `deep_view`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exact: Option<(String, String)>,
+    /// The rotation of the view in degrees, counterclockwise (issue #217; files of unturned flights have none)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    rotation: f64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // (The signature serde wants)
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 impl End {
-    fn of(camera: Camera, max_iterations: u32, palette: ColorCycle) -> End {
-        End { center: Center { real: camera.x, imaginary: camera.y }, scale: camera.scale, max_iterations, iteration_divide: palette.divide, color_offset: palette.offset, stretch_palette: palette.stretch, exact: None }
+    fn of(camera: Camera, max_iterations: u32, palette: ColorCycle, rotation: f64) -> End {
+        End { center: Center { real: camera.x, imaginary: camera.y }, scale: camera.scale, max_iterations, iteration_divide: palette.divide, color_offset: palette.offset, stretch_palette: palette.stretch, rotation: rotation.to_degrees(), exact: None }
     }
 
     const fn camera(&self) -> Camera {
@@ -90,13 +98,18 @@ pub(super) struct SavedFlight {
     pub(super) file_name: String,
 }
 
+/// The rotation in radians of a rotation in degrees from a file (one that is not a number: none)
+fn rotation_of(degrees: f64) -> f64 {
+    if degrees.is_finite() { degrees.to_radians() } else { 0.0 }
+}
+
 /// The text of the file of `flight`, with the length of its video if it has one
 pub(super) fn to_json(flight: &VideoFlight, length: Option<std::time::Duration>) -> String {
     let file = FlightFile {
         format_version: FORMAT_VERSION,
         name: flight.name.clone(),
-        start: End::of(flight.from, flight.limits.0, flight.palettes.0),
-        destination: End { exact: flight.to_exact.clone(), ..End::of(flight.to, flight.limits.1, flight.palettes.1) },
+        start: End::of(flight.from, flight.limits.0, flight.palettes.0, flight.rotations.0),
+        destination: End { exact: flight.to_exact.clone(), ..End::of(flight.to, flight.limits.1, flight.palettes.1, flight.rotations.1) },
         route: flight.route.name().to_string(),
         pace: flight.pace.name().to_string(),
         constant_speed: flight.constant_speed,
@@ -134,6 +147,7 @@ pub(super) fn parse(text: &str, file_name: &str) -> Result<SavedFlight, String> 
         palettes: (file.start.palette(), file.destination.palette()),
         sequence: file.sequence.filter(super::sequence::Sequence::is_complete),
         to_exact: file.destination.exact.clone(),
+        rotations: (rotation_of(file.start.rotation), rotation_of(file.destination.rotation)),
     };
     let length = file.length_seconds.filter(|seconds| seconds.is_finite() && *seconds > 0.0).map(std::time::Duration::from_secs_f64);
     Ok(SavedFlight { flight, length, file_name: file_name.to_string() })
@@ -226,11 +240,12 @@ impl super::MandelbrotApp {
     /// and makes it the last flight
     pub(super) fn fly_video_flight(&mut self, flight: &VideoFlight) {
         self.c.set_view(&crate::complex_plane::View::new(flight.from.x, flight.from.y, flight.from.scale));
+        self.c.set_rotation(flight.rotations.0);
         (self.m.palette, self.m.max_iterations, self.max_iterations_input) = (flight.palettes.0, flight.limits.0, flight.limits.0);
         let point = crate::points_of_interest::PointOfInterest {
             name: flight.name.clone(),
             description: String::new(),
-            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, exact: None },
+            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, rotation: flight.rotations.1.to_degrees(), julia: None, exact: None },
             appearance: None,
             file_name: String::new(),
         };
@@ -294,6 +309,7 @@ mod tests {
             palettes: (ColorCycle { divide: 1.0, offset: 0.0, stretch: false }, ColorCycle { divide: 0.113, offset: 278.0, stretch: false }),
             sequence: None,
             to_exact: None,
+            rotations: (0.0, 0.5),
         }
     }
 

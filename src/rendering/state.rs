@@ -26,12 +26,14 @@ pub(super) struct SampleKey {
     fast_gpu: bool,
     /// Whether the samples may come from the GPU's plain f32 loop (`Render::f32_gpu`): a render that may not use it does not continue them
     single: bool,
+    /// The parameter of a Julia set (as bits), or `None` for the Mandelbrot set (see `MandelbrotSet::julia`)
+    julia: Option<(u64, u64)>,
 }
 
 impl SampleKey {
     /// Whether samples of `self` and of `other` are at the same positions (only their colors can differ)
     fn same_positions(&self, other: &SampleKey) -> bool {
-        (self.max_iterations, self.orbit_radius, self.smooth_coloring, self.fast_gpu, self.single) == (other.max_iterations, other.orbit_radius, other.smooth_coloring, other.fast_gpu, other.single)
+        (self.max_iterations, self.orbit_radius, self.smooth_coloring, self.fast_gpu, self.single, self.julia) == (other.max_iterations, other.orbit_radius, other.smooth_coloring, other.fast_gpu, other.single, other.julia)
     }
 }
 
@@ -51,7 +53,7 @@ impl SampleKey {
     /// a pixel gets, not what a sample is
     pub(super) fn new(m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor, fast_gpu: bool, single: bool) -> SampleKey {
         //Two pointers to the same function can differ (then the state is just not reused); two different functions never share an address
-        SampleKey { max_iterations: m.max_iterations, orbit_radius: m.orbit_radius.to_bits(), palette: (m.palette.divide.to_bits(), m.palette.offset.to_bits(), m.palette.stretch), smooth_coloring: m.smooth_coloring, coloring_function: coloring_function as usize, fast_gpu, single }
+        SampleKey { max_iterations: m.max_iterations, orbit_radius: m.orbit_radius.to_bits(), palette: (m.palette.divide.to_bits(), m.palette.offset.to_bits(), m.palette.stretch), smooth_coloring: m.smooth_coloring, coloring_function: coloring_function as usize, fast_gpu, single, julia: m.julia.map(|(x, y)| (x.to_bits(), y.to_bits())) }
     }
 }
 

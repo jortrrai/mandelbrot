@@ -27,9 +27,10 @@ use std::borrow::Cow;
 
 use crate::{complex::Complex, complex_plane::{ComplexPlane, View}, mandelbrot_set::MandelbrotSet};
 
-/// About the most points of one dispatch: short dispatches keep the GPU responsive for the window (the renderer aims at it from the points per row it measured, so a
-/// dispatch can be somewhat larger)
-pub(crate) const BATCH: usize = 1 << 18;
+/// About the most points of one dispatch. The renderer sizes dispatches by time (`GPU_BATCH_TIME`), which keeps the GPU responsive for the window; this cap only
+/// limits the cheap points of shallow views, where every dispatch's fixed cost (writing, submitting, waiting: about half a millisecond) outweighed the work of
+/// 262,144 points (#212)
+pub(crate) const BATCH: usize = 1 << 20;
 
 /// The workgroups of 64 invocations of a dispatch: each invocation takes points until there are none left (see `gpu.wgsl`). Enough to keep the GPU busy, few enough
 /// that an invocation gets several points of a batch to refill with
@@ -84,14 +85,68 @@ pub(crate) const MAX_PIXEL: usize = 1 << 16;
 
 /// A dispatch that runs on the GPU, see `GpuIterator::submit`
 pub(crate) struct Submitted {
-    read: wgpu::Buffer,
+    buffers: Buffers,
+    /// The bytes of the outcomes
+    size: u64,
     index: wgpu::SubmissionIndex,
+}
+
+/// The buffers of one dispatch and their bind group, kept for the next dispatch (see `GpuIterator::buffers`): creating them for every dispatch (and wgpu
+/// clearing the new outcome buffers) took a feeder of the GPU half a millisecond per dispatch, 100,000 times in a 4K video (#212)
+struct Buffers {
+    params: wgpu::Buffer,
+    input: wgpu::Buffer,
+    next_point: wgpu::Buffer,
+    outcomes: wgpu::Buffer,
+    read: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    /// The bytes the input and the outcomes can hold
+    input_capacity: u64,
+    outcome_capacity: u64,
+}
+
+/// The bytes of the parameters of a dispatch (the most, those of `submit_pixels`)
+const PARAMS_CAPACITY: u64 = 96;
+
+/// Every use of the GPU holds this gate open (shared), and `close_gpus` shuts it for good when the program ends: then it waits for the dispatches under way,
+/// and render threads that want the GPU after that wait for ever, while the process ends. Without it a render thread could call into Vulkan while the
+/// program's exit tears down the Vulkan loader, which crashed (issue #200: a window closed during a GPU render, a test ending while its app still rendered).
+/// A thread takes the gate once, never twice (a second shared lock could wait for a waiting `close_gpus`)
+static GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn gate() -> std::sync::RwLockReadGuard<'static, ()> {
+    GATE.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Shuts the gate of the GPUs (see `GATE`) when the program ends, once for good.
+///
+/// Called when the window closes and the command line ends, and at exit (on Linux, also for the tests)
+pub fn close_gpus() {
+    static CLOSED: std::sync::Once = std::sync::Once::new();
+    CLOSED.call_once(|| std::mem::forget(GATE.write().unwrap_or_else(std::sync::PoisonError::into_inner)));
+}
+
+/// Closes the gate (see `close_gpus`) at the program's exit too, before the Vulkan loader is torn down: the handler is registered after the loader is
+/// loaded, so it runs before the loader's own handlers
+#[cfg(target_os = "linux")]
+fn close_gpus_at_exit() {
+    extern "C" fn at_exit() {
+        close_gpus();
+    }
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    //SAFETY: `at_exit` is a plain function that never unwinds
+    REGISTERED.call_once(|| unsafe {
+        libc::atexit(at_exit);
+    });
 }
 
 /// A GPU that iterates points exactly like the CPU, see the module
 pub struct GpuIterator {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// The device and its queue are never dropped: dropping the last of them destroys the Vulkan instance, and NVIDIA's driver crashed doing that on a
+    /// thread while other threads or other instances still worked with it (issue #200: a video job that let go of the GPU after the window had, and tests
+    /// that each open a GPU, in parallel). A GPU is opened once per program (and once per test), so the memory is negligible
+    device: std::mem::ManuallyDrop<wgpu::Device>,
+    queue: std::mem::ManuallyDrop<wgpu::Queue>,
     /// The exact loop (`gpu.wgsl`) and the fast double-float loop (`gpu_fast.wgsl`)
     exact: wgpu::ComputePipeline,
     fast: wgpu::ComputePipeline,
@@ -99,6 +154,8 @@ pub struct GpuIterator {
     single: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     name: String,
+    /// The buffers of finished dispatches, for the next ones (several renders feed the GPU at once)
+    spare: std::sync::Mutex<Vec<Buffers>>,
 }
 
 impl GpuIterator {
@@ -107,9 +164,23 @@ impl GpuIterator {
     /// # Errors
     /// The reason the GPU cannot be used: no adapter, a missing feature, a failed request, or an outcome that differs from the CPU's
     pub fn new() -> Result<GpuIterator, String> {
+        let gpu = {
+            let _gate = gate();
+            Self::open()?
+        };
+        #[cfg(target_os = "linux")]
+        close_gpus_at_exit();
+        gpu.self_test()?;
+        Ok(gpu)
+    }
+
+    /// Opens the GPU and its pipelines (see `new`)
+    fn open() -> Result<GpuIterator, String> {
         //Vulkan, Metal and DX12 only: the loops need f64 shaders and SPIR-V, which OpenGL does not have, and looking at OpenGL's adapters through EGL could
         //panic in the EGL library while the window's OpenGL context is current on another thread (seen on X11 with NVIDIA), leaving the window without a GPU
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+        //No debug labels or validation (wgpu turns them on in debug builds): naming a Vulkan object crashed inside the Vulkan loader while another thread
+        //opened or closed another instance (issue #200: the tests, each with a GPU, in a debug build), and nothing reads the names
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::PRIMARY, flags: wgpu::InstanceFlags::empty(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).map_err(|err| format!("no GPU: {err}"))?;
         let info = adapter.get_info();
         let name = format!("{} ({:?})", info.name, info.backend);
@@ -137,9 +208,8 @@ impl GpuIterator {
             Ok(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mandelbrot"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }))
         };
         let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?, pipeline(include_str!("gpu_f32.wgsl"))?);
-        let gpu = GpuIterator { device, queue, exact, fast, single, layout, name };
-        gpu.self_test()?;
-        Ok(gpu)
+        let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
+        Ok(GpuIterator { device, queue, exact, fast, single, layout, name, spare: std::sync::Mutex::new(Vec::new()) })
     }
 
     /// The name and the backend of the GPU
@@ -216,48 +286,78 @@ impl GpuIterator {
         self.dispatch(if single { &self.single } else { &self.fast }, &params, bytemuck::cast_slice(pixels), pixels.len(), std::mem::size_of::<FastOutcome>())
     }
 
-    /// One dispatch of `pipeline` over `count` points with these parameters and input, whose outcomes have `outcome_size` bytes each
-    fn dispatch(&self, pipeline: &wgpu::ComputePipeline, params: &[u8], input: &[u8], count: usize, outcome_size: usize) -> Result<Submitted, String> {
-        let count = u32::try_from(count).map_err(|_| String::from("too many points"))?;
-        //Every GPU error of the dispatch (a buffer the driver could not create, a lost device) is caught here and returned, so the CPU computes the batch instead
-        //(the window once crashed with a buffer that could not be mapped, see issue #119); the buffers are written by the queue, not mapped when they are created
-        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
-        let storage = |contents: &[u8]| {
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: contents.len().max(4) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-            self.queue.write_buffer(&buffer, 0, contents);
-            buffer
-        };
-        //The index of the next point that an invocation takes, see `gpu.wgsl`
-        let (params, input, next_point) = (storage(params), storage(input), storage(&0_u32.to_le_bytes()));
-        let size = (count as usize * outcome_size) as u64;
-        let outcomes = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-        let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    /// Buffers for a dispatch whose input has `input` bytes and whose outcomes have `outcomes` bytes: spare ones that are large enough, or new ones (the sizes
+    /// rounded up to a power of two, so they also serve somewhat larger dispatches later)
+    fn buffers(&self, input: u64, outcomes: u64) -> Buffers {
+        let mut spare = self.spare.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = spare.iter().position(|buffers| buffers.input_capacity >= input && buffers.outcome_capacity >= outcomes) {
+            return spare.swap_remove(index);
+        }
+        drop(spare);
+        let (input_capacity, outcome_capacity) = (input.max(4).next_power_of_two(), outcomes.max(4).next_power_of_two());
+        let buffer = |size: u64, usage: wgpu::BufferUsages| self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage, mapped_at_creation: false });
+        let (params, input, next_point) = (buffer(PARAMS_CAPACITY, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST), buffer(input_capacity, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST), buffer(4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST));
+        let (outcomes, read) = (buffer(outcome_capacity, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC), buffer(outcome_capacity, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST));
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: input.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: outcomes.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 3, resource: next_point.as_entire_binding() },
         ] });
+        Buffers { params, input, next_point, outcomes, read, bind, input_capacity, outcome_capacity }
+    }
+
+    /// One dispatch of `pipeline` over `count` points with these parameters and input, whose outcomes have `outcome_size` bytes each. The shaders read only
+    /// `count` points (see `params.count`), so buffers larger than the dispatch serve it as they are
+    fn dispatch(&self, pipeline: &wgpu::ComputePipeline, params: &[u8], input: &[u8], count: usize, outcome_size: usize) -> Result<Submitted, String> {
+        let count = u32::try_from(count).map_err(|_| String::from("too many points"))?;
+        let _gate = gate();
+        //Every GPU error of the dispatch (a buffer the driver could not create, a lost device) is caught here and returned, so the CPU computes the batch instead
+        //(the window once crashed with a buffer that could not be mapped, see issue #119); the buffers are written by the queue, not mapped when they are created
+        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
+        let size = (count as usize * outcome_size) as u64;
+        let buffers = self.buffers(input.len() as u64, size);
+        self.queue.write_buffer(&buffers.params, 0, params);
+        if !input.is_empty() {
+            self.queue.write_buffer(&buffers.input, 0, input);
+        }
+        //The index of the next point that an invocation takes, see `gpu.wgsl`
+        self.queue.write_buffer(&buffers.next_point, 0, &0_u32.to_le_bytes());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, &buffers.bind, &[]);
             pass.dispatch_workgroups(count.div_ceil(64).min(WORKGROUPS), 1, 1);
         }
-        encoder.copy_buffer_to_buffer(&outcomes, 0, &read, 0, size);
+        if size > 0 {
+            encoder.copy_buffer_to_buffer(&buffers.outcomes, 0, &buffers.read, 0, size);
+        }
         let index = self.queue.submit([encoder.finish()]);
-        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        if size > 0 {
+            buffers.read.slice(..size).map_async(wgpu::MapMode::Read, |_| {});
+        }
         //The scopes are popped in the reverse order of pushing them
         let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
-        errors.into_iter().flatten().next().map_or(Ok(Submitted { read, index }), |error| Err(format!("{}: {error}", self.name)))
+        errors.into_iter().flatten().next().map_or(Ok(Submitted { buffers, size, index }), |error| Err(format!("{}: {error}", self.name)))
     }
 
-    /// Waits for a dispatch of `submit` (`Outcome`) or `submit_pixels` (`FastOutcome`) and returns the outcome of every point, in the order of its points
+    /// Waits for a dispatch of `submit` (`Outcome`) or `submit_pixels` (`FastOutcome`) and returns the outcome of every point, in the order of its points; its
+    /// buffers are kept for the next dispatch
     pub(crate) fn finish<T: bytemuck::Pod>(&self, submitted: Submitted) -> Result<Vec<T>, String> {
-        self.device.poll(wgpu::PollType::Wait { submission_index: Some(submitted.index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
-        let view = submitted.read.slice(..).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
-        Ok(bytemuck::cast_slice(&view).to_vec())
+        let Submitted { buffers, size, index } = submitted;
+        let _gate = gate();
+        self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let outcomes = {
+            let view = buffers.read.slice(..size).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
+            bytemuck::cast_slice(&view).to_vec()
+        };
+        buffers.read.unmap();
+        self.spare.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(buffers);
+        Ok(outcomes)
     }
 
     /// Checks the GPU against the CPU on points of a shallow, a medium and a deep view, with smooth and integer coloring and a small orbit radius; and that the fast
