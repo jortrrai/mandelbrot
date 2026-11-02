@@ -2996,17 +2996,18 @@ fn the_youtube_preset_sets_4k60_at_32x_with_motion_blur() {
 }
 
 #[test]
-fn the_julia_map_of_a_pinned_point_is_drawn_in_the_top_right_and_both_are_off_at_first() {
-    //Issue #202
-    let config = Config::sized(64, 48, 50, 32);
+fn the_julia_map_is_on_at_first_and_draws_the_pinned_point_or_the_center_in_the_top_right_in_layers_after_the_view() {
+    //Issue #202, and #229: on at first (Show orbit off), the view's quality, in layers on its own thread once the view is finished, the center without the mouse
+    let config = Config::sized(64, 48, 50, 4);
     let mut app = manual_app(&config);
-    assert!(!app.show_orbit && !app.show_julia);
+    assert!(!app.show_orbit && app.show_julia);
+    app.show_julia = false;
     let ctx = egui::Context::default();
     let draw = |app: &mut MandelbrotApp| {
         let output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() }, |ui| {
             app.julia_overlays(ui, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
         });
-        let id = app.julia_map.as_ref().map(|(_, texture)| texture.id());
+        let id = app.julia_map.as_ref().map(|(_, texture, _)| texture.id());
         let maps: Vec<egui::Rect> = output.shapes.iter().filter_map(|shape| match &shape.shape {
             egui::epaint::Shape::Mesh(mesh) if Some(mesh.texture_id) == id => Some(mesh.calc_bounds()),
             _ => None,
@@ -3017,12 +3018,34 @@ fn the_julia_map_of_a_pinned_point_is_drawn_in_the_top_right_and_both_are_off_at
     assert!(draw(&mut app).is_empty() && app.julia_map.is_none(), "off: nothing");
     app.show_julia = true;
     app.julia_pinned = Some((-0.8, 0.156));
-    let maps = draw(&mut app);
+    //While the view renders, the map waits
+    app.render("A view");
+    assert!(draw(&mut app).is_empty() && app.julia_map_job.is_none(), "not while the view renders");
+    wait_for_job(&mut app);
+    //Then its layers come in, up to the view's quality
+    let started = std::time::Instant::now();
+    let mut maps = Vec::new();
+    while !app.julia_map.as_ref().is_some_and(|(_, _, done)| *done) {
+        assert!(started.elapsed() < Duration::from_secs(20), "the map did not finish");
+        maps = draw(&mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    maps = if maps.is_empty() { draw(&mut app) } else { maps };
     assert_eq!(maps.len(), 1, "the map of the pinned point");
     assert!(maps[0].max.x > 700.0 && maps[0].min.y < 20.0, "in the top right: {:?}", maps[0]);
-    let key = app.julia_map.as_ref().map(|(key, _)| *key);
+    let key = app.julia_map.as_ref().map(|(key, _, _)| *key).unwrap();
+    assert_eq!((f64::from_bits(key.0), f64::from_bits(key.1), key.7), (-0.8, 0.156, 4), "the pinned point at the view's 4 samples");
     let _ = draw(&mut app);
-    assert_eq!(app.julia_map.as_ref().map(|(key, _)| *key), key, "the same point: not rendered again");
+    assert!(app.julia_map_job.is_none() && app.julia_map.as_ref().map(|(key, _, _)| *key) == Some(key), "the same point: not rendered again");
+    //Unpinned and without the mouse: the Julia set of the center of the view
+    app.julia_pinned = None;
+    let center = app.c.center();
+    let started = std::time::Instant::now();
+    while !app.julia_map.as_ref().is_some_and(|(key, _, done)| *done && f64::from_bits(key.0) == center.x && f64::from_bits(key.1) == center.y) {
+        assert!(started.elapsed() < Duration::from_secs(20), "the map of the center did not come");
+        let _ = draw(&mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]

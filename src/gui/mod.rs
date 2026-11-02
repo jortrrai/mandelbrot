@@ -249,7 +249,9 @@ pub struct MandelbrotApp {
     julia_pinned: Option<(f64, f64)>,
     /// In a Julia set (`m.julia`, issue #202): the view of the Mandelbrot set to go back to
     mandelbrot_view: Option<crate::complex_plane::View>,
-    julia_map: Option<(julia::MapKey, egui::TextureHandle)>,
+    /// The Julia map shown: what it was rendered for, its texture, and whether all its layers are done; and the render of its next layers (see `julia`)
+    julia_map: Option<(julia::MapKey, egui::TextureHandle, bool)>,
+    julia_map_job: Option<julia::MapJob>,
     /// On a narrow screen: whether the controls are shown over the image (see `ui`)
     show_controls: bool,
     /// Whether the mini-map shows in the Current view box, and its texture, the colors it was rendered with and its plane (see `status::minimap_ui`)
@@ -468,10 +470,11 @@ impl MandelbrotApp {
             shared_view_input: String::new(),
             depth_dragging: false,
             show_orbit: false,
-            show_julia: false,
+            show_julia: true,
             julia_pinned: None,
             mandelbrot_view: None,
             julia_map: None,
+            julia_map_job: None,
             show_controls: false,
             show_minimap: false,
             minimap: None,
