@@ -428,9 +428,11 @@ impl VideoFlight {
         self.sequence.as_ref().map_or_else(
             || {
                 let flight = Flight::with(self.from, self.to, self.pace, self.route, self.constant_speed, self.speed, self.dive_zoom);
-                match self.to_depth {
-                    Some(depth) => flight.deeper(depth.log2() * std::f64::consts::LN_2),
-                    None => flight,
+                //(A flight to an exact center: in logarithms, whose deep frames have exact offsets from it, see `Flight::deeper`)
+                match (self.to_depth, &self.to_exact) {
+                    (Some(depth), _) => flight.deeper(depth.log2() * std::f64::consts::LN_2),
+                    (None, Some(_)) => flight.deeper(self.to.scale.ln()),
+                    (None, None) => flight,
                 }
             },
             |sequence| Flight::of_sequence(sequence.clone(), (self.constant_speed, self.speed)),
@@ -690,6 +692,13 @@ impl MandelbrotApp {
                 ((camera.x, camera.y), camera.scale)
             }))
             .flatten();
+        //A frame deeper than 64-bit floats, of a flight to an exact center, is rendered there by the deep renderer (see `deep_view`): every such frame perturbs
+        //from one orbit of the destination, computed once with the bits of the deepest frame (see `rendering::deep::SharedOrbit`, issue #263)
+        let shared_orbit = flight.to_exact.as_ref().and_then(|exact| {
+            use crate::rendering::deep::{bits_for_depth, Depth, Fixed, SharedOrbit};
+            let bits = bits_for_depth(flight.to_depth.unwrap_or_else(|| Depth::from_f64(flight.to.scale)), width);
+            Some(SharedOrbit::new(&Fixed::parse(&exact.0, bits)?, &Fixed::parse(&exact.1, bits)?))
+        });
         if keyframe_dives && dive.is_none() {
             self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
         }
@@ -744,7 +753,7 @@ impl MandelbrotApp {
                         let camera = path.camera_at(time);
                         let palette = flight.palette_at(&path, time);
                         //(A frame of a flight to a deep destination keeps its exact center and its depth, see `deep_frame_view`)
-                        let deep_camera = flight.to_depth.and_then(|_| deep_frame_view(&flight, path.deep_at(time), width)).filter(|(_, _, depth)| depth.to_f64() < 1e-13);
+                        let deep_camera = deep_frame_view(&flight, path.deep_at(time), width).filter(|(_, _, depth)| depth.to_f64() < 1e-13);
                         let limit = path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| if flight.to_depth.is_some() { deep_limit_at(path.deep_at(time).ln_scale, &flight, settings) } else { limit_at(camera.scale, &flight, settings) }));
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
@@ -827,6 +836,7 @@ impl MandelbrotApp {
             //Renderers take the next frame as soon as the scheduler lets them (each with all the CPU threads and the GPU, so one fills the gaps the other leaves:
             //the end of a layer, the GPU's batches); the frames go to the writers in their order
             let scheduler = &thread_scheduler;
+            let shared_orbit = &shared_orbit;
             let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(first - warm_up), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(most_at_once));
             let mut rendered = first - warm_up;
             //The frames in order so far: no renderer starts a frame more than `ahead` after it, so finished frames waiting for a slow one (on the
@@ -945,31 +955,17 @@ impl MandelbrotApp {
                             };
                             let mut colors = Vec::new();
                             //A frame deeper than 64-bit floats, of a flight to an exact center: rendered there by the deep renderer (see `deep_view`)
-                            let deep = flight.to_exact.as_ref().filter(|_| m.julia.is_none() && plane.precision() == crate::complex_plane::Precision::Exhausted);
-                            let deeper = deep.filter(|_| flight.to_depth.is_some()).and_then(|_| deep_frame_view(flight, path.deep_at(time), width));
-                            let completed = if let Some((real, imaginary, depth)) = deeper {
-                                //Beyond 64-bit floats: the camera of the flight in logarithms (see `Flight::deeper`), at the exact center of the destination
+                            //(The camera of the flight in logarithms, see `Flight::deeper`, perturbing from the orbit of the destination that every frame shares)
+                            let deep = shared_orbit.as_ref().filter(|_| m.julia.is_none() && plane.precision() == crate::complex_plane::Precision::Exhausted);
+                            let completed = if let Some(orbit) = deep {
+                                let camera = path.deep_at(time);
+                                let depth = crate::rendering::deep::Depth::from_log2(camera.ln_scale / std::f64::consts::LN_2);
                                 let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
-                                crate::rendering::deep::render_layers(&m, &real, &imaginary, (depth, plane.rotation()), (width, height), samples, &color_of, fast_deep, thread_cancel, |layer, number| {
+                                crate::rendering::deep::render_layers_around(&m, (orbit, (camera.right, camera.up)), (depth, plane.rotation()), (width, height), samples, &color_of, fast_deep, thread_cancel, |layer, number| {
                                     if number == samples.max(1) {
                                         colors = layer.to_vec();
                                     }
                                 })
-                            } else if let Some(exact) = deep {
-                                let bits = crate::rendering::deep::bits_for(camera.scale, width);
-                                let parse = |text: &str| crate::rendering::deep::Fixed::parse(text, bits);
-                                match (parse(&exact.0), parse(&exact.1)) {
-                                    (Some(real), Some(imaginary)) => {
-                                        let (real, imaginary) = (real.plus(camera.x - flight.to.x), imaginary.plus(camera.y - flight.to.y));
-                                        let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
-                                        crate::rendering::deep::render_layers(&m, &real, &imaginary, (crate::rendering::deep::Depth::from_f64(camera.scale), plane.rotation()), (width, height), samples, &color_of, fast_deep, thread_cancel, |layer, number| {
-                                            if number == samples.max(1) {
-                                                colors = layer.to_vec();
-                                            }
-                                        })
-                                    }
-                                    _ => false,
-                                }
                             } else {
                                 let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
                                     .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);

@@ -150,18 +150,71 @@ pub fn bits_for(scale: f64, width: usize) -> u32 {
 /// The orbit of the center `(real, imaginary)` in 64-bit floats, computed exactly in fixed point, up to `max_iterations` steps or until it leaves radius
 /// `2^8` (the orbit of a point outside the set stops there)
 pub fn reference_orbit(real: &Fixed, imaginary: &Fixed, max_iterations: u32) -> Vec<(f64, f64)> {
-    let (mut zx, mut zy) = (Fixed { value: BigInt::zero(), bits: real.bits }, Fixed { value: BigInt::zero(), bits: real.bits });
+    let mut z = (Fixed { value: BigInt::zero(), bits: real.bits }, Fixed { value: BigInt::zero(), bits: real.bits });
     let mut orbit = Vec::with_capacity(max_iterations as usize + 1);
     orbit.push((0.0, 0.0));
-    for _ in 0..max_iterations {
-        let (xx, yy, xy) = (zx.mul(&zx), zy.mul(&zy), zx.mul(&zy));
-        (zx, zy) = (xx.sub(&yy).add(real), xy.double().add(imaginary));
+    continue_orbit((real, imaginary), &mut z, &mut orbit, max_iterations);
+    orbit
+}
+
+/// Continues the orbit of `c` from `z` (its last point, in fixed point) for up to `steps` steps, adding them to `orbit`; whether it escaped
+fn continue_orbit((real, imaginary): (&Fixed, &Fixed), z: &mut (Fixed, Fixed), orbit: &mut Vec<(f64, f64)>, steps: u32) -> bool {
+    let (zx, zy) = z;
+    for _ in 0..steps {
+        let (xx, yy, xy) = (zx.mul(zx), zy.mul(zy), zx.mul(zy));
+        (*zx, *zy) = (xx.sub(&yy).add(real), xy.double().add(imaginary));
         orbit.push((zx.to_f64(), zy.to_f64()));
         if zx.magnitude_above(8) || zy.magnitude_above(8) {
-            break;
+            return true;
         }
     }
-    orbit
+    false
+}
+
+/// One reference orbit for all the views around one exact center (issue #263: the frames of a dive).
+///
+/// The orbit, the slowest part of a deep frame with many iterations, is then computed once instead of for every frame. It is computed with the bits of the
+/// center it is given (those of the deepest view), as far as a view needs, and continued when a view needs more iterations; a view of `max_iterations` gets
+/// exactly the orbit that `reference_orbit` computes
+pub struct SharedOrbit {
+    real: Fixed,
+    imaginary: Fixed,
+    state: std::sync::Mutex<OrbitSoFar>,
+}
+
+/// The orbit of a `SharedOrbit` so far: its last point in fixed point, its points, and whether it escaped
+struct OrbitSoFar {
+    z: (Fixed, Fixed),
+    points: std::sync::Arc<Vec<(f64, f64)>>,
+    escaped: bool,
+}
+
+impl SharedOrbit {
+    /// The orbit of `(real, imaginary)`, none of it computed yet
+    pub fn new(real: &Fixed, imaginary: &Fixed) -> SharedOrbit {
+        let zero = Fixed { value: BigInt::zero(), bits: real.bits };
+        SharedOrbit { real: real.clone(), imaginary: imaginary.clone(), state: std::sync::Mutex::new(OrbitSoFar { z: (zero.clone(), zero), points: std::sync::Arc::new(vec![(0.0, 0.0)]), escaped: false }) }
+    }
+
+    /// The center
+    pub const fn center(&self) -> (&Fixed, &Fixed) {
+        (&self.real, &self.imaginary)
+    }
+
+    /// The orbit up to at least `max_iterations` steps, or until it escaped (it may be longer)
+    pub fn orbit(&self, max_iterations: u32) -> std::sync::Arc<Vec<(f64, f64)>> {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let have = u32::try_from(state.points.len() - 1).unwrap_or(u32::MAX);
+        if !state.escaped && have < max_iterations {
+            let mut longer = Vec::with_capacity(max_iterations as usize + 1);
+            longer.extend_from_slice(&state.points);
+            state.escaped = continue_orbit((&self.real, &self.imaginary), &mut state.z, &mut longer, max_iterations - have);
+            state.points = std::sync::Arc::new(longer);
+        }
+        let points = std::sync::Arc::clone(&state.points);
+        drop(state);
+        points
+    }
 }
 
 /// How small the dropped term `z²` of a step must stay against the terms that are kept, for a bilinear approximation (see `Reference`) to stand in for
@@ -209,7 +262,9 @@ fn times((x, y): (f64, f64), (u, v): (f64, f64)) -> (f64, f64) {
 /// with the largest `|z|` at which it is still accurate (`BLA_TOLERANCE`); deep in a view, where the orbits of the pixels follow the center's for
 /// thousands of steps, a pixel then skips most of them. The positions differ from step by step perturbation only by that tolerance
 pub struct Reference {
-    orbit: Vec<(f64, f64)>,
+    /// The orbit; only its first `length` points are this view's (a shared orbit can be longer, see `SharedOrbit`)
+    orbit: std::sync::Arc<Vec<(f64, f64)>>,
+    length: usize,
     /// `levels[l][k]`: the approximation of the `2^(l + 1)` steps from step `1 + k · 2^(l + 1)` of the orbit
     levels: Vec<Vec<Bla>>,
 }
@@ -218,9 +273,19 @@ impl Reference {
     /// The reference orbit of the center `(real, imaginary)`, for a view whose pixels are at most `max_offset` from it; with `approximate` also its table
     /// of bilinear approximations (without it, every step is iterated, as in `position` before BLA)
     pub fn new(m: &MandelbrotSet, (real, imaginary): (&Fixed, &Fixed), max_offset: f64, approximate: bool) -> Reference {
-        let orbit = reference_orbit(real, imaginary, m.max_iterations);
-        let levels = if approximate { Self::table(&orbit, max_offset, m.orbit_radius) } else { Vec::new() };
-        Reference { orbit, levels }
+        Reference::of(m, std::sync::Arc::new(reference_orbit(real, imaginary, m.max_iterations)), max_offset, approximate)
+    }
+
+    /// `new` with the orbit `orbit` (of at least `m.max_iterations` steps, or until it escaped), see `SharedOrbit`
+    pub fn of(m: &MandelbrotSet, orbit: std::sync::Arc<Vec<(f64, f64)>>, max_offset: f64, approximate: bool) -> Reference {
+        let length = orbit.len().min(m.max_iterations as usize + 1);
+        let levels = if approximate { Self::table(&orbit[..length], max_offset, m.orbit_radius) } else { Vec::new() };
+        Reference { orbit, length, levels }
+    }
+
+    /// The points of the orbit of this view
+    fn points(&self) -> &[(f64, f64)] {
+        &self.orbit[..self.length]
     }
 
     fn table(orbit: &[(f64, f64)], max_offset: f64, orbit_radius: f64) -> Vec<Vec<Bla>> {
@@ -273,7 +338,7 @@ pub fn position(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (d
 
 /// `position` from the difference `z` at step `at` of the reference orbit, after `step` steps of the pixel (`position` starts at 0, 0, 0; see `position_scaled`)
 fn position_from(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (dcx, dcy): (f64, f64), ((zx, zy), at, step): ((f64, f64), usize, u32)) -> f64 {
-    let orbit = &reference.orbit;
+    let orbit = reference.points();
     let radius_squared = m.orbit_radius * m.orbit_radius;
     let (mut zx, mut zy) = (zx, zy); //The difference from the reference orbit
     let mut at = at; //The step of the reference orbit that the difference is from
@@ -429,7 +494,7 @@ pub fn position_scaled(m: &MandelbrotSet, reference: &Reference, center: (f64, f
     if scaled <= SCALED_BELOW {
         return position(m, reference, center, (times_two_to(cx, -scaled), times_two_to(cy, -scaled)));
     }
-    let orbit = &reference.orbit;
+    let orbit = reference.points();
     let radius_squared = m.orbit_radius * m.orbit_radius;
     let (mut zx, mut zy, mut cx, mut cy, mut scaled) = (0.0_f64, 0.0_f64, cx, cy, scaled);
     let (mut at, mut step) = (0_usize, 0_u32);
@@ -519,12 +584,26 @@ pub fn render_positions(m: &MandelbrotSet, real: &str, imaginary: &str, scale: f
 /// (see `Reference`). False when `cancel` stopped it
 #[allow(clippy::too_many_arguments)] // The view, its size and samples, how to color, when to stop and where the layers go
 pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (depth, rotation): (Depth, f64), (width, height): (usize, usize), samples: u8, color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync),
-    approximate: bool, cancel: &std::sync::atomic::AtomicBool, mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
+    approximate: bool, cancel: &std::sync::atomic::AtomicBool, on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
+    render_layers_around(m, (&SharedOrbit::new(center_real, center_imaginary), (0.0, 0.0)), (depth, rotation), (width, height), samples, color_of, approximate, cancel, on_layer)
+}
+
+/// `render_layers` for a view around the center of a shared orbit (issue #263, see `SharedOrbit`): the frames of a dive share one.
+///
+/// The view's center is `(right, up)` scales (see `Depth`) from the orbit's, which it perturbs from; the orbit's center needs the bits of the view
+/// (`bits_for_depth`)
+#[allow(clippy::too_many_arguments)] // The orbit and the view, its size and samples, how to color, when to stop and where the layers go
+pub fn render_layers_around(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, (f64, f64)), (depth, rotation): (Depth, f64), (width, height): (usize, usize), samples: u8,
+    color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, cancel: &std::sync::atomic::AtomicBool, mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
     use std::sync::atomic::Ordering;
     //A pixel is `pixel · 2^depth.exponent`: the offsets are scaled by `2^-depth.exponent` (see `position_scaled`; within 64-bit floats' range bit for bit as before)
     let pixel = 2.5 * depth.mantissa / width as f64;
     let scaled = -depth.exponent;
-    let reference = Reference::new(m, (center_real, center_imaginary), times_two_to(max_offset(pixel, width, height), depth.exponent), approximate);
+    //(The view's center from the orbit's, in the same scaled units)
+    let shift = (right * depth.mantissa, up * depth.mantissa);
+    let reach = max_offset(pixel, width, height) + shift.0.hypot(shift.1);
+    let reference = Reference::of(m, orbit.orbit(m.max_iterations), times_two_to(reach, depth.exponent), approximate);
+    let (center_real, center_imaginary) = orbit.center();
     let center = (center_real.to_f64(), center_imaginary.to_f64());
     let threads = super::render_thread_count().max(1);
     let rows_per_thread = height.div_ceil(threads);
@@ -543,6 +622,7 @@ pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &
                         //The first sample in the middle of the pixel, the others at the jitter of the 64-bit renderer
                         let (jx, jy) = if sample == 0 { (0.5, 0.5) } else { super::jitter::sample_jitter(x, y, sample) };
                         let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), rotation);
+                        let offset = if shift == (0.0, 0.0) { offset } else { (offset.0 + shift.0, offset.1 + shift.1) };
                         let new = color_of(position_scaled(m, reference, center, offset, scaled));
                         for (total, channel) in sum.iter_mut().zip([new.red, new.green, new.blue]) {
                             *total += u32::from(channel);
@@ -624,6 +704,52 @@ mod tests {
             }
             n
         }).collect()
+    }
+
+    #[test]
+    fn a_shared_orbit_is_exactly_the_reference_orbit_however_far_it_was_computed() {
+        let bits = 400;
+        let (real, imaginary) = (Fixed::parse("-0.7436438870371587", bits).unwrap(), Fixed::parse("0.13182590420531198", bits).unwrap());
+        let shared = SharedOrbit::new(&real, &imaginary);
+        for iterations in [10, 1000, 300, 5000] {
+            let orbit = shared.orbit(iterations);
+            let expected = reference_orbit(&real, &imaginary, iterations);
+            assert_eq!(orbit[..expected.len()], expected[..], "{iterations} iterations");
+            assert!(orbit.len() >= expected.len());
+        }
+        //An escaping orbit stops where it escapes, however many steps are asked for
+        let outside = SharedOrbit::new(&Fixed::parse("0.3", bits).unwrap(), &Fixed::parse("0.6", bits).unwrap());
+        assert_eq!(*outside.orbit(100_000), reference_orbit(&Fixed::parse("0.3", bits).unwrap(), &Fixed::parse("0.6", bits).unwrap(), 100_000));
+    }
+
+    #[test]
+    fn the_frames_of_a_dive_perturb_from_one_shared_orbit_with_the_escape_counts_of_exact_arithmetic() {
+        //#263 step 3: the orbit of the destination (10⁻⁴⁰⁰, next to c = i), computed once with its bits, serves frames at every depth on the way, also
+        //frames whose center is off the destination's (the pan of a flight): every pixel has the count of its own orbit in exact arithmetic, with and without BLA
+        let mut m = MandelbrotSet::new(20_000, 2.0);
+        m.smooth_coloring = false;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (width, height) = (12, 8);
+        let bits = bits_for_depth(Depth::parse("1e-400").unwrap(), width);
+        let orbit = SharedOrbit::new(&Fixed::parse("3e-401", bits).unwrap(), &Fixed::parse(&format!("1.{}2", "0".repeat(400)), bits).unwrap());
+        let color_of = |position: f64| {
+            let count = position as u32;
+            crate::coloring::TrueColor::new((count & 255) as u8, (count >> 8 & 255) as u8, (count >> 16) as u8)
+        };
+        for (power, (right, up)) in [(-400_i64, (0.0, 0.0)), (-350, (0.0, 0.0)), (-308, (0.0, 0.0)), (-308, (3.7, -1.2)), (-200, (-0.4, 2.5)), (-30, (0.0, 0.0))] {
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let (real, imaginary) = (orbit.center().0.plus_scaled(right * depth.mantissa, depth.exponent), orbit.center().1.plus_scaled(up * depth.mantissa, depth.exponent));
+            let exact = exact_counts(&real.to_decimal(), &imaginary.to_decimal(), (1.0, power), (width, height), m.max_iterations);
+            for approximate in [false, true] {
+                let mut counts = Vec::new();
+                assert!(render_layers_around(&m, (&orbit, (right, up)), (depth, 0.0), (width, height), 1, &color_of, approximate, &cancel, |colors, _| {
+                    counts = colors.iter().map(|color| u32::from(color.red) | u32::from(color.green) << 8 | u32::from(color.blue) << 16).collect();
+                }));
+                assert_eq!(counts, exact, "10^{power}, ({right}, {up}) scales off, BLA {approximate}");
+            }
+            let distinct: std::collections::BTreeSet<u32> = exact.iter().copied().collect();
+            assert!(distinct.len() > if power == -400 { 5 } else { 1 }, "10^{power}: a view with structure: {distinct:?}");
+        }
     }
 
     #[test]
@@ -842,6 +968,63 @@ mod depth_timing {
             let mean = step_by_step.iter().sum::<f64>() / step_by_step.len() as f64;
             let moved = step_by_step.iter().zip(&with_bla).filter(|(a, b)| (*a - *b).abs() > 0.01).count();
             println!("10^{power}: {bits} bits, mean position {mean:.0}; step by step {:.0} ms, BLA {:.0} ms ({:.1}x), {moved} pixels moved by over 0.01", step_time.as_secs_f64() * 1000.0, bla_time.as_secs_f64() * 1000.0, step_time.as_secs_f64() / bla_time.as_secs_f64());
+        }
+    }
+
+    /// Times the frames of a dive into c = i (whose orbit never escapes, so it runs to the limit, as at a minibrot) from 10⁻⁵⁰ to 10⁻³⁰⁸ and to 10⁻¹⁰⁰⁰:
+    /// each frame with its own orbit against one shared orbit (issue #263, step 3), and how many pixels differ. Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn time_dives_with_one_orbit() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let color_of = |position: f64| {
+            let code = (position * 1000.0) as u32;
+            crate::coloring::TrueColor::new((code & 255) as u8, (code >> 8 & 255) as u8, (code >> 16) as u8)
+        };
+        for (deepest, iterations, (width, height)) in [(-308_i64, 50_000_u32, (480, 270)), (-308, 50_000, (1920, 1080)), (-1000, 50_000, (480, 270)), (-1000, 200_000, (480, 270))] {
+            let m = MandelbrotSet::new(iterations, 2.0);
+            let frames: Vec<Depth> = (0..12).map(|k| Depth::from_log2((-50.0 + (deepest as f64 + 50.0) * f64::from(k) / 11.0) * std::f64::consts::LOG2_10)).collect();
+            let (real, imaginary) = ("0", "1");
+            let started = std::time::Instant::now();
+            let mut own = Vec::new();
+            for depth in &frames {
+                let bits = bits_for_depth(*depth, width);
+                let (cx, cy) = (Fixed::parse(real, bits).unwrap(), Fixed::parse(imaginary, bits).unwrap());
+                render_layers(&m, &cx, &cy, (*depth, 0.0), (width, height), 1, &color_of, true, &cancel, |colors, _| own.push(colors.to_vec()));
+            }
+            let own_time = started.elapsed();
+            let started = std::time::Instant::now();
+            let bits = bits_for_depth(*frames.last().unwrap(), width);
+            let shared = SharedOrbit::new(&Fixed::parse(real, bits).unwrap(), &Fixed::parse(imaginary, bits).unwrap());
+            let mut one = Vec::new();
+            for depth in &frames {
+                render_layers_around(&m, (&shared, (0.0, 0.0)), (*depth, 0.0), (width, height), 1, &color_of, true, &cancel, |colors, _| one.push(colors.to_vec()));
+            }
+            let shared_time = started.elapsed();
+            let differ: usize = own.iter().zip(&one).map(|(a, b)| a.iter().zip(b).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count()).sum();
+            println!("to 10^{deepest}, {iterations} iterations, {width}x{height}, 12 frames: own orbits {:.0} ms, one orbit {:.0} ms ({:.1}x); {differ} of {} pixels differ (by over 0.001)",
+                own_time.as_secs_f64() * 1000.0, shared_time.as_secs_f64() * 1000.0, own_time.as_secs_f64() / shared_time.as_secs_f64(), width * height * 12);
+        }
+    }
+
+    /// Times the reference orbit and the BLA table of a view around c = i (whose orbit never escapes) at depths and limits (issue #263, step 3: the share of
+    /// a frame that one orbit for a whole dive saves). Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn time_reference_orbits() {
+        for power in [-100_i64, -308, -1000] {
+            for iterations in [50_000_u32, 500_000] {
+                let depth = Depth::parse(&format!("1e{power}")).unwrap();
+                let bits = bits_for_depth(depth, 1920);
+                let (cx, cy) = (Fixed::parse(&format!("3e{}", power - 1), bits).unwrap(), Fixed::parse(&format!("1.{}2", "0".repeat((-power) as usize)), bits).unwrap());
+                let started = std::time::Instant::now();
+                let orbit = reference_orbit(&cx, &cy, iterations);
+                let orbit_time = started.elapsed();
+                let started = std::time::Instant::now();
+                let table = Reference::table(&orbit, 1e-300, 2.0);
+                let table_time = started.elapsed();
+                println!("10^{power}, {iterations} iterations, {bits} bits: orbit {:.0} ms ({} steps), BLA table {:.1} ms ({} levels)", orbit_time.as_secs_f64() * 1000.0, orbit.len(), table_time.as_secs_f64() * 1000.0, table.len());
+            }
         }
     }
 }

@@ -243,7 +243,7 @@ struct Leg {
     pan: Option<(f64, f64)>,
     /// A straight leg (see `Route::Straight`): the natural logarithm of the zoom, `ln(to.scale / from.scale)`
     straight: Option<f64>,
-    /// A leg to a destination deeper than 64-bit floats (`to.scale` is then the smallest normal 64-bit float), see `deeper`
+    /// A leg in logarithms, to a destination that can be deeper than 64-bit floats (`to.scale` is then the smallest normal 64-bit float), see `deeper`
     deep: Option<DeepLeg>,
 }
 
@@ -265,7 +265,7 @@ impl Leg {
     /// This leg with its destination at the scale `e^ln_to` instead, deeper than 64-bit floats reach (issue #263): the same path, with its scales and the
     /// part of the pan still to go computed as logarithms and in units of the scale, which do not underflow (see `deep_at`)
     fn deeper(&self, ln_to: f64) -> Leg {
-        let (from, to) = (self.from, Camera { scale: f64::MIN_POSITIVE, ..self.to });
+        let (from, to) = (self.from, Camera { scale: ln_to.exp().max(f64::MIN_POSITIVE), ..self.to });
         let (w0, ln_from) = (from.scale, from.scale.ln());
         let u1 = (to.x - from.x).hypot(to.y - from.y);
         if self.straight.is_some() {
