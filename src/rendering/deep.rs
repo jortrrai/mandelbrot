@@ -9,6 +9,12 @@
 //! when the pixel's orbit comes closer to 0 than its difference from the center's orbit (`|Z + z| < |z|`), the difference becomes the pixel's orbit itself
 //! and the center's orbit starts again from its beginning. One reference orbit then serves the whole view.
 //!
+//! So there are no glitches to detect and fix (issue #263, step 4): next to the boundary points i and -i, at depths from 10⁻⁵⁰ to 10⁻⁵⁰⁰ and with the
+//! orbit at the view's center or 37 or 1000 views away from it, every pixel has the escape count of exact arithmetic, with and without BLA (the tests and
+//! `survey_glitches`). The one known difference is not one of perturbation: at the tip c = -2, the only point of the set on the circle of radius 2 where
+//! orbits escape, deep views cross that circle, and 64-bit floats cannot tell on which side of it the first points of an orbit are (`|c|²` rounds to
+//! exactly 4), as in the 64-bit renderer: pixels just outside it, which exact arithmetic sees escape at once, go on like those inside.
+//!
 //! The colors use the same smooth iteration count as the 64-bit renderer (see `MandelbrotSet::smooth_position`), so a deep view looks like a shallow one.
 
 use num::bigint::BigInt;
@@ -683,7 +689,7 @@ mod tests {
 
     /// The escape counts of the pixels of a `width` x `height` view of `depth` around `(real, imaginary)` in exact fixed-point arithmetic (the reference that
     /// perturbation is checked against): every pixel's own orbit, step by step, until it leaves radius 2
-    fn exact_counts(real: &str, imaginary: &str, (mantissa, power): (f64, i64), (width, height): (usize, usize), limit: u32) -> Vec<u32> {
+    pub(super) fn exact_counts(real: &str, imaginary: &str, (mantissa, power): (f64, i64), (width, height): (usize, usize), limit: u32) -> Vec<u32> {
         let bits = bits_for_depth(Depth::parse(&format!("{mantissa}e{power}")).unwrap(), width) + 32;
         let (center_x, center_y) = (Fixed::parse(real, bits).unwrap(), Fixed::parse(imaginary, bits).unwrap());
         let four = Fixed::parse("4", bits).unwrap();
@@ -749,6 +755,36 @@ mod tests {
             }
             let distinct: std::collections::BTreeSet<u32> = exact.iter().copied().collect();
             assert!(distinct.len() > if power == -400 { 5 } else { 1 }, "10^{power}: a view with structure: {distinct:?}");
+        }
+    }
+
+    #[test]
+    fn perturbing_from_an_orbit_far_off_the_view_has_no_glitches() {
+        //#263 step 4: rebasing (see `position_from`) leaves no glitches to detect: views next to i and -i at 10⁻³⁰⁸, perturbed from an orbit 37 and 1000
+        //views away (whose orbit escapes long before the pixels'), have the escape counts of exact arithmetic, with and without BLA (`survey_glitches` looks
+        //wider)
+        let mut m = MandelbrotSet::new(20_000, 2.0);
+        m.smooth_coloring = false;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let color_of = |position: f64| {
+            let count = position as u32;
+            crate::coloring::TrueColor::new((count & 255) as u8, (count >> 8 & 255) as u8, (count >> 16) as u8)
+        };
+        let (width, height) = (12, 8);
+        let depth = Depth::parse("1e-308").unwrap();
+        let bits = bits_for_depth(depth, width) + 16;
+        for (real, imaginary) in [(String::from("3e-309"), format!("1.{}2", "0".repeat(308))), (String::from("-2e-309"), format!("-1.{}3", "0".repeat(308)))] {
+            let exact = exact_counts(&real, &imaginary, (1.0, -308), (width, height), m.max_iterations);
+            for (right, up) in [(37.0, -11.0), (-1000.0, 400.0)] {
+                let orbit = SharedOrbit::new(&Fixed::parse(&real, bits).unwrap().plus_scaled(right * depth.mantissa, depth.exponent), &Fixed::parse(&imaginary, bits).unwrap().plus_scaled(up * depth.mantissa, depth.exponent));
+                for approximate in [false, true] {
+                    let mut counts = Vec::new();
+                    render_layers_around(&m, (&orbit, (-right, -up)), (depth, 0.0), (width, height), 1, &color_of, approximate, &cancel, |colors, _| {
+                        counts = colors.iter().map(|color| u32::from(color.red) | u32::from(color.green) << 8 | u32::from(color.blue) << 16).collect();
+                    });
+                    assert_eq!(counts, exact, "next to {imaginary:.4}, the orbit ({right}, {up}) views off, BLA {approximate}");
+                }
+            }
         }
     }
 
@@ -1005,6 +1041,54 @@ mod depth_timing {
             println!("to 10^{deepest}, {iterations} iterations, {width}x{height}, 12 frames: own orbits {:.0} ms, one orbit {:.0} ms ({:.1}x); {differ} of {} pixels differ (by over 0.001)",
                 own_time.as_secs_f64() * 1000.0, shared_time.as_secs_f64() * 1000.0, own_time.as_secs_f64() / shared_time.as_secs_f64(), width * height * 12);
         }
+    }
+
+    /// Looks for glitches (issue #263, step 4): views next to the exact boundary points i, -i and -2 at depths to 10⁻⁵⁰⁰, perturbed from an orbit at their
+    /// center and from one 37 and 1000 views away (as the frames of a flight are, see `SharedOrbit`), with and without BLA, against exact arithmetic.
+    /// Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a survey, run by hand (about a minute)"]
+    fn survey_glitches() {
+        let mut m = MandelbrotSet::new(20_000, 2.0);
+        m.smooth_coloring = false;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let color_of = |position: f64| {
+            let count = position as u32;
+            crate::coloring::TrueColor::new((count & 255) as u8, (count >> 8 & 255) as u8, (count >> 16) as u8)
+        };
+        let (width, height) = (16, 12);
+        let mut total = (0, 0);
+        for power in [-50_i64, -150, -308, -500] {
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let bits = bits_for_depth(depth, width) + 16;
+            let digits = (-power) as usize;
+            //Next to the point: a few views off it, so the view shows the structure around it
+            let points = [("i", format!("3e{}", power - 1), format!("1.{}2", "0".repeat(digits))), ("-i", format!("-2e{}", power - 1), format!("-1.{}3", "0".repeat(digits))),
+                ("-2", format!("-1.{}9", "9".repeat(digits)), format!("4e{}", power - 1))];
+            for (name, real, imaginary) in &points {
+                let exact = super::tests::exact_counts(real, imaginary, (1.0, power), (width, height), m.max_iterations);
+                let distinct: std::collections::BTreeSet<u32> = exact.iter().copied().collect();
+                for (right, up) in [(0.0, 0.0), (37.0, -11.0), (-1000.0, 400.0)] {
+                    //The orbit's center (right, up) scales from the view's: the view is (-right, -up) from it
+                    let (center_real, center_imaginary) = (Fixed::parse(real, bits).unwrap().plus_scaled(right * depth.mantissa, depth.exponent), Fixed::parse(imaginary, bits).unwrap().plus_scaled(up * depth.mantissa, depth.exponent));
+                    let orbit = SharedOrbit::new(&center_real, &center_imaginary);
+                    for approximate in [false, true] {
+                        let mut counts = Vec::new();
+                        render_layers_around(&m, (&orbit, (-right, -up)), (depth, 0.0), (width, height), 1, &color_of, approximate, &cancel, |colors, _| {
+                            counts = colors.iter().map(|color| u32::from(color.red) | u32::from(color.green) << 8 | u32::from(color.blue) << 16).collect();
+                        });
+                        let differ = counts.iter().zip(&exact).filter(|(a, b)| a != b).count();
+                        total = (total.0 + differ, total.1 + exact.len());
+                        if differ > 0 {
+                            println!("10^{power} near {name}, orbit ({right}, {up}) views off, BLA {approximate}: {differ} of {} pixels differ; {:?} against {:?}", exact.len(),
+                                counts.iter().zip(&exact).filter(|(a, b)| a != b).take(4).collect::<Vec<_>>(), distinct.len());
+                        }
+                    }
+                }
+                println!("10^{power} near {name}: {} distinct counts, from {} to {}", distinct.len(), distinct.first().unwrap(), distinct.last().unwrap());
+            }
+        }
+        println!("{} of {} pixels differ from exact arithmetic", total.0, total.1);
     }
 
     /// Times the reference orbit and the BLA table of a view around c = i (whose orbit never escapes) at depths and limits (issue #263, step 3: the share of
