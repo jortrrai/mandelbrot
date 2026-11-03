@@ -169,6 +169,9 @@ pub struct GpuIterator {
     /// its sums the CPU's bit for bit
     colored: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
     colored_works: std::sync::atomic::AtomicBool,
+    /// The adaptive mask on the GPU (`gpu_mask.wgsl`), used only when the self-test found it the CPU's bit for bit
+    mask: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
+    mask_works: std::sync::atomic::AtomicBool,
     layout: wgpu::BindGroupLayout,
     name: String,
     /// The buffers of finished dispatches, for the next ones (several renders feed the GPU at once)
@@ -227,6 +230,24 @@ impl GpuIterator {
         let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?, pipeline(include_str!("gpu_f32.wgsl"))?);
         //(Without it the CPU computes the points of the exact loop, as before)
         let exact_pixels = pipeline(&exact_pixels_source()).ok();
+        //(Without it the CPU computes the adaptive mask, as before)
+        let mask = {
+            let entries = [entry(0, true), entry(1, true), entry(2, true), entry(3, false), entry(4, false)];
+            let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("mask"), entries: &entries });
+            let mask_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("mask"), bind_group_layouts: &[Some(&mask_layout)], immediate_size: 0 });
+            spirv_without_contraction(include_str!("gpu_mask.wgsl")).ok().map(|words| {
+                //SAFETY: the SPIR-V is naga's validated output of the shader, with only NoContraction decorations added
+                let shader = unsafe {
+                    device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+                        label: Some("mask"),
+                        entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint { name: "main".into(), workgroup_size: (64, 1, 1) }]),
+                        spirv: Some(Cow::Owned(words)),
+                        ..Default::default()
+                    })
+                };
+                (device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mask"), layout: Some(&mask_pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }), mask_layout)
+            })
+        };
         //(Without it the CPU colors the samples of the fast loop, as before)
         let colored = {
             let entries = [entry(0, true), entry(1, true), entry(2, false), entry(3, false), entry(4, true), entry(5, false)];
@@ -247,7 +268,7 @@ impl GpuIterator {
             })
         };
         let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
-        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), layout, name, spare: std::sync::Mutex::new(Vec::new()) })
+        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), mask, mask_works: std::sync::atomic::AtomicBool::new(false), layout, name, spare: std::sync::Mutex::new(Vec::new()) })
     }
 
     /// The name and the backend of the GPU
@@ -412,6 +433,89 @@ impl GpuIterator {
         self.colored_works.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether the GPU computes the adaptive mask (`adaptive_mask`): when the self-test found it the CPU's, bit for bit
+    pub(crate) fn mask_works(&self) -> bool {
+        self.mask_works.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The adaptive mask of a `width` x `height` render without a region (`adaptive::mask_where` with every pixel inside): with `first` the colors of the
+    /// first samples and `second` those after the uniform samples
+    ///
+    /// # Errors
+    /// The GPU failed, or there is no such shader
+    pub(crate) fn adaptive_mask(&self, first: &[TrueColor], second: &[TrueColor], (width, height): (usize, usize), threshold: u32) -> Result<Vec<bool>, String> {
+        let (pipeline, layout) = self.mask.as_ref().ok_or_else(|| String::from("the mask shader did not compile"))?;
+        let pixels = width * height;
+        if first.len() != pixels || second.len() != pixels {
+            return Err(String::from("the colors do not fit the size"));
+        }
+        let too_large = |_| String::from("too large");
+        let words = |colors: &[TrueColor]| {
+            let mut bytes = bytemuck::cast_slice::<TrueColor, u8>(colors).to_vec();
+            bytes.resize(bytes.len().div_ceil(4) * 4 + 4, 0);
+            bytes
+        };
+        let _gate = gate();
+        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
+        let buffer_with = |label: &str, bytes: &[u8], usage: wgpu::BufferUsages| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (bytes.len() as u64).max(16), usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            self.queue.write_buffer(&buffer, 0, bytes);
+            buffer
+        };
+        let (w, h, t) = (u32::try_from(width).map_err(too_large)?, u32::try_from(height).map_err(too_large)?, threshold);
+        let storage = wgpu::BufferUsages::STORAGE;
+        let params = [buffer_with("mask params 0", bytemuck::cast_slice(&[w, h, t, 0_u32]), storage), buffer_with("mask params 1", bytemuck::cast_slice(&[w, h, t, 1_u32]), storage)];
+        let (first, second) = (buffer_with("mask first", &words(first), storage), buffer_with("mask second", &words(second), storage));
+        let size = (pixels as u64 * 4).max(16);
+        let marked = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("marked"), size, usage: storage, mapped_at_creation: false });
+        let mask = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("mask"), size, usage: storage | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("mask read"), size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for params in &params {
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout, entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: first.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: second.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: marked.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: mask.as_entire_binding() },
+            ] });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(u32::try_from(pixels.div_ceil(64)).unwrap_or(u32::MAX).clamp(1, MASK_WORKGROUPS), 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&mask, 0, &read, 0, size);
+        let index = self.queue.submit([encoder.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+        errors.into_iter().flatten().next().map_or(Ok(()), |error| Err(format!("{}: {error}", self.name)))?;
+        self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
+        let flags = {
+            let view = read.slice(..).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
+            bytemuck::cast_slice::<u8, u32>(&view)[..pixels].iter().map(|flag| *flag != 0).collect()
+        };
+        read.unmap();
+        Ok(flags)
+    }
+
+    /// Whether the GPU's adaptive mask is the CPU's for a 61 x 37 image of random colors with features of all sizes, at several thresholds
+    fn check_mask(&self) -> Result<bool, String> {
+        let (width, height) = (61, 37);
+        let mut seed = 777_u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as u8
+        };
+        let second: Vec<TrueColor> = (0..width * height).map(|index| if index % 5 < 2 { TrueColor::new(next(), next(), next()) } else { TrueColor::new(9, 99, 199) }).collect();
+        let first: Vec<TrueColor> = second.iter().map(|color| if next() < 30 { TrueColor::new(color.red, next(), color.blue) } else { *color }).collect();
+        for threshold in [0, 12, 90, 400] {
+            if self.adaptive_mask(&first, &second, (width, height), threshold)? != super::adaptive::mask_where(width, height, &|_, _| true, &first, &second, threshold) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Whether the fast loop colors and sums on the GPU (`submit_colored`): when the self-test found its sums those of the CPU's coloring, bit for bit
     pub(crate) fn colored_work(&self) -> bool {
         self.colored_works.load(std::sync::atomic::Ordering::Relaxed)
@@ -534,6 +638,9 @@ impl GpuIterator {
             if index == 0 || self.exact_pixels_work() {
                 self.exact_pixels_works.store(self.check_exact_pixels(&plane, &m).unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
             }
+            if index == 0 {
+                self.mask_works.store(self.check_mask().unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
+            }
             if index == 0 || self.colored_work() {
                 self.colored_works.store(self.check_colored(&plane, &m).unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
             }
@@ -567,6 +674,9 @@ const EXACT_OUTCOME_CONTINUED: &str = "            var extra = 0u;
                 }
             }
             outcomes[index] = Outcome(select(0.0lf, zx, escaped), select(0.0lf, zy, escaped), iterations, select(0u, 1u | (extra << 1u), escaped && iterations < max_iterations));";
+
+/// The workgroups of 64 invocations of a pass of the mask: each invocation takes pixels a whole dispatch apart (see `gpu_mask.wgsl`)
+const MASK_WORKGROUPS: u32 = 4096;
 
 /// The sums of a frame on the GPU and the colors of the positions, see `GpuIterator::color_sums`
 pub(crate) struct ColorSums {
@@ -717,6 +827,7 @@ mod tests {
         }
         no_contraction_everywhere(&exact_pixels_source());
         no_contraction_everywhere(&colored_source());
+        super::spirv_without_contraction(include_str!("gpu_mask.wgsl")).expect("the mask shader compiles");
     }
 
     fn no_contraction_everywhere(source: &str) {

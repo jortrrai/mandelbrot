@@ -349,7 +349,10 @@ impl<'a> Render<'a> {
             if let Some(adaptive) = adaptive.filter(|_| sample == ADAPTIVE_UNIFORM_SAMPLES) {
                 //Every pixel has its uniform samples now: mark the pixels that need more, from the colors of their first two samples
                 let counts = &state.counts;
-                let new_mask = mask_where(width, height, &|x, y| counts[y * width + x] != FOREIGN, &state.first, &state.second, adaptive.threshold);
+                //(A render on the GPU alone without a region: the GPU computes the mask, bit for bit the CPU's, while the CPU threads are busy with other frames, #257)
+                let on_gpu = gpu.filter(|(gpu, _)| cpu_threads == 0 && !track && region.is_none() && gpu.mask_works())
+                    .and_then(|(gpu, _)| gpu.adaptive_mask(&state.first, &state.second, (width, height), adaptive.threshold).ok());
+                let new_mask = on_gpu.unwrap_or_else(|| mask_where(width, height, &|x, y| counts[y * width + x] != FOREIGN, &state.first, &state.second, adaptive.threshold));
                 if track {
                     for (count, _) in counts.iter().zip(&new_mask).filter(|(_, marked)| **marked) {
                         masked[usize::from(*count).min(65)] += 1;
