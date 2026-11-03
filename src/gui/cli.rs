@@ -6,7 +6,7 @@
 //! `{"error": …}` on stderr and exits with 1 (2 for a command that is not understood).
 //!
 //! ```text
-//! mandelbrot video new --to "Fractal Flower" [--from <place>] [--music song.mp3 [--strength 0.5]] [--length 3:20 | --speed 100]
+//! mandelbrot video new --to "Fractal Flower" [--from <place>] [--music song.mp3] [--length 3:20 | --speed 100]
 //!                      [--size 4K | 3840x2160] [--fps 60] [--samples 32] [--shutter 180] [--pace Cinematic] [--route Dive] [--quality "Very High"]
 //! mandelbrot video start <id>      render it here (in the foreground; with nohup or systemd for long renders), from its chunks if it has some
 //! mandelbrot video pause <id>      ask the render to stop after its current chunk (start or resume continue it)
@@ -241,9 +241,6 @@ fn new_job(jobs: &Path, options: &[(String, String)]) -> Result<Value, Failure> 
             return Err(failed(format!("the music {music:?} is not a file")));
         }
         (app.music_path, app.follow_music) = (music.to_string(), true);
-        if let Some(strength) = number::<f64>(options, "strength")? {
-            app.music_strength = strength.clamp(0.0, 1.0);
-        }
     } else {
         app.follow_music = false;
     }

@@ -69,10 +69,6 @@ pub(super) struct Settings {
     video_fit_length: Option<bool>,
     music_path: Option<String>,
     follow_music: Option<bool>,
-    music_strength: Option<f64>,
-    /// *Pulse on the beat* and how far it zooms (issue #221)
-    beat_pulse: Option<bool>,
-    pulse_strength: Option<f64>,
     video_length: Option<[String; 3]>,
     video_quality: Option<String>,
     video_playback: Option<String>,
@@ -190,9 +186,6 @@ impl MandelbrotApp {
             video_fit_length: Some(self.video_fit_length),
             music_path: Some(self.music_path.clone()),
             follow_music: Some(self.follow_music),
-            music_strength: Some(self.music_strength),
-            beat_pulse: Some(self.beat_pulse),
-            pulse_strength: Some(self.pulse_strength),
             video_length: Some(self.video_length.clone()),
             video_quality: Some(self.video_quality.name().to_string()),
             video_playback: Some(self.video_playback.name().to_string()),
@@ -333,13 +326,6 @@ impl MandelbrotApp {
         }
         if let Some(follow) = settings.follow_music {
             self.follow_music = follow;
-        }
-        if let Some(strength) = settings.music_strength.filter(|strength| (0.0..=1.0).contains(strength)) {
-            self.music_strength = strength;
-        }
-        set(settings.beat_pulse, &mut self.beat_pulse);
-        if let Some(strength) = settings.pulse_strength.filter(|strength| super::music::PULSE_STRENGTHS.contains(strength)) {
-            self.pulse_strength = strength;
         }
         if let Some(length) = settings.video_length.clone() {
             self.video_length = length;

@@ -278,13 +278,9 @@ pub struct MandelbrotApp {
     song_input: String,
     song_search: Option<std::sync::mpsc::Receiver<Result<Vec<songs::Recording>, String>>>,
     song_results: Vec<songs::Recording>,
-    /// The audio track a video follows (see `music`): its path, whether videos follow it, how strongly, and its length (read once per path)
+    /// The audio track of videos (see `music`): its path, whether videos have it, and its length (read once per path)
     music_path: String,
     follow_music: bool,
-    music_strength: f64,
-    /// Whether videos with music pulse on its kicks, and how far (see `music::BeatPulse`, issue #221)
-    beat_pulse: bool,
-    pulse_strength: f64,
     music_length: Option<(String, Option<std::time::Duration>)>,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
@@ -508,9 +504,6 @@ impl MandelbrotApp {
             song_results: Vec::new(),
             music_path: String::new(),
             follow_music: false,
-            music_strength: 0.5,
-            beat_pulse: false,
-            pulse_strength: music::PULSE_STRENGTH,
             music_length: None,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
