@@ -198,6 +198,25 @@ impl MandelbrotApp {
         }
     }
 
+    /// Takes the GPU that was opened in the background (see `gpu_opening`), or logs why there is none
+    fn gpu_opened(&mut self, opened: Result<rendering::gpu::GpuIterator, String>) {
+        self.gpu_opening = None;
+        match opened {
+            Ok(gpu) => {
+                self.log(format!("GPU: {}, checked against the CPU: it computes the same samples, bit for bit", gpu.name()));
+                self.gpu = Some(Arc::new(gpu));
+            }
+            Err(reason) => self.log(format!("GPU not used: {reason}")),
+        }
+    }
+
+    /// Waits until the GPU that opens in the background is open (or known not to work): for the command line, whose video would otherwise start without it
+    pub(super) fn wait_for_gpu(&mut self) {
+        if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.recv().ok()) {
+            self.gpu_opened(opened);
+        }
+    }
+
     /// Takes the messages of the background job: intermediate images and the final result
     #[allow(clippy::too_many_lines)] // One match over every message of a job
     pub(super) fn poll_job(&mut self) {
@@ -210,14 +229,7 @@ impl MandelbrotApp {
             Self::release_free_memory();
         }
         if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
-            self.gpu_opening = None;
-            match opened {
-                Ok(gpu) => {
-                    self.log(format!("GPU: {}, checked against the CPU: it computes the same samples, bit for bit", gpu.name()));
-                    self.gpu = Some(Arc::new(gpu));
-                }
-                Err(reason) => self.log(format!("GPU not used: {reason}")),
-            }
+            self.gpu_opened(opened);
         }
         loop {
             let Some(next) = self.next_job_message() else { return };

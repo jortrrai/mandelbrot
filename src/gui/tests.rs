@@ -3818,3 +3818,13 @@ fn a_drag_with_a_settings_file_keeps_the_layers() {
         println!("{name} after the drag back: {:?}", app.log.last());
     }
 }
+
+#[test]
+fn the_command_line_waits_for_the_gpu_before_a_video() {
+    //The GPU opens in the background; a video takes it when it starts, so the command line (which starts at once) waits for it: before, its videos ran on the CPU
+    let config = crate::Config { gpu: true, ..Config::sized(64, 48, 50, 1) };
+    let mut app = MandelbrotApp::new(&config);
+    app.wait_for_gpu();
+    assert!(app.gpu_opening.is_none(), "known by now");
+    assert_eq!(app.gpu.is_some(), rendering::gpu::GpuIterator::new().is_ok(), "{:?}", app.log.last());
+}
