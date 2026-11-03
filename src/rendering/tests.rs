@@ -1034,3 +1034,24 @@ fn the_gpu_colors_and_sums_its_samples_as_the_cpu_does() {
         assert_eq!(differ, 0, "{view:?}");
     }
 }
+
+#[test]
+fn the_gpus_adaptive_mask_is_the_cpus() {
+    //#257: the GPU's adaptive mask passes its self-test, and a GPU-only frame with it (exact math) is the CPU's frame, bit for bit
+    let Ok(gpu) = super::gpu::GpuIterator::new() else {
+        eprintln!("no suitable GPU: skipped");
+        return;
+    };
+    assert!(gpu.mask_works(), "the self-test of the GPU's mask passes");
+    let (width, height) = (333, 187);
+    let mut plane = ComplexPlane::new(width, height);
+    plane.set_view(&crate::complex_plane::View::new(-0.7498, 0.0203, 0.0005));
+    let m = MandelbrotSet::new(2000, 2.0);
+    let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+    let adaptive = Some(super::AdaptiveSampling::default());
+    let mut cpu = Vec::new();
+    assert!(Render::new(&plane, &m, width, height, coloring).supersampling(16).adaptive(adaptive).run(|layer, _| cpu = layer.to_vec()));
+    let mut on_gpu = Vec::new();
+    assert!(Render::new(&plane, &m, width, height, coloring).supersampling(16).adaptive(adaptive).gpu(Some((&gpu, std::time::Duration::ZERO))).on_the_gpu_only().run(|layer, pass| if pass >= 16 { on_gpu = layer.to_vec(); }));
+    assert!(cpu.iter().zip(&on_gpu).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)));
+}
