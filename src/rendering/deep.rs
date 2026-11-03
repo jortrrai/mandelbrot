@@ -802,14 +802,10 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
                     }).collect();
                     //The smooth position of an escaped orbit as `position_from` and `position_scaled` end (in the scaled phase: of the center); the GPU failed:
                     //these on the CPU
-                    let positions = gpu.deep_outcomes(m, &table.input(reference.points()), &offsets, if plain { 0 } else { scaled }).map_or_else(|_| cpu_positions(range.clone()), |outcomes| offsets.iter().zip(&outcomes).map(|(&(cx, cy), outcome)| {
-                        let (dcx, dcy) = if plain { (cx, cy) } else { (times_two_to(cx, -scaled), times_two_to(cy, -scaled)) };
-                        match outcome.escaped {
-                            1 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)),
-                            2 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), center),
-                            _ => f64::from(m.max_iterations),
-                        }
-                    }).collect());
+                    let scale = if plain { 0 } else { scaled };
+                    let positions = gpu.deep_outcomes(m, &table.input(reference.points()), &offsets, scale).map_or_else(|_| cpu_positions(range.clone()), |outcomes| {
+                        offsets.iter().zip(&outcomes).map(|(&offset, outcome)| position_of_outcome(m, center, offset, scale, outcome)).collect()
+                    });
                     let _ = sender.send((range.start, positions));
                 });
             }
@@ -845,6 +841,17 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
     true
 }
 
+/// The smooth position of the GPU's outcome for the offset `offset` (scaled by `2^scaled`, 0: plain) from `center`, as `position_from` and
+/// `position_scaled` end: of the pixel's point when it escaped, of the center when it escaped in the scaled phase (where the two are the same to the last
+/// bit), the limit when it did not
+fn position_of_outcome(m: &MandelbrotSet, center: (f64, f64), (cx, cy): (f64, f64), scaled: i32, outcome: &super::gpu::DeepOutcome) -> f64 {
+    match outcome.escaped {
+        1 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + times_two_to(cx, -scaled), center.1 + times_two_to(cy, -scaled))),
+        2 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), center),
+        _ => f64::from(m.max_iterations),
+    }
+}
+
 /// Whether `gpu`'s deep loop (`gpu_deep.wgsl`) gives every pixel the CPU's position, bit for bit: views of 10⁻³⁰ and 10⁻²⁰⁰ next to c = i, of 10⁻²⁰ in
 /// the seahorse valley and of 10⁻⁶⁰ at the tip c = -2 (across the escape circle, see `outside`), with and without bilinear approximation, smooth and not (the GPU's self-test, see `GpuIterator::deep_works`)
 pub(crate) fn gpu_agrees(gpu: &super::gpu::GpuIterator) -> bool {
@@ -875,15 +882,9 @@ pub(crate) fn gpu_agrees(gpu: &super::gpu::GpuIterator) -> bool {
             let reference = Reference::new(&m, (&cx, &cy), times_two_to(max_offset(pixel, width, height), depth.exponent), approximate);
             let table = reference.gpu_table();
             let Ok(outcomes) = gpu.deep_outcomes(&m, &table.input(reference.points()), &offsets, if plain { 0 } else { scaled }) else { return false };
-            let agrees = offsets.iter().zip(&outcomes).all(|(&(cx, cy), outcome)| {
-                let (dcx, dcy) = if plain { (cx, cy) } else { (times_two_to(cx, -scaled), times_two_to(cy, -scaled)) };
-                let gpu_position = match outcome.escaped {
-                    1 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)),
-                    2 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), center),
-                    _ => f64::from(m.max_iterations),
-                };
-                let cpu_position = if plain { position(&m, &reference, center, (cx, cy)) } else { position_scaled(&m, &reference, center, (cx, cy), scaled) };
-                gpu_position.to_bits() == cpu_position.to_bits()
+            let agrees = offsets.iter().zip(&outcomes).all(|(&offset, outcome)| {
+                let cpu_position = if plain { position(&m, &reference, center, offset) } else { position_scaled(&m, &reference, center, offset, scaled) };
+                position_of_outcome(&m, center, offset, if plain { 0 } else { scaled }, outcome).to_bits() == cpu_position.to_bits()
             });
             if !agrees || outcomes.len() != offsets.len() {
                 return false;
