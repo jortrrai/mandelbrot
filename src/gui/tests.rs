@@ -4003,3 +4003,31 @@ fn the_command_line_waits_for_the_gpu_before_a_video() {
     assert!(app.gpu_opening.is_none(), "known by now");
     assert_eq!(app.gpu.is_some(), rendering::gpu::GpuIterator::new().is_ok(), "{:?}", app.log.last());
 }
+
+#[test]
+#[ignore = "a measurement of the GPU alone against the CPU alone on one view, run by hand with --release"]
+fn gpu_alone_against_cpu_alone_on_a_view() {
+    //MANDELBROT_VIEW="real imag scale iterations width height samples" (default: Frost on the Shoreline, 1920 x 1080, 8 samples)
+    let setup = std::env::var("MANDELBROT_VIEW").unwrap_or_else(|_| String::from("-0.6604166666666667 0.44375 0.1 3992 1920 1080 8"));
+    let fields: Vec<&str> = setup.split_whitespace().collect();
+    let (x, y, scale, iterations): (f64, f64, f64, u32) = (fields[0].parse().unwrap(), fields[1].parse().unwrap(), fields[2].parse().unwrap(), fields[3].parse().unwrap());
+    let (width, height, samples): (usize, usize, u8) = (fields[4].parse().unwrap(), fields[5].parse().unwrap(), fields[6].parse().unwrap());
+    let gpu = rendering::gpu::GpuIterator::new().unwrap();
+    let mut plane = ComplexPlane::new(width, height);
+    plane.set_view(&crate::complex_plane::View::new(x, y, scale));
+    let m = crate::mandelbrot_set::MandelbrotSet::new(iterations, 2.0);
+    let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+    for (label, mode) in [("CPU alone", 0), ("GPU alone (fast math)", 1), ("CPU and GPU (fast math)", 2), ("CPU alone", 0), ("GPU alone (fast math)", 1), ("CPU and GPU (fast math)", 2)] {
+        let points = rendering::GPU_FEED.points.load(Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let render = rendering::Render::new(&plane, &m, width, height, coloring).supersampling(samples);
+        let render = match mode {
+            1 => render.gpu(Some((&gpu, Duration::ZERO))).fast_gpu(true).on_the_gpu_only(),
+            2 => render.gpu(Some((&gpu, Duration::ZERO))).fast_gpu(true),
+            _ => render,
+        };
+        assert!(render.run(|_, _| {}));
+        let seconds = started.elapsed().as_secs_f64();
+        println!("{label}: {seconds:.2} s, {:.0} M samples/s, GPU points {}", (width * height * usize::from(samples)) as f64 / seconds / 1e6, rendering::GPU_FEED.points.load(Ordering::Relaxed) - points);
+    }
+}
