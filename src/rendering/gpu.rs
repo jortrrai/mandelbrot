@@ -101,6 +101,29 @@ pub(crate) struct Submitted {
     index: wgpu::SubmissionIndex,
 }
 
+/// The workgroups of 64 invocations of a composed frame: each invocation composes pixels a whole dispatch apart (see `gpu_compose.wgsl`)
+const COMPOSE_WORKGROUPS: u32 = 4096;
+
+/// Where a tap of a composed frame falls along one side of a keyframe: the two pixels it is between and its share of the second (see `gui::dive_keyframes`)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ComposeTap {
+    /// The pixel before the tap
+    pub first: u32,
+    /// The pixel after the tap (the same at the edge)
+    pub second: u32,
+    /// The share of the second pixel
+    pub share: f32,
+}
+
+/// The keyframe images of a dive on the GPU, see `GpuIterator::upload_images`
+pub struct ComposeImages {
+    buffer: wgpu::Buffer,
+    /// The size of a keyframe
+    width: u32,
+    pixels: u32,
+}
+
 /// The buffers of one dispatch and their bind group, kept for the next dispatch (see `GpuIterator::buffers`): creating them for every dispatch (and wgpu
 /// clearing the new outcome buffers) took a feeder of the GPU half a millisecond per dispatch, 100,000 times in a 4K video (#212)
 struct Buffers {
@@ -173,6 +196,9 @@ pub struct GpuIterator {
     mask: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
     mask_works: std::sync::atomic::AtomicBool,
     layout: wgpu::BindGroupLayout,
+    /// The frames of dives composed from keyframes (`gpu_compose.wgsl`, see `compose`), with their own buffers
+    compose: wgpu::ComputePipeline,
+    compose_layout: wgpu::BindGroupLayout,
     name: String,
     /// The buffers of finished dispatches, for the next ones (several renders feed the GPU at once)
     spare: std::sync::Mutex<Vec<Buffers>>,
@@ -214,7 +240,7 @@ impl GpuIterator {
         let entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None }, count: None };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("mandelbrot"), entries: &[entry(0, true), entry(1, true), entry(2, false), entry(3, false)] });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("mandelbrot"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let pipeline = |source: &str| -> Result<wgpu::ComputePipeline, String> {
+        let pipeline = |source: &str, pipeline_layout: &wgpu::PipelineLayout| -> Result<wgpu::ComputePipeline, String> {
             let words = spirv_without_contraction(source)?;
             //SAFETY: the SPIR-V is naga's validated output of the shader, with only NoContraction decorations added
             let shader = unsafe {
@@ -225,11 +251,14 @@ impl GpuIterator {
                     ..Default::default()
                 })
             };
-            Ok(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mandelbrot"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }))
+            Ok(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mandelbrot"), layout: Some(pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }))
         };
-        let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?, pipeline(include_str!("gpu_f32.wgsl"))?);
+        let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"), &pipeline_layout)?, pipeline(include_str!("gpu_fast.wgsl"), &pipeline_layout)?, pipeline(include_str!("gpu_f32.wgsl"), &pipeline_layout)?);
+        let compose_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("compose"), entries: &[entry(0, true), entry(1, true), entry(2, true), entry(3, true), entry(4, false)] });
+        let compose_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("compose"), bind_group_layouts: &[Some(&compose_layout)], immediate_size: 0 });
+        let compose = pipeline(include_str!("gpu_compose.wgsl"), &compose_pipeline_layout)?;
         //(Without it the CPU computes the points of the exact loop, as before)
-        let exact_pixels = pipeline(&exact_pixels_source()).ok();
+        let exact_pixels = pipeline(&exact_pixels_source(), &pipeline_layout).ok();
         //(Without it the CPU computes the adaptive mask, as before)
         let mask = {
             let entries = [entry(0, true), entry(1, true), entry(2, true), entry(3, false), entry(4, false)];
@@ -268,7 +297,90 @@ impl GpuIterator {
             })
         };
         let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
-        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), mask, mask_works: std::sync::atomic::AtomicBool::new(false), layout, name, spare: std::sync::Mutex::new(Vec::new()) })
+        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), mask, mask_works: std::sync::atomic::AtomicBool::new(false), layout, compose, compose_layout, name, spare: std::sync::Mutex::new(Vec::new()) })
+    }
+
+    /// Puts the keyframe images of a dive (each `width` x `height` pixels) on the GPU, for `compose`
+    ///
+    /// # Errors
+    /// The reason they could not be put there, such as more bytes than one buffer of the GPU can hold
+    pub fn upload_images(&self, images: &[Vec<TrueColor>], width: usize, height: usize) -> Result<ComposeImages, String> {
+        let pixels = width * height;
+        let bytes = (images.len() * pixels * 4) as u64;
+        let limits = self.device.limits();
+        if bytes > limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) || images.iter().any(|image| image.len() != pixels) {
+            return Err(format!("{} cannot hold {} keyframes of {width} x {height} in one buffer", self.name, images.len()));
+        }
+        let packed: Vec<u32> = images.iter().flat_map(|image| image.iter().map(|color| u32::from(color.red) | (u32::from(color.green) << 8) | (u32::from(color.blue) << 16))).collect();
+        let _gate = gate();
+        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("keyframes"), size: bytes.max(4), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        self.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&packed));
+        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+        errors.into_iter().flatten().next().map_or(Ok(()), |error| Err(format!("{}: {error}", self.name)))?;
+        Ok(ComposeImages { buffer, width: u32::try_from(width).map_err(|_| String::from("too wide"))?, pixels: u32::try_from(pixels).map_err(|_| String::from("too large"))? })
+    }
+
+    /// The `width` x `height` frame that averages the colors `moments` give its pixels (see `gpu_compose.wgsl`), as red | green << 8 | blue << 16. A moment is the
+    /// index of its keyframe in `images` and its taps: `2 * width` column taps (tap x 0.25, then 0.75), then `2 * height` row taps. The number of moments is
+    /// a power of two (then the average is exact)
+    ///
+    /// # Errors
+    /// A failure of the GPU, or a number of moments that is not a power of two: the CPU composes the frame then
+    pub fn compose(&self, images: &ComposeImages, (width, height): (usize, usize), moments: &[(usize, Vec<ComposeTap>)]) -> Result<Vec<u32>, String> {
+        if !moments.len().is_power_of_two() {
+            return Err(String::from("the moments are not a power of two"));
+        }
+        let too_large = |_| String::from("too large");
+        let (frame_width, frame_height, pixels) = (u32::try_from(width).map_err(too_large)?, u32::try_from(height).map_err(too_large)?, u32::try_from(width * height).map_err(too_large)?);
+        let mut moment_words: Vec<u32> = Vec::with_capacity(moments.len() * 4);
+        let mut taps: Vec<ComposeTap> = Vec::new();
+        for (image, moment_taps) in moments {
+            if moment_taps.len() != 2 * (width + height) {
+                return Err(String::from("the taps of a moment do not fit the frame"));
+            }
+            moment_words.extend([u32::try_from(*image).map_err(too_large)? * images.pixels, u32::try_from(taps.len()).map_err(too_large)?, 0, 0]);
+            taps.extend_from_slice(moment_taps);
+        }
+        let count = u32::try_from(moments.len()).map_err(too_large)?;
+        let params = [frame_width, frame_height, images.width, count, (1.0 / count as f32).to_bits(), 0, 0, 0];
+        let size = u64::from(pixels) * 4;
+        let _gate = gate();
+        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
+        let with_data = |label: &str, bytes: &[u8]| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (bytes.len() as u64).max(16), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            self.queue.write_buffer(&buffer, 0, bytes);
+            buffer
+        };
+        let (params, moment_buffer, tap_buffer) = (with_data("compose params", bytemuck::cast_slice(&params)), with_data("compose moments", bytemuck::cast_slice(&moment_words)), with_data("compose taps", bytemuck::cast_slice(&taps)));
+        let sums = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose sums"), size: size.max(16), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose read"), size: size.max(16), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.compose_layout, entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: moment_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: tap_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: images.buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: sums.as_entire_binding() },
+        ] });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.compose);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(pixels.div_ceil(64).clamp(1, COMPOSE_WORKGROUPS), 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&sums, 0, &read, 0, size);
+        let index = self.queue.submit([encoder.finish()]);
+        read.slice(..size).map_async(wgpu::MapMode::Read, |_| {});
+        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+        errors.into_iter().flatten().next().map_or(Ok(()), |error| Err(format!("{}: {error}", self.name)))?;
+        self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
+        let out = {
+            let view = read.slice(..size).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
+            bytemuck::cast_slice::<u8, u32>(&view).to_vec()
+        };
+        read.unmap();
+        Ok(out)
     }
 
     /// The name and the backend of the GPU

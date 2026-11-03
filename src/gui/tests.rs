@@ -2209,7 +2209,7 @@ fn wait_for_video(app: &mut MandelbrotApp) -> String {
         app.poll_video(&ctx);
         std::thread::sleep(Duration::from_millis(1));
     }
-    app.log.iter().rev().find(|line| line.starts_with("Video of the flight") || line.starts_with("Could not")).cloned().unwrap()
+    app.log.iter().rev().find(|line| line.starts_with("Video of the flight") || line.starts_with("Could not")).cloned().unwrap_or_else(|| panic!("the video ended without its message: {:?}", app.log.iter().rev().take(6).collect::<Vec<_>>()))
 }
 
 #[test]
@@ -4032,5 +4032,38 @@ fn gpu_alone_against_cpu_alone_on_a_view() {
         let after = feed();
         println!("{label}: {seconds:.2} s, {:.0} M samples/s, GPU points {}; feeder: submitting {:.0} ms, waiting {:.0} ms, coloring {:.0} ms, {} dispatches", (width * height * usize::from(samples)) as f64 / seconds / 1e6, rendering::GPU_FEED.points.load(Ordering::Relaxed) - points,
             (after[0] - before[0]) as f64 / 1e6, (after[1] - before[1]) as f64 / 1e6, (after[2] - before[2]) as f64 / 1e6, after[3] - before[3]);
+    }
+}
+
+#[test]
+#[ignore = "a measurement of Fast dives on a saved flight (#236), run by hand with --release"]
+fn fast_dives_against_frame_by_frame_on_a_saved_flight() {
+    //MANDELBROT_FLIGHT: the flight file; MANDELBROT_SIZE="width height samples" (default 1280 720 8); MANDELBROT_SETTINGS: a copy of a settings file
+    let Ok(path) = std::env::var("MANDELBROT_FLIGHT") else { return };
+    let size = std::env::var("MANDELBROT_SIZE").unwrap_or_else(|_| String::from("1280 720 8"));
+    let numbers: Vec<usize> = size.split_whitespace().map(|number| number.parse().unwrap()).collect();
+    let saved = super::flight_files::parse(&std::fs::read_to_string(&path).unwrap(), "flight.json").unwrap();
+    for keyframe_dives in [false, true] {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        if let Ok(settings) = std::env::var("MANDELBROT_SETTINGS") {
+            app.use_settings_file(Some(std::path::PathBuf::from(settings)));
+        }
+        app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount) = (numbers[0], numbers[1], u8::try_from(numbers[2]).unwrap());
+        app.video_keyframe_dives = keyframe_dives;
+        app.saved_flights = vec![saved.clone()];
+        app.use_saved_flight(0);
+        let feed = || rendering::GPU_FEED.points.load(Ordering::Relaxed);
+        let (points, started) = (feed(), std::time::Instant::now());
+        app.start_video();
+        let ctx = egui::Context::default();
+        while app.video_job.is_some() {
+            app.poll_video(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        println!("Fast dives {keyframe_dives}: {:.2} s, {} GPU points; {}", started.elapsed().as_secs_f64(), feed() - points, app.log.iter().rev().take(4).cloned().collect::<Vec<_>>().join(" | "));
+        let _ = std::fs::remove_dir_all(folder);
     }
 }

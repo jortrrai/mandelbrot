@@ -427,24 +427,6 @@ pub(super) fn sample_times(samples: u8, time: Duration, interval: Duration, shut
 /// The moments a frame of a dive composed from keyframes averages with motion blur (composing is cheap, see `dive_keyframes`)
 const DIVE_MOMENTS: u8 = 8;
 
-/// The average of the colors of `frames` (all the same size)
-fn average_frames(frames: &[Vec<crate::coloring::TrueColor>]) -> Vec<crate::coloring::TrueColor> {
-    if frames.len() == 1 {
-        return frames[0].clone();
-    }
-    let count = frames.len() as f32;
-    (0..frames[0].len()).map(|index| {
-        let mut sum = [0.0_f32; 3];
-        for frame in frames {
-            let color = frame[index];
-            sum[0] += f32::from(color.red);
-            sum[1] += f32::from(color.green);
-            sum[2] += f32::from(color.blue);
-        }
-        crate::coloring::TrueColor::new((sum[0] / count).round() as u8, (sum[1] / count).round() as u8, (sum[2] / count).round() as u8)
-    }).collect()
-}
-
 /// The shutters of the *Motion blur* list: off, then quarter to whole frames
 pub(super) const SHUTTERS: [f64; 5] = [0.0, 90.0, 180.0, 270.0, 360.0];
 
@@ -754,6 +736,10 @@ impl MandelbrotApp {
         if keyframe_dives && dive.is_none() {
             self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
         }
+        if let Some(plan) = &dive {
+            //(Frame 0 waits for them: say so, the progress shows no frames until then)
+            self.log(format!("Fast dive: {} keyframe images are rendered first, then every frame is composed from them{}", plan.scales().len(), if gpu.is_some() { " on the GPU" } else { "" }));
+        }
         let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none();
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
@@ -1014,8 +1000,8 @@ impl MandelbrotApp {
                                 } else {
                                     vec![time]
                                 };
-                                let composed: Vec<Vec<crate::coloring::TrueColor>> = moments.iter().map(|moment| keyframes.compose(path.camera_at(*moment).scale, flight.rotation_at(path, *moment))).collect();
-                                let colors = average_frames(&composed);
+                                let moments: Vec<(f64, f64)> = moments.iter().map(|moment| (path.camera_at(*moment).scale, flight.rotation_at(path, *moment))).collect();
+                                let colors = keyframes.compose_moments(&moments, gpu.as_deref());
                                 scheduler.finish_frame(true);
                                 if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
                                     return;
