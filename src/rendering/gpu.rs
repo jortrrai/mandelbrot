@@ -25,7 +25,7 @@
 use std::borrow::Cow;
 
 
-use crate::{complex::Complex, complex_plane::{ComplexPlane, View}, mandelbrot_set::MandelbrotSet};
+use crate::{coloring::TrueColor, complex::Complex, complex_plane::{ComplexPlane, View}, mandelbrot_set::MandelbrotSet};
 
 /// About the most points of one dispatch. The renderer sizes dispatches by time (`GPU_BATCH_TIME`), which keeps the GPU responsive for the window; this cap only
 /// limits the cheap points of shallow views, where every dispatch's fixed cost (writing, submitting, waiting: about half a millisecond) outweighed the work of
@@ -165,6 +165,10 @@ pub struct GpuIterator {
     /// The exact loop fed pixels instead of points (`exact_pixels_source`), used only when the self-test found its outcomes the exact loop's bit for bit
     exact_pixels: Option<wgpu::ComputePipeline>,
     exact_pixels_works: std::sync::atomic::AtomicBool,
+    /// The fast loop that colors its samples and adds them to sums on the GPU (`colored_source`), with its own bindings; used only when the self-test found
+    /// its sums the CPU's bit for bit
+    colored: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
+    colored_works: std::sync::atomic::AtomicBool,
     layout: wgpu::BindGroupLayout,
     name: String,
     /// The buffers of finished dispatches, for the next ones (several renders feed the GPU at once)
@@ -223,8 +227,27 @@ impl GpuIterator {
         let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?, pipeline(include_str!("gpu_f32.wgsl"))?);
         //(Without it the CPU computes the points of the exact loop, as before)
         let exact_pixels = pipeline(&exact_pixels_source()).ok();
+        //(Without it the CPU colors the samples of the fast loop, as before)
+        let colored = {
+            let entries = [entry(0, true), entry(1, true), entry(2, false), entry(3, false), entry(4, true), entry(5, false)];
+            let colored_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("colored"), entries: &entries });
+            let colored_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("colored"), bind_group_layouts: &[Some(&colored_layout)], immediate_size: 0 });
+            let words = spirv_without_contraction(&colored_source());
+            words.ok().map(|words| {
+                //SAFETY: the SPIR-V is naga's validated output of the shader, with only NoContraction decorations added
+                let shader = unsafe {
+                    device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+                        label: Some("colored"),
+                        entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint { name: "main".into(), workgroup_size: (64, 1, 1) }]),
+                        spirv: Some(Cow::Owned(words)),
+                        ..Default::default()
+                    })
+                };
+                (device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("colored"), layout: Some(&colored_pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }), colored_layout)
+            })
+        };
         let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
-        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), layout, name, spare: std::sync::Mutex::new(Vec::new()) })
+        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), layout, name, spare: std::sync::Mutex::new(Vec::new()) })
     }
 
     /// The name and the backend of the GPU
@@ -383,6 +406,108 @@ impl GpuIterator {
         Ok(outcomes)
     }
 
+    /// Turns the coloring fast loop off or on again (if it passed its self-test), to compare with the CPU's coloring in tests
+    #[cfg(test)]
+    pub(crate) fn use_colored(&self, on: bool) {
+        self.colored_works.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the fast loop colors and sums on the GPU (`submit_colored`): when the self-test found its sums those of the CPU's coloring, bit for bit
+    pub(crate) fn colored_work(&self) -> bool {
+        self.colored_works.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The sums of a frame of `pixels` pixels on the GPU, all 0, and the color of every position (`table`, as `Render::run` makes it), for `submit_colored`
+    ///
+    /// # Errors
+    /// The GPU could not make the buffers
+    pub(crate) fn color_sums(&self, table: &[TrueColor], pixels: usize) -> Result<ColorSums, String> {
+        let packed: Vec<u32> = table.iter().map(|color| u32::from(color.red) | (u32::from(color.green) << 8) | (u32::from(color.blue) << 16)).collect();
+        let _gate = gate();
+        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
+        let table = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("colors"), size: (packed.len() as u64 * 4).max(16), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        self.queue.write_buffer(&table, 0, bytemuck::cast_slice(&packed));
+        let size = (pixels as u64 * 12).max(16);
+        let sums = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("sums"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+        errors.into_iter().flatten().next().map_or(Ok(ColorSums { table, sums, size }), |error| Err(format!("{}: {error}", self.name)))
+    }
+
+    /// `submit_pixels` (the fast loop) that colors each sample with the table of `target` and adds it to its sums on the GPU instead of returning its position:
+    /// pixel `(x, y)` of the batch adds to sum `y * width + x`. `finish` gives no outcomes for it; `read_sums` the sums
+    ///
+    /// # Errors
+    /// The GPU failed, or there is no such loop
+    #[allow(clippy::too_many_arguments)] // `submit_pixels` with the frame's width and sums
+    pub(crate) fn submit_colored(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32], width: usize, target: &ColorSums) -> Result<Submitted, String> {
+        let (pipeline, layout) = self.colored.as_ref().ok_or_else(|| String::from("the coloring fast loop did not compile"))?;
+        let mut params = pixel_params(m, anchor, sample, origin, pixels.len())?;
+        let at = params.len() - 4;
+        params[at..].copy_from_slice(&u32::try_from(width).map_err(|_| String::from("too wide"))?.to_le_bytes());
+        let count = u32::try_from(pixels.len()).map_err(|_| String::from("too many points"))?;
+        let _gate = gate();
+        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
+        let buffers = self.buffers(std::mem::size_of_val(pixels) as u64, 0);
+        self.queue.write_buffer(&buffers.params, 0, &params);
+        if !pixels.is_empty() {
+            self.queue.write_buffer(&buffers.input, 0, bytemuck::cast_slice(pixels));
+        }
+        self.queue.write_buffer(&buffers.next_point, 0, &0_u32.to_le_bytes());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout, entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: buffers.params.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: buffers.input.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: buffers.outcomes.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: buffers.next_point.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: target.table.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: target.sums.as_entire_binding() },
+        ] });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(count.div_ceil(64).min(WORKGROUPS), 1, 1);
+        }
+        let index = self.queue.submit([encoder.finish()]);
+        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+        errors.into_iter().flatten().next().map_or(Ok(Submitted { buffers, size: 0, index }), |error| Err(format!("{}: {error}", self.name)))
+    }
+
+    /// The sums of `target` (red, green, blue of every pixel), once its dispatches are finished
+    ///
+    /// # Errors
+    /// The GPU failed
+    pub(crate) fn read_sums(&self, target: &ColorSums) -> Result<Vec<u32>, String> {
+        let _gate = gate();
+        let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("sums read"), size: target.size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(&target.sums, 0, &read, 0, target.size);
+        let index = self.queue.submit([encoder.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
+        let sums = {
+            let view = read.slice(..).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
+            bytemuck::cast_slice::<u8, u32>(&view).to_vec()
+        };
+        read.unmap();
+        Ok(sums)
+    }
+
+    /// Whether the coloring fast loop gives the sums of the CPU's coloring of the fast loop's positions (`interpolated_color` with a table of distinct colors)
+    /// for sample 3 of the 64 x 48 pixels of `plane`, bit for bit
+    fn check_colored(&self, plane: &ComplexPlane, m: &MandelbrotSet) -> Result<bool, String> {
+        let (pixels, _) = fast_test_case(plane, m, 64, 48);
+        let table: Vec<TrueColor> = (0..=m.max_iterations).map(|index| TrueColor::new((index * 37 % 251) as u8, (index * 11 % 253) as u8, (index * 97 % 241) as u8)).collect();
+        let positions = self.fast_positions(m, plane, 3, (5, -2), &pixels)?;
+        let target = self.color_sums(&table, 64 * 48)?;
+        self.finish::<FastOutcome>(self.submit_colored(m, plane, 3, (5, -2), &pixels, 64, &target)?)?;
+        let sums = self.read_sums(&target)?;
+        Ok(positions.iter().enumerate().all(|(index, position)| {
+            let color = m.interpolated_color(*position, |iterations| table[iterations as usize]);
+            sums[3 * index..3 * index + 3] == [u32::from(color.red), u32::from(color.green), u32::from(color.blue)]
+        }))
+    }
+
     /// Whether the exact loop fed pixels (`submit_exact_pixels`) gives the CPU's positions (`MandelbrotSet::position` of `sample_point`) for sample 3 of the
     /// 64 x 48 pixels of `plane`, placed at origin (5, -2), bit for bit
     fn check_exact_pixels(&self, plane: &ComplexPlane, m: &MandelbrotSet) -> Result<bool, String> {
@@ -408,6 +533,9 @@ impl GpuIterator {
             //The exact loop that computes its points: its outcomes must be those of the exact loop with the CPU's points, bit for bit, in every case
             if index == 0 || self.exact_pixels_work() {
                 self.exact_pixels_works.store(self.check_exact_pixels(&plane, &m).unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
+            }
+            if index == 0 || self.colored_work() {
+                self.colored_works.store(self.check_colored(&plane, &m).unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
             }
             if index == 0 {
                 //The fast loop computes the points of the pixels itself: sample 3 of the pixels, placed 5 pixels right and 2 up in the plane
@@ -439,6 +567,55 @@ const EXACT_OUTCOME_CONTINUED: &str = "            var extra = 0u;
                 }
             }
             outcomes[index] = Outcome(select(0.0lf, zx, escaped), select(0.0lf, zy, escaped), iterations, select(0u, 1u | (extra << 1u), escaped && iterations < max_iterations));";
+
+/// The sums of a frame on the GPU and the colors of the positions, see `GpuIterator::color_sums`
+pub(crate) struct ColorSums {
+    table: wgpu::Buffer,
+    sums: wgpu::Buffer,
+    size: u64,
+}
+
+/// The fast loop (`gpu_fast.wgsl`) that colors its samples and adds them to the sums of the frame: instead of writing the position it computes
+/// `FastOutcome::position` and `MandelbrotSet::interpolated_color` with the table of colors, in f64 and integers like the CPU, and adds the color to the
+/// pixel's sums with atomic additions (integers, so the order of the samples does not matter). The frame's width is in the last word of the parameters
+fn colored_source() -> String {
+    const COLORING: &str = "@group(0) @binding(4) var<storage, read> table: array<u32>;
+@group(0) @binding(5) var<storage, read_write> sums: array<atomic<u32>>;
+
+// `FastOutcome::position`, then `MandelbrotSet::interpolated_color` with `table`, added to the sums of the pixel of batch index `index`
+fn add_color(index: u32, outcome: Outcome) {
+    let last = select(params.max_iterations - 1u, 0u, params.max_iterations == 0u);
+    var position = f64(outcome.whole);
+    if ((outcome.whole & 0x80000000u) != 0u) {
+        position = clamp(f64(outcome.whole & 0x7FFFFFFFu) + f64(outcome.fraction), 0.0lf, f64(last));
+    }
+    let at = u32(position);
+    let weight = u32((position - f64(at)) * 256.0lf);
+    var color = table[at];
+    if (weight != 0u && at < params.max_iterations) {
+        let next = table[at + 1u];
+        var mixed = 0u;
+        for (var shift = 0u; shift < 24u; shift += 8u) {
+            let a = (color >> shift) & 255u;
+            let b = (next >> shift) & 255u;
+            mixed |= ((a * (256u - weight) + b * weight + 128u) >> 8u) << shift;
+        }
+        color = mixed;
+    }
+    let pixel = pixels[index];
+    let sum = 3u * ((pixel >> 16u) * params.pad + (pixel & 0xFFFFu));
+    atomicAdd(&sums[sum], color & 255u);
+    atomicAdd(&sums[sum + 1u], (color >> 8u) & 255u);
+    atomicAdd(&sums[sum + 2u], (color >> 16u) & 255u);
+}
+";
+    let fast = include_str!("gpu_fast.wgsl");
+    let bindings_end = fast.find("@group(0) @binding(3)").expect("the shader has binding 3");
+    let line_end = bindings_end + fast[bindings_end..].find('\n').expect("the line ends") + 1;
+    let source = format!("{}\n{COLORING}{}", &fast[..line_end], &fast[line_end..]);
+    source.replacen("                outcomes[index] = Outcome(params.max_iterations, 0.0);", "                add_color(index, Outcome(params.max_iterations, 0.0));", 1)
+        .replacen("            outcomes[index] = finished(iterations, escaped && iterations < max_iterations, zx, zy, cx, cy);", "            add_color(index, finished(iterations, escaped && iterations < max_iterations, zx, zy, cx, cy));", 1)
+}
 
 /// The parameters of a dispatch over pixels (`gpu_fast.wgsl` and `exact_pixels_source`): where the pixels are in `anchor` and the loop's settings
 fn pixel_params(m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), count: usize) -> Result<Vec<u8>, String> {
@@ -539,6 +716,7 @@ mod tests {
             no_contraction_everywhere(source);
         }
         no_contraction_everywhere(&exact_pixels_source());
+        no_contraction_everywhere(&colored_source());
     }
 
     fn no_contraction_everywhere(source: &str) {

@@ -1003,3 +1003,34 @@ fn the_exact_gpu_loop_that_computes_its_points_gives_the_cpus_image() {
         assert!(cpu.iter().zip(&both).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "GPU only {gpu_only}: the CPU's image");
     }
 }
+
+#[test]
+fn the_gpu_colors_and_sums_its_samples_as_the_cpu_does() {
+    //#257: the fast loop that colors its samples and adds them up on the GPU passes its self-test (its sums are the CPU's coloring of its positions)
+    let Ok(gpu) = super::gpu::GpuIterator::new() else {
+        eprintln!("no suitable GPU: skipped");
+        return;
+    };
+    eprintln!("the GPU colors and sums its samples: {}", gpu.colored_work());
+    assert!(gpu.colored_work(), "the self-test of the coloring fast loop passes");
+    //A frame on the GPU alone with the fast math (a frame of a video): the same, bit for bit, whether the GPU or the CPU colors its adaptive samples
+    let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+    for (view, iterations) in [(crate::complex_plane::View::new(-0.660_416_666_666_666_7, 0.443_75, 0.1), 3992), (crate::complex_plane::View::new(-0.7498, 0.0203, 0.0005), 2000)] {
+        let (width, height) = (640, 360);
+        let mut plane = ComplexPlane::new(width, height);
+        plane.set_view(&view);
+        let m = MandelbrotSet::new(iterations, 2.0);
+        let frame = || {
+            let mut colors = Vec::new();
+            assert!(Render::new(&plane, &m, width, height, coloring).supersampling(16).adaptive(Some(super::AdaptiveSampling::default())).gpu(Some((&gpu, std::time::Duration::ZERO))).fast_gpu(true).on_the_gpu_only()
+                .run(|layer, pass| if pass >= 16 { colors = layer.to_vec(); }));
+            colors
+        };
+        let gpu_colored = frame();
+        gpu.use_colored(false);
+        let cpu_colored = frame();
+        gpu.use_colored(true);
+        let differ = gpu_colored.iter().zip(&cpu_colored).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+        assert_eq!(differ, 0, "{view:?}");
+    }
+}
