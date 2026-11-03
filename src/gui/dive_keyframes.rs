@@ -117,14 +117,13 @@ impl DiveKeyframes {
         let (big_width, big_height) = (width * 2, height * 2);
         let moments: Vec<Moment> = moments.iter().map(|&(scale, rotation)| Moment::new(self, scale, rotation)).collect();
         let count = moments.len() as f32;
-        let average = |sum: u32| (sum as f32 / count).round() as u8;
         if let (Some(gpu), Some(images)) = (gpu, &self.on_gpu) {
             let unturned: Option<Vec<(usize, Vec<Tap>)>> = moments.iter().map(|moment| moment.columns.as_ref().map(|columns| {
                 let rows = TAPS_Y.map(|tap_y| (0..height).map(move |y| Tap::at((y as f64 + tap_y - height as f64 / 2.0) * moment.footprint + big_height as f64 / 2.0, big_height)));
                 (moment.index, columns.iter().flatten().copied().chain(rows.into_iter().flatten()).collect())
             })).collect();
-            if let Some(sums) = unturned.and_then(|unturned| gpu.compose_sums(images, (width, height), &unturned).ok()) {
-                return sums.iter().map(|[red_green, blue]| TrueColor::new(average(red_green & 0xffff), average(red_green >> 16), average(*blue))).collect();
+            if let Some(colors) = unturned.and_then(|unturned| gpu.compose(images, (width, height), &unturned).ok()) {
+                return colors.iter().map(|color| TrueColor::new((color & 0xff) as u8, ((color >> 8) & 0xff) as u8, ((color >> 16) & 0xff) as u8)).collect();
             }
         }
         let mut frame = vec![TrueColor::new(0, 0, 0); width * height];
@@ -208,7 +207,7 @@ impl<'a> Moment<'a> {
 }
 
 /// Where a tap falls along one side of a keyframe: the two pixels it is between and its share of the second, as `bilinear` works them out (the GPU's type, see
-/// `compose_sums`)
+/// `GpuIterator::compose`)
 type Tap = rendering::gpu::ComposeTap;
 
 trait TapAt {

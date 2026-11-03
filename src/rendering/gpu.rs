@@ -176,7 +176,7 @@ pub struct GpuIterator {
     /// The plain f32 loop (`gpu_f32.wgsl`), for moving frames at shallow zoom, see `Render::f32_gpu`
     single: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
-    /// The frames of dives composed from keyframes (`gpu_compose.wgsl`, see `compose_sums`), with their own buffers
+    /// The frames of dives composed from keyframes (`gpu_compose.wgsl`, see `compose`), with their own buffers
     compose: wgpu::ComputePipeline,
     compose_layout: wgpu::BindGroupLayout,
     name: String,
@@ -389,7 +389,7 @@ impl GpuIterator {
         Ok(outcomes)
     }
 
-    /// Puts the keyframe images of a dive (each `width` x `height` pixels) on the GPU, for `compose_sums`
+    /// Puts the keyframe images of a dive (each `width` x `height` pixels) on the GPU, for `compose`
     ///
     /// # Errors
     /// The reason they could not be put there, such as more bytes than one buffer of the GPU can hold
@@ -410,12 +410,16 @@ impl GpuIterator {
         Ok(ComposeImages { buffer, width: u32::try_from(width).map_err(|_| String::from("too wide"))?, pixels: u32::try_from(pixels).map_err(|_| String::from("too large"))? })
     }
 
-    /// For every pixel of a `width` x `height` frame, the sums over `moments` of the colors each moment gives it (see `gpu_compose.wgsl`): red | green << 16, then
-    /// blue. A moment is the index of its keyframe in `images` and its taps: `2 * width` column taps (tap x 0.25, then 0.75), then `2 * height` row taps
+    /// The `width` x `height` frame that averages the colors `moments` give its pixels (see `gpu_compose.wgsl`), as red | green << 8 | blue << 16. A moment is the
+    /// index of its keyframe in `images` and its taps: `2 * width` column taps (tap x 0.25, then 0.75), then `2 * height` row taps. The number of moments is
+    /// a power of two (then the average is exact)
     ///
     /// # Errors
-    /// A failure of the GPU: the CPU composes the frame then
-    pub fn compose_sums(&self, images: &ComposeImages, (width, height): (usize, usize), moments: &[(usize, Vec<ComposeTap>)]) -> Result<Vec<[u32; 2]>, String> {
+    /// A failure of the GPU, or a number of moments that is not a power of two: the CPU composes the frame then
+    pub fn compose(&self, images: &ComposeImages, (width, height): (usize, usize), moments: &[(usize, Vec<ComposeTap>)]) -> Result<Vec<u32>, String> {
+        if !moments.len().is_power_of_two() {
+            return Err(String::from("the moments are not a power of two"));
+        }
         let too_large = |_| String::from("too large");
         let (frame_width, frame_height, pixels) = (u32::try_from(width).map_err(too_large)?, u32::try_from(height).map_err(too_large)?, u32::try_from(width * height).map_err(too_large)?);
         let mut moment_words: Vec<u32> = Vec::with_capacity(moments.len() * 4);
@@ -427,8 +431,9 @@ impl GpuIterator {
             moment_words.extend([u32::try_from(*image).map_err(too_large)? * images.pixels, u32::try_from(taps.len()).map_err(too_large)?, 0, 0]);
             taps.extend_from_slice(moment_taps);
         }
-        let params = [frame_width, frame_height, images.width, u32::try_from(moments.len()).map_err(too_large)?];
-        let size = u64::from(pixels) * 8;
+        let count = u32::try_from(moments.len()).map_err(too_large)?;
+        let params = [frame_width, frame_height, images.width, count, (1.0 / count as f32).to_bits(), 0, 0, 0];
+        let size = u64::from(pixels) * 4;
         let _gate = gate();
         let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
         let with_data = |label: &str, bytes: &[u8]| {
@@ -461,7 +466,7 @@ impl GpuIterator {
         self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
         let out = {
             let view = read.slice(..size).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
-            bytemuck::cast_slice::<u8, [u32; 2]>(&view).to_vec()
+            bytemuck::cast_slice::<u8, u32>(&view).to_vec()
         };
         read.unmap();
         Ok(out)
