@@ -1411,8 +1411,9 @@ mod depth_timing {
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let color_of = |position: f64| crate::coloring::TrueColor::new((position * 7.0) as u8, (position * 3.0) as u8, position as u8);
         let (width, height) = (1920, 1080);
-        for (name, power, real, imaginary, iterations) in [("i", -100_i64, String::from("3e-101"), format!("1.{}2", "0".repeat(100)), 20_000_u32), ("i", -250, String::from("3e-251"), format!("1.{}2", "0".repeat(250)), 20_000),
-            ("seahorse", -30, String::from("-0.743643887037158704752191506114774"), String::from("0.131825904205311970493132056385139"), 50_000)] {
+        let near_i = |power: i64| (String::from("i"), power, format!("3e{}", power - 1), format!("1.{}2", "0".repeat((-power) as usize)), 20_000_u32);
+        for (name, power, real, imaginary, iterations) in [near_i(-100), near_i(-250), near_i(-308), near_i(-500),
+            (String::from("seahorse"), -30, String::from("-0.743643887037158704752191506114774"), String::from("0.131825904205311970493132056385139"), 50_000)] {
             let m = MandelbrotSet::new(iterations, 2.0);
             let depth = Depth::parse(&format!("1e{power}")).unwrap();
             let bits = bits_for_depth(depth, width);
