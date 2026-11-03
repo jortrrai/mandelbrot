@@ -681,14 +681,21 @@ impl MandelbrotApp {
             let bits = bits_for_depth(flight.to_depth.unwrap_or_else(|| Depth::from_f64(flight.to.scale)), width);
             Some(SharedOrbit::new(&Fixed::parse(&exact.0, bits)?, &Fixed::parse(&exact.1, bits)?))
         });
-        if keyframe_dives && dive.is_none() {
+        //A dive into an exact center, also deeper than 64-bit floats: its keyframes rendered when the frames reach their depth (see `dive_keyframes::DeepDive`)
+        let deep_dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1 && shared_orbit.is_some())
+            .then(|| super::dive_keyframes::DeepDive::plan((0..total).map(|frame| clock.time(frame)), |time| path.deep_at(time)))
+            .flatten();
+        if let Some((shallowest, deepest)) = deep_dive {
+            self.log(format!("Fast dive to an exact center: {} keyframe images, each rendered when the frames reach its depth, and every frame composed from them", (shallowest - deepest).ceil() as usize + 1));
+        }
+        if keyframe_dives && dive.is_none() && deep_dive.is_none() {
             self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
         }
         if let Some(plan) = &dive {
             //(Frame 0 waits for them: say so, the progress shows no frames until then)
             self.log(format!("Fast dive: {} keyframe images are rendered first, then every frame is composed from them{}", plan.scales().len(), if gpu.is_some() { " on the GPU" } else { "" }));
         }
-        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none();
+        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none() && deep_dive.is_none();
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
         let (sender, result) = mpsc::channel();
@@ -851,6 +858,39 @@ impl MandelbrotApp {
                 None => None,
             };
             let keyframes = &keyframes;
+            //A dive into an exact center: a keyframe in 64-bit floats where they suffice (as `DiveKeyframes` renders them), deeper by the deep renderer from the
+            //orbit of the center (see `dive_keyframes::DeepDive`)
+            let deep_dive = deep_dive.map(|range| super::dive_keyframes::DeepDive::new((width, height), range, |depth: crate::rendering::deep::Depth| {
+                let (big_width, big_height) = (width * 2, height * 2);
+                let mut set = m.clone();
+                set.palette = flight.palettes.0;
+                //(The limit of the deepest frame this keyframe serves)
+                if let Some(settings) = &auto_settings {
+                    set.max_iterations = if flight.to_depth.is_some() { deep_limit_at(depth.log2() * std::f64::consts::LN_2 - std::f64::consts::LN_2, &flight, settings) } else { limit_at(depth.to_f64() / 2.0, &flight, settings) };
+                }
+                let mut plane = ComplexPlane::new(big_width, big_height);
+                plane.set_view(&crate::complex_plane::View::new(flight.to.x, flight.to.y, depth.to_f64().max(f64::MIN_POSITIVE)));
+                let mut colors = Vec::new();
+                let completed = if depth.to_f64().is_normal() && plane.precision() != crate::complex_plane::Precision::Exhausted {
+                    Render::new(&plane, &set, big_width, big_height, coloring_function).supersampling(samples).adaptive(adaptive)
+                        .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(&thread_cancel)
+                        .run(|layer, pass| {
+                            if pass >= samples.clamp(1, 64) {
+                                colors = layer.to_vec();
+                            }
+                        })
+                } else {
+                    let orbit = shared_orbit.as_ref().expect("a deep dive has the orbit of its center");
+                    let color_of = |position: f64| set.interpolated_color(position, |count| set.color(coloring_function, count));
+                    crate::rendering::deep::render_layers_around(&set, (orbit, (0.0, 0.0)), (depth, 0.0), (big_width, big_height), samples, &color_of, fast_deep, &thread_cancel, |layer, number| {
+                        if number == samples.max(1) {
+                            colors = layer.to_vec();
+                        }
+                    })
+                };
+                completed.then_some(colors)
+            }));
+            let deep_dive = &deep_dive;
             std::thread::scope(|scope| {
                 //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
                 let (next_ref, steering_cancel) = (&next, &thread_cancel);
@@ -905,6 +945,25 @@ impl MandelbrotApp {
                             let camera = path.camera_at(time);
                             plane.set_view(&camera.view());
                             plane.set_rotation(flight.rotation_at(path, time));
+                            //A dive into an exact center: the same, from keyframes rendered as the frames reach them (with the camera in logarithms)
+                            if let Some(deep_dive) = deep_dive {
+                                let moments = if shutter > 0.0 {
+                                    let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
+                                    sample_times(DIVE_MOMENTS, time, interval, shutter, path.duration())
+                                } else {
+                                    vec![time]
+                                };
+                                let moments: Vec<(f64, f64)> = moments.iter().map(|moment| (path.deep_at(*moment).ln_scale, flight.rotation_at(path, *moment))).collect();
+                                let Some(colors) = deep_dive.compose_moments(&moments) else {
+                                    scheduler.finish_frame(false);
+                                    return;
+                                };
+                                scheduler.finish_frame(true);
+                                if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
                             //A dive: the frame composed from its keyframe (with motion blur: from the moments of its shutter)
                             if let Some(keyframes) = keyframes {
                                 let moments = if shutter > 0.0 {

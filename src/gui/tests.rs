@@ -2651,6 +2651,79 @@ fn a_dive_video_to_10_to_the_minus_400_renders_every_deep_frame_and_keeps_the_de
 }
 
 #[test]
+fn a_fast_dive_to_10_to_the_minus_400_composes_its_frames_from_deep_keyframes_close_to_the_frames_rendered_one_by_one() {
+    //Issue #263: Fast dives into an exact center deeper than 64-bit floats, with keyframes rendered as the frames reach them (see `dive_keyframes::DeepDive`)
+    let power: u32 = 400;
+    let (real, imaginary) = (format!("3e-{}", power + 1), format!("1.{}2", "0".repeat(power as usize)));
+    let place = format!(r#"{{ "format_version": 1, "name": "Deep", "location": {{ "center": {{ "real": 0.0, "imaginary": 1.0, "real_text": "{real}", "imaginary_text": "{imaginary}" }}, "scale": 2.2250738585072014e-308, "scale_text": "1e-{power}", "max_iterations": 20000 }} }}"#);
+    let mut videos = Vec::new();
+    for keyframe_dives in [false, true] {
+        let (mut app, folder) = app_with_points(&[("deep.json", &place)]);
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs, app.video_speed) = (48, 32, 4, 3, true, 400);
+        (app.pace, app.route, app.constant_speed, app.video_keyframe_dives) = (super::flight::Pace::Constant, super::flight::Route::Dive, 20.0, keyframe_dives);
+        app.go_to_point_of_interest(0);
+        app.skip_flight();
+        app.start_video();
+        let message = wait_for_video(&mut app);
+        assert!(message.starts_with("Video of the flight:") && !message.contains("stopped"), "{message}");
+        if keyframe_dives {
+            assert!(app.log.iter().any(|line| line.contains("Fast dive to an exact center")), "{:?}", app.log);
+        }
+        let frames_folder = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+        let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&frames_folder).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+        frames.sort();
+        videos.push(frames.iter().map(|path| {
+            let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap())).read_info().unwrap();
+            let mut pixels = vec![0; reader.output_buffer_size()];
+            reader.next_frame(&mut pixels).unwrap();
+            pixels
+        }).collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(folder);
+    }
+    assert_eq!(videos[0].len(), videos[1].len(), "the same frames");
+    assert!(videos[0].len() > 40);
+    //Every frame close to the one rendered by itself (a composed frame averages 1 to 4 keyframe pixels per pixel), all the way down
+    for (index, (one_by_one, composed)) in videos[0].iter().zip(&videos[1]).enumerate() {
+        let error = one_by_one.iter().zip(composed).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / one_by_one.len() as f64;
+        let distinct = composed.chunks(3).collect::<std::collections::BTreeSet<_>>().len();
+        assert!(error < 16.0 && distinct > 5, "frame {index}: mean difference {error:.1}, {distinct} colors");
+    }
+}
+
+#[test]
+#[ignore = "a measurement of deep Fast dives (#263), run by hand with --release --nocapture"]
+fn time_a_deep_dive_frame_by_frame_and_from_keyframes() {
+    //MANDELBROT_DEEP_DIVE="width height samples power fps doublings_per_second [dive_zoom]" (default 640 360 1 308 30 20)
+    let setup = std::env::var("MANDELBROT_DEEP_DIVE").unwrap_or_else(|_| String::from("640 360 1 308 30 20"));
+    let numbers: Vec<f64> = setup.split_whitespace().map(|number| number.parse().unwrap()).collect();
+    let power = numbers[3] as usize;
+    let (real, imaginary) = (format!("3e-{}", power + 1), format!("1.{}2", "0".repeat(power)));
+    let place = format!(r#"{{ "format_version": 1, "name": "Deep", "location": {{ "center": {{ "real": 0.0, "imaginary": 1.0, "real_text": "{real}", "imaginary_text": "{imaginary}" }}, "scale": {}, "scale_text": "1e-{power}", "max_iterations": 20000 }} }}"#, format!("1e-{power}").parse::<f64>().unwrap().max(f64::MIN_POSITIVE));
+    for keyframe_dives in [true, false] {
+        let (mut app, folder) = app_with_points(&[("deep.json", &place)]);
+        app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_speed) = (numbers[0] as usize, numbers[1] as usize, numbers[2] as u8, numbers[4] as u32, 100);
+        (app.pace, app.route, app.constant_speed, app.video_keyframe_dives, app.fast_deep, app.dive_zoom) = (super::flight::Pace::Constant, super::flight::Route::Dive, numbers[5], keyframe_dives, true, numbers.get(6).copied().unwrap_or(1.0));
+        app.go_to_point_of_interest(0);
+        app.skip_flight();
+        let started = std::time::Instant::now();
+        app.start_video();
+        let ctx = egui::Context::default();
+        while app.video_job.is_some() {
+            app.poll_video(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let message = app.log.iter().rev().find(|line| line.contains("Video of the flight")).cloned().unwrap_or_default();
+        println!("Fast dives {keyframe_dives}: {:.1} s; {message}", started.elapsed().as_secs_f64());
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+#[test]
 fn a_sequence_fitted_to_music_lands_its_keyframes_on_the_swells_and_its_video_lasts_as_long_as_the_track() {
     //Issue #185: a 12 s track, quiet with a loud burst from 5 to 7 s, and a sequence of 3 keyframes
     if !ffmpeg_available() {

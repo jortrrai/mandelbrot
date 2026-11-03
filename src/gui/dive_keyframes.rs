@@ -114,9 +114,8 @@ impl DiveKeyframes {
     /// CPU threads, bit for bit the same
     pub(super) fn compose_moments(&self, moments: &[(f64, f64)], gpu: Option<&rendering::gpu::GpuIterator>) -> Vec<TrueColor> {
         let (width, height) = (self.width, self.height);
-        let (big_width, big_height) = (width * 2, height * 2);
+        let big_height = height * 2;
         let moments: Vec<Moment> = moments.iter().map(|&(scale, rotation)| Moment::new(self, scale, rotation)).collect();
-        let count = moments.len() as f32;
         if let (Some(gpu), Some(images)) = (gpu, &self.on_gpu) {
             let unturned: Option<Vec<(usize, Vec<Tap>)>> = moments.iter().map(|moment| moment.columns.as_ref().map(|columns| {
                 let rows = TAPS_Y.map(|tap_y| (0..height).map(move |y| Tap::at((y as f64 + tap_y - height as f64 / 2.0) * moment.footprint + big_height as f64 / 2.0, big_height)));
@@ -126,46 +125,7 @@ impl DiveKeyframes {
                 return colors.iter().map(|color| TrueColor::new((color & 0xff) as u8, ((color >> 8) & 0xff) as u8, ((color >> 16) & 0xff) as u8)).collect();
             }
         }
-        let mut frame = vec![TrueColor::new(0, 0, 0); width * height];
-        let rows_per_chunk = height.div_ceil(rendering::render_thread_count()).max(1);
-        std::thread::scope(|scope| {
-            for (chunk, rows) in frame.chunks_mut(rows_per_chunk * width).enumerate() {
-                let moments = &moments;
-                scope.spawn(move || {
-                    for (row_index, row) in rows.chunks_mut(width).enumerate() {
-                        let y = chunk * rows_per_chunk + row_index;
-                        //The rows of the keyframe that the taps of this row read, for every unturned moment
-                        let tap_rows: Vec<Option<[Tap; 2]>> = moments.iter().map(|moment| moment.columns.as_ref().map(|_| TAPS_Y.map(|tap_y| Tap::at((y as f64 + tap_y - height as f64 / 2.0) * moment.footprint + big_height as f64 / 2.0, big_height)))).collect();
-                        for (x, pixel) in row.iter_mut().enumerate() {
-                            let mut average = [0.0_f32; 3];
-                            for (moment, tap_rows) in moments.iter().zip(&tap_rows) {
-                                //Four taps inside the pixel, its offset from the middle turned like the view (the image turns counterclockwise: R(-θ), with y down on the screen)
-                                let mut sum = [0.0_f32; 3];
-                                for (tap, (tap_x, tap_y)) in TAPS.iter().enumerate() {
-                                    let color = match (&moment.columns, tap_rows) {
-                                        (Some(columns), Some(tap_rows)) => bilinear_at(moment.image, big_width, columns[tap % 2][x], tap_rows[tap / 2]),
-                                        _ => {
-                                            let (dx, dy) = ((x as f64 + tap_x - width as f64 / 2.0) * moment.footprint, (y as f64 + tap_y - height as f64 / 2.0) * moment.footprint);
-                                            let (turned_x, turned_y) = (dx * moment.cos - dy * moment.sin, dx * moment.sin + dy * moment.cos);
-                                            bilinear(moment.image, big_width, big_height, turned_x + big_width as f64 / 2.0, turned_y + big_height as f64 / 2.0)
-                                        }
-                                    };
-                                    for (channel, value) in sum.iter_mut().zip(color) {
-                                        *channel += value;
-                                    }
-                                }
-                                //(Each moment rounded to its color, as a frame of it would be)
-                                for (channel, value) in average.iter_mut().zip(sum) {
-                                    *channel += (value / 4.0).round();
-                                }
-                            }
-                            *pixel = TrueColor::new((average[0] / count).round() as u8, (average[1] / count).round() as u8, (average[2] / count).round() as u8);
-                        }
-                    }
-                });
-            }
-        });
-        frame
+        compose_on_the_cpu(&moments, (width, height))
     }
 
     /// The scales of the keyframes, shallowest first
@@ -173,6 +133,143 @@ impl DiveKeyframes {
     pub(super) fn scales(&self) -> &[f64] {
         &self.scales
     }
+}
+
+/// A dive into an exact center, also deeper than 64-bit floats reach (issue #263): the keyframes of `DiveKeyframes`, at the scales `S_0 / 2^k` as exact
+/// `Depth`s, rendered when the frames reach their depth and kept only while they are in use, so a dive of a thousand doublings (to 10⁻³⁰⁸) needs a few
+/// in memory at a time instead of all of them. The frames are composed from them on the CPU exactly as `DiveKeyframes` composes them
+pub(super) struct DeepDive<'a> {
+    width: usize,
+    height: usize,
+    /// The base-2 logarithm of the scale of the first keyframe, and the number of keyframes
+    shallowest: crate::rendering::deep::Depth,
+    count: usize,
+    /// Renders the keyframe at a scale, twice the frame's size on each side (`None`: cancelled)
+    render: Box<dyn Fn(crate::rendering::deep::Depth) -> Option<Vec<TrueColor>> + Sync + 'a>,
+    kept: std::sync::Mutex<Vec<(usize, std::sync::Arc<Vec<TrueColor>>)>>,
+    /// One keyframe is rendered at a time (each with all the threads)
+    rendering: std::sync::Mutex<()>,
+}
+
+/// The keyframes a `DeepDive` keeps: the one in use and the two before it (for frames that are still composed from them)
+const KEPT_KEYFRAMES: usize = 3;
+
+impl<'a> DeepDive<'a> {
+    /// The base-2 logarithms of the scales of the shallowest and the deepest frame of a flight whose camera is `deep_at(t)` at the moments `times`, if the
+    /// frames all have the center of the destination (a dive) and zoom
+    pub(super) fn plan(times: impl Iterator<Item = Duration>, deep_at: impl Fn(Duration) -> super::flight::DeepCamera) -> Option<(f64, f64)> {
+        let mut range: Option<(f64, f64)> = None;
+        for time in times {
+            let camera = deep_at(time);
+            if camera.right != 0.0 || camera.up != 0.0 || !camera.ln_scale.is_finite() {
+                return None;
+            }
+            let log2 = camera.ln_scale / std::f64::consts::LN_2;
+            range = Some(range.map_or((log2, log2), |(shallowest, deepest)| (shallowest.max(log2), deepest.min(log2))));
+        }
+        range.filter(|(shallowest, deepest)| shallowest > deepest)
+    }
+
+    /// The dive of frames `width` x `height` from the scale `2^shallowest` to `2^deepest` (see `plan`), whose keyframes `render` renders
+    pub(super) fn new((width, height): (usize, usize), (shallowest, deepest): (f64, f64), render: impl Fn(crate::rendering::deep::Depth) -> Option<Vec<TrueColor>> + Sync + 'a) -> DeepDive<'a> {
+        let count = (shallowest - deepest).ceil().max(0.0) as usize + 1;
+        DeepDive { width, height, shallowest: crate::rendering::deep::Depth::from_log2(shallowest), count, render: Box::new(render), kept: std::sync::Mutex::new(Vec::new()), rendering: std::sync::Mutex::new(()) }
+    }
+
+    /// The number of keyframes
+    #[cfg(test)]
+    pub(super) const fn count(&self) -> usize {
+        self.count
+    }
+
+    /// The scale of keyframe `index`: the first one's halved `index` times, exactly
+    fn depth(&self, index: usize) -> crate::rendering::deep::Depth {
+        crate::rendering::deep::Depth { exponent: self.shallowest.exponent - i32::try_from(index).unwrap_or(i32::MAX), ..self.shallowest }
+    }
+
+    /// Keyframe `index`, rendered if it is not kept (`None`: cancelled)
+    fn keyframe(&self, index: usize) -> Option<std::sync::Arc<Vec<TrueColor>>> {
+        let find = || self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(kept, _)| *kept == index).map(|(_, image)| std::sync::Arc::clone(image));
+        if let Some(image) = find() {
+            return Some(image);
+        }
+        let _rendering = self.rendering.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(image) = find() {
+            return Some(image); //(Rendered while this one waited)
+        }
+        let image = std::sync::Arc::new((self.render)(self.depth(index))?);
+        let mut kept = self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        kept.push((index, std::sync::Arc::clone(&image)));
+        //(The deepest few: the frames go deeper)
+        kept.sort_by_key(|(kept, _)| std::cmp::Reverse(*kept));
+        kept.truncate(KEPT_KEYFRAMES);
+        drop(kept);
+        Some(image)
+    }
+
+    /// The frame that averages the frames at the moments `(ln_scale, rotation)` (the natural logarithm of the scale), each composed from the keyframe of its
+    /// depth, as `DiveKeyframes::compose_moments` composes them on the CPU (`None`: cancelled while a keyframe was rendered)
+    pub(super) fn compose_moments(&self, moments: &[(f64, f64)]) -> Option<Vec<TrueColor>> {
+        let shallowest = self.shallowest.log2();
+        let mut images = Vec::with_capacity(moments.len());
+        let mut placed = Vec::with_capacity(moments.len());
+        for &(ln_scale, rotation) in moments {
+            let log2 = ln_scale / std::f64::consts::LN_2;
+            //The keyframe that serves this scale: the deepest whose scale is at least the frame's, and a pixel of the frame in its pixels (1 to 2)
+            let index = ((shallowest - log2 + 1e-9).floor().max(0.0) as usize).min(self.count - 1);
+            let footprint = (log2 - self.depth(index).log2() + 1.0).exp2();
+            images.push(self.keyframe(index)?);
+            placed.push((index, footprint, rotation));
+        }
+        let moments: Vec<Moment> = placed.iter().zip(&images).map(|(&(index, footprint, rotation), image)| Moment::with((index, image), footprint, rotation, self.width)).collect();
+        Some(compose_on_the_cpu(&moments, (self.width, self.height)))
+    }
+}
+
+/// The frame that averages `moments`, composed on all CPU threads (see `DiveKeyframes::compose_moments`)
+fn compose_on_the_cpu(moments: &[Moment], (width, height): (usize, usize)) -> Vec<TrueColor> {
+    let (big_width, big_height) = (width * 2, height * 2);
+    let count = moments.len() as f32;
+    let mut frame = vec![TrueColor::new(0, 0, 0); width * height];
+    let rows_per_chunk = height.div_ceil(rendering::render_thread_count()).max(1);
+    std::thread::scope(|scope| {
+        for (chunk, rows) in frame.chunks_mut(rows_per_chunk * width).enumerate() {
+            let moments = &moments;
+            scope.spawn(move || {
+                for (row_index, row) in rows.chunks_mut(width).enumerate() {
+                    let y = chunk * rows_per_chunk + row_index;
+                    //The rows of the keyframe that the taps of this row read, for every unturned moment
+                    let tap_rows: Vec<Option<[Tap; 2]>> = moments.iter().map(|moment| moment.columns.as_ref().map(|_| TAPS_Y.map(|tap_y| Tap::at((y as f64 + tap_y - height as f64 / 2.0) * moment.footprint + big_height as f64 / 2.0, big_height)))).collect();
+                    for (x, pixel) in row.iter_mut().enumerate() {
+                        let mut average = [0.0_f32; 3];
+                        for (moment, tap_rows) in moments.iter().zip(&tap_rows) {
+                            //Four taps inside the pixel, its offset from the middle turned like the view (the image turns counterclockwise: R(-θ), with y down on the screen)
+                            let mut sum = [0.0_f32; 3];
+                            for (tap, (tap_x, tap_y)) in TAPS.iter().enumerate() {
+                                let color = match (&moment.columns, tap_rows) {
+                                    (Some(columns), Some(tap_rows)) => bilinear_at(moment.image, big_width, columns[tap % 2][x], tap_rows[tap / 2]),
+                                    _ => {
+                                        let (dx, dy) = ((x as f64 + tap_x - width as f64 / 2.0) * moment.footprint, (y as f64 + tap_y - height as f64 / 2.0) * moment.footprint);
+                                        let (turned_x, turned_y) = (dx * moment.cos - dy * moment.sin, dx * moment.sin + dy * moment.cos);
+                                        bilinear(moment.image, big_width, big_height, turned_x + big_width as f64 / 2.0, turned_y + big_height as f64 / 2.0)
+                                    }
+                                };
+                                for (channel, value) in sum.iter_mut().zip(color) {
+                                    *channel += value;
+                                }
+                            }
+                            //(Each moment rounded to its color, as a frame of it would be)
+                            for (channel, value) in average.iter_mut().zip(sum) {
+                                *channel += (value / 4.0).round();
+                            }
+                        }
+                        *pixel = TrueColor::new((average[0] / count).round() as u8, (average[1] / count).round() as u8, (average[2] / count).round() as u8);
+                    }
+                }
+            });
+        }
+    });
+    frame
 }
 
 /// The four taps inside a pixel, in its own units, in the order their colors are added
@@ -194,15 +291,20 @@ struct Moment<'a> {
 
 impl<'a> Moment<'a> {
     fn new(keyframes: &'a DiveKeyframes, scale: f64, rotation: f64) -> Moment<'a> {
-        let (width, big_width) = (keyframes.width, keyframes.width * 2);
         //The keyframe that serves this scale: the deepest whose scale is at least the frame's
         let index = keyframes.scales.iter().rposition(|keyframe| *keyframe >= scale * (1.0 - 1e-12)).unwrap_or(0);
         //A pixel of the frame in pixels of the keyframe (1 to 2)
         let footprint = (scale / keyframes.scales[index]) * 2.0;
+        Moment::with((index, &keyframes.images[index]), footprint, rotation, keyframes.width)
+    }
+
+    /// The moment of keyframe `index`, `image`, whose pixel is `footprint` keyframe pixels, turned by `rotation`, of frames `width` wide
+    fn with((index, image): (usize, &'a [TrueColor]), footprint: f64, rotation: f64, width: usize) -> Moment<'a> {
+        let big_width = width * 2;
         let (sin, cos) = rotation.sin_cos();
         //Unturned, a tap's column depends on its column only (dx · 1 - dy · 0 is dx exactly), so the taps read the same pixels as when worked out each time
         let columns = (sin.to_bits() == 0.0_f64.to_bits() && cos.to_bits() == 1.0_f64.to_bits()).then(|| TAPS_X.map(|tap_x| (0..width).map(|x| Tap::at((x as f64 + tap_x - width as f64 / 2.0) * footprint + big_width as f64 / 2.0, big_width)).collect()));
-        Moment { index, image: &keyframes.images[index], footprint, sin, cos, columns }
+        Moment { index, image, footprint, sin, cos, columns }
     }
 }
 
@@ -307,6 +409,42 @@ mod tests {
             }
             TrueColor::new((sum[0] / count).round() as u8, (sum[1] / count).round() as u8, (sum[2] / count).round() as u8)
         }).collect()
+    }
+
+    #[test]
+    fn a_deep_dive_renders_each_keyframe_once_keeps_a_few_and_composes_like_the_keyframes_of_a_shallow_dive() {
+        //#263: keyframes at exact halvings, rendered as the frames reach them; within 64-bit floats the frames are bit for bit those of `DiveKeyframes`
+        let (width, height) = (20, 12);
+        let image_of = |depth: crate::rendering::deep::Depth| -> Vec<TrueColor> {
+            let seed = depth.exponent.unsigned_abs();
+            (0..width * height * 4).map(|index| TrueColor::new((index as u32 * 7 + seed * 31) as u8, (index as u32 * 13 + seed) as u8, (seed * 5) as u8)).collect()
+        };
+        let renders = std::sync::atomic::AtomicUsize::new(0);
+        let (shallowest, deepest) = (-3.0, -1100.5);
+        let dive = DeepDive::new((width, height), (shallowest, deepest), |depth| {
+            renders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(image_of(depth))
+        });
+        assert_eq!(dive.count(), 1099);
+        //Frames going down, a few per keyframe: every keyframe rendered once, and never more than a few kept
+        let mut used = std::collections::BTreeSet::new();
+        for step in 0..=((shallowest - deepest) / 0.3) as usize {
+            let log2 = shallowest - 0.3 * step as f64;
+            dive.compose_moments(&[(log2 * std::f64::consts::LN_2, 0.0)]).unwrap();
+            assert!(dive.kept.lock().unwrap().len() <= KEPT_KEYFRAMES);
+            used.insert((shallowest - log2 + 1e-9).floor() as usize);
+        }
+        assert_eq!(renders.load(std::sync::atomic::Ordering::Relaxed), used.len(), "each keyframe that a frame uses, once");
+        assert!(used.len() + 1 >= dive.count());
+        //Within 64-bit floats: the frames of `DiveKeyframes` with the same keyframes
+        let scales: Vec<f64> = (0..20).map(|k| 2f64.powf(shallowest) / f64::from(1_u32 << k)).collect();
+        let keyframes = DiveKeyframes { width, height, images: scales.iter().map(|scale| image_of(crate::rendering::deep::Depth::from_f64(*scale))).collect(), scales: scales.clone(), on_gpu: None };
+        let fresh = DeepDive::new((width, height), (shallowest, shallowest - 19.0), |depth| Some(image_of(depth)));
+        for moments in [vec![(0.1, 0.0)], vec![(0.0049, 0.0), (0.0052, 0.0), (0.0061, 0.3)], vec![(2f64.powf(shallowest) / 4.0, 0.0)], vec![(1e-5, 0.0)]] {
+            let expected = keyframes.compose_moments(&moments, None);
+            let composed = fresh.compose_moments(&moments.iter().map(|&(scale, rotation)| (scale.ln(), rotation)).collect::<Vec<_>>()).unwrap();
+            assert!(composed.iter().zip(&expected).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "{moments:?}");
+        }
     }
 
     #[test]
