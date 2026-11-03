@@ -153,6 +153,8 @@ fn headless_app() -> MandelbrotApp {
     let mut app = MandelbrotApp::new(&crate::Config::default());
     app.use_settings_file(super::settings::settings_path());
     app.video_folder = videos_folder();
+    //A video takes the GPU when it starts: wait for it (it opens in the background, and the window takes it a moment later, which the command line did not)
+    app.wait_for_gpu();
     app
 }
 

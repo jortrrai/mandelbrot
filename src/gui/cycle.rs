@@ -5,6 +5,9 @@
 //! layer is rendered (a frame like those of a drag). The next step follows once the last one is on the screen, so the steps come as fast as the recolors show
 //! them, and the offset follows the clock. With *Auto blur during flights* the one-sample frames are blurred like the frames of a flight. When the cycling
 //! stops, the render of the view continues to its full quality. A flight, a gesture or a stretched palette (which has no offset) pauses it.
+//!
+//! The rotation cycle (issue #228) turns the view by itself around the center of the screen, `rotation_speed` degrees per second, without end. Its steps are
+//! one-sample frames too, rendered anew (a turned view has new sample positions); when it stops, the view is rendered with full quality at the angle it reached.
 
 use std::time::Instant;
 
@@ -27,17 +30,23 @@ pub(super) const DIVIDE_SWING: f64 = 2.0;
 pub(super) const DIVIDE_PERIODS: std::ops::RangeInclusive<f64> = 1.0..=600.0;
 pub(super) const DIVIDE_PERIOD: f64 = 20.0;
 
+/// The range of the speed of the rotation cycle, in degrees per second (negative: clockwise), and the speed at first: a whole turn in 36 seconds
+pub(super) const ROTATION_SPEEDS: std::ops::RangeInclusive<f64> = -360.0..=360.0;
+pub(super) const ROTATION_SPEED: f64 = 10.0;
+
 /// The longest time one step catches up with (a pause of the window does not make the colors jump)
 const MAX_STEP_SECONDS: f64 = 0.25;
 
 impl MandelbrotApp {
-    /// Moves the color offset on with the clock while the colors cycle, see the module
+    /// Moves the color offset, the divide and the rotation on with the clock while they cycle, see the module
     pub(super) fn cycle_colors(&mut self, ctx: &egui::Context, now: Instant) {
-        if !self.color_cycling && self.divide_cycle.is_none() {
+        if !self.cycling() {
             return;
         }
         let last = *self.cycle_last.get_or_insert(now);
-        if self.flight.is_some() || self.gesture_active || self.m.palette.stretch {
+        //(A stretched palette has no offset to move, and pauses the colors; the rotation turns on)
+        let colors_move = !self.m.palette.stretch;
+        if self.flight.is_some() || self.gesture_active || (!colors_move && !self.rotation_cycling) {
             self.cycle_last = Some(now); //Paused: the colors go on from here afterwards
             return;
         }
@@ -49,23 +58,37 @@ impl MandelbrotApp {
         if seconds <= 0.0 {
             return;
         }
-        if self.color_cycling {
+        if self.color_cycling && colors_move {
             self.m.palette.offset = (self.m.palette.offset + self.cycle_rate * seconds).rem_euclid(PALETTE_LENGTH);
         }
         //The divide breathes around the one it started at: up and down DIVIDE_SWING doublings, a whole swing in `divide_period` seconds (issue #203)
-        if let Some((start, phase)) = self.divide_cycle {
+        if let Some((start, phase)) = self.divide_cycle.filter(|_| colors_move) {
             let phase = phase + seconds / self.divide_period.max(0.1);
-            let doublings = DIVIDE_SWING * (std::f64::consts::TAU * phase).sin();
-            self.m.palette.divide = (start * doublings.exp2()).clamp(crate::mandelbrot_set::MIN_DIVIDE, crate::mandelbrot_set::MAX_DIVIDE);
+            self.m.palette.divide = cycled_divide(start, phase);
             self.divide_cycle = Some((start, phase.fract()));
         }
+        if self.rotation_cycling {
+            //(`set_rotation` keeps the angle within one turn: the cycle wraps around without end)
+            self.c.set_rotation(self.c.rotation() + (self.rotation_speed * seconds).to_radians());
+            self.rotation_slider = self.c.rotation();
+        }
         self.cycle_last = Some(now);
-        self.start_render_as("Cycling the colors", RenderKind::GestureFrame { moved: true });
+        //A turned view has new sample positions: nothing is kept, only the colors of a view that stays where it is are recolored
+        self.start_render_as("Cycling", RenderKind::GestureFrame { moved: !self.rotation_cycling });
     }
 
-    /// Whether the colors or the divide cycle (then every step is a one-sample frame, see `cycle_colors`)
+    /// Whether the colors, the divide or the rotation cycle (then every step is a one-sample frame, see `cycle_colors`)
     pub(super) const fn cycling(&self) -> bool {
-        self.color_cycling || self.divide_cycle.is_some()
+        self.color_cycling || self.divide_cycle.is_some() || self.rotation_cycling
+    }
+
+    /// Starts or stops the rotation cycle (issue #228); when it stops, the view is rendered with its full quality at the angle it reached
+    pub(super) fn toggle_rotation_cycle(&mut self) {
+        self.rotation_cycling = !self.rotation_cycling;
+        self.cycle_last = None;
+        if !self.rotation_cycling {
+            self.render(&format!("Turned the view to {:.2}°", self.c.rotation().to_degrees()));
+        }
     }
 
     /// Starts or stops the cycling of the iteration divide (issue #203); when it stops, the view is rendered with its full quality from the divide it has
@@ -89,4 +112,17 @@ impl MandelbrotApp {
             self.render_moved(&format!("Cycled the colors to {}", super::points::palette_description(self.m.palette)));
         }
     }
+}
+
+/// The divide of the cycle that started at `start`, at `phase` (0 to 1) of its swing: `DIVIDE_SWING` doublings up and down. Near a limit of the divide
+/// (`MIN_DIVIDE`, `MAX_DIVIDE`) the swing bounces back off it instead of waiting there until it turns (issue #231: from 0.1 it paused half the time)
+pub(super) fn cycled_divide(start: f64, phase: f64) -> f64 {
+    let (low, high) = (crate::mandelbrot_set::MIN_DIVIDE.log2(), crate::mandelbrot_set::MAX_DIVIDE.log2());
+    let mut doublings = start.clamp(crate::mandelbrot_set::MIN_DIVIDE, crate::mandelbrot_set::MAX_DIVIDE).log2() + DIVIDE_SWING * (std::f64::consts::TAU * phase).sin();
+    if doublings < low {
+        doublings = 2.0 * low - doublings;
+    } else if doublings > high {
+        doublings = 2.0 * high - doublings;
+    }
+    doublings.exp2().clamp(crate::mandelbrot_set::MIN_DIVIDE, crate::mandelbrot_set::MAX_DIVIDE)
 }

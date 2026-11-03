@@ -33,6 +33,9 @@ pub(super) struct Keyframe {
     /// The rotation of the view, in radians (issue #217)
     #[serde(default)]
     pub(super) rotation: f64,
+    /// The Julia set of the keyframe, by its parameter c (issue #229); none: the Mandelbrot set. All keyframes of a sequence are in the same set
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) julia: Option<(f64, f64)>,
 }
 
 impl Keyframe {
@@ -77,7 +80,7 @@ impl MandelbrotApp {
     /// The current view as a keyframe: its exact center (see `depth`), scale, iteration limit and colors
     fn current_keyframe(&self) -> Keyframe {
         let location = self.current_point(String::new(), String::new()).location;
-        Keyframe { real: location.real, imaginary: location.imaginary, scale: location.scale, max_iterations: location.max_iterations, divide: self.m.palette.divide, offset: self.m.palette.offset, stretch: self.m.palette.stretch, rotation: self.c.rotation() }
+        Keyframe { real: location.real, imaginary: location.imaginary, scale: location.scale, max_iterations: location.max_iterations, divide: self.m.palette.divide, offset: self.m.palette.offset, stretch: self.m.palette.stretch, rotation: self.c.rotation(), julia: location.julia }
     }
 
     /// The sequence of the keyframes and the typed times (a time that is not a positive number makes it incomplete)
@@ -97,6 +100,10 @@ impl MandelbrotApp {
     /// Shows keyframe `index`: its view, limit and colors
     pub(super) fn go_to_keyframe(&mut self, index: usize) {
         let Some(keyframe) = self.sequence_keyframes.get(index).cloned() else { return };
+        if keyframe.julia.is_some() && self.m.julia.is_none() {
+            self.mandelbrot_view = Some(self.c.get_view());
+        }
+        self.m.julia = keyframe.julia;
         self.c.set_view(&crate::complex_plane::View::new(keyframe.real, keyframe.imaginary, keyframe.scale));
         self.c.set_rotation(keyframe.rotation);
         self.depth_center = Some(crate::complex::Complex::new(keyframe.real, keyframe.imaginary));
@@ -112,6 +119,10 @@ impl MandelbrotApp {
             return;
         }
         let (first, last) = (sequence.keyframes[0].clone(), sequence.keyframes[sequence.keyframes.len() - 1].clone());
+        if sequence.keyframes.iter().any(|keyframe| keyframe.julia != first.julia) {
+            self.log("A sequence stays in one set: its keyframes are partly in a Julia set and partly elsewhere (or in different Julia sets); make them all in the same set");
+            return;
+        }
         let flight = super::video::VideoFlight {
             from: first.camera(),
             to: last.camera(),
@@ -124,6 +135,7 @@ impl MandelbrotApp {
             limits: (first.max_iterations, last.max_iterations),
             palettes: (first.palette(), last.palette()),
             rotations: (first.rotation, last.rotation),
+            julia: first.julia,
             sequence: Some(sequence),
             to_exact: None,
         };
