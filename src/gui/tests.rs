@@ -2267,7 +2267,7 @@ fn a_deep_dive_paused_halfway_resumes_to_exactly_the_same_video_frame_by_frame_a
             let (mut app, folder) = app_with_points(&[("deep.json", &place)]);
             app.video_folder = folder.join("saved");
             app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
-            (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_speed) = (32, 24, 1, 2, 400);
+            (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_speed) = (32, 24, 1, 4, 400); //(About 100 frames: enough chunks to pause in the middle also on a busy machine)
             (app.video_quality, app.video_chunk_frames, app.pace, app.route, app.constant_speed, app.video_keyframe_dives) = (super::video::VideoQuality::Lossless, Some(5), super::flight::Pace::Constant, super::flight::Route::Dive, 20.0, keyframe_dives);
             app.go_to_point_of_interest(0);
             app.skip_flight();
