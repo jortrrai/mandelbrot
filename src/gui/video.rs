@@ -646,8 +646,13 @@ impl MandelbrotApp {
         let julia = flight.julia;
         let resolution = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution())?;
         let path = flight.path();
-        let music = self.followed_music();
-        let speed = if music.is_some() { 100.0 } else { self.video_speed_for(path.duration())? }; //(A video that follows music lasts as long as the track)
+        //A length typed in Fit to length that is not the track's wins (#274): the video lasts that long, and the track is cut there or repeated until then
+        let typed = self.video_fit_length.then(|| self.target_length()).flatten();
+        let music = self.followed_music().map(|music| {
+            let other_length = typed.zip(super::music::track_length(std::path::Path::new(&music.path))).is_some_and(|(typed, track)| (typed.as_secs_f64() - track.as_secs_f64()).abs() > 0.5);
+            super::music::Music { follows: !other_length, ..music }
+        });
+        let speed = if music.as_ref().is_some_and(|music| music.follows) { 100.0 } else { self.video_speed_for(path.duration())? }; //(A video that follows music lasts as long as the track)
         Ok(VideoSpec {
             flight,
             width: resolution.width,
@@ -701,7 +706,7 @@ impl MandelbrotApp {
         let thread_scheduler = Arc::clone(&scheduler);
         let path = flight.path();
         //The clock of the frames: at the video speed, or following the music (see `music`)
-        let music_clock = match music.as_ref().map(|music| super::music::clock_of_track(std::path::Path::new(&music.path), music.strength)).transpose() {
+        let music_clock = match music.as_ref().filter(|music| music.follows).map(|music| super::music::clock_of_track(std::path::Path::new(&music.path), music.strength)).transpose() {
             Ok(clock) => clock.map(Arc::new),
             Err(reason) => {
                 self.log(format!("Could not render the video: {reason}"));
@@ -1127,7 +1132,7 @@ impl MandelbrotApp {
             let _ = std::fs::remove_dir_all(&parts);
             let mut with_music = String::new();
             if let Some(music) = &music {
-                match super::music::add_track(&video, std::path::Path::new(&music.path)) {
+                match super::music::add_track(&video, std::path::Path::new(&music.path), !music.follows) {
                     Ok(()) => with_music = format!(", with the music of {}", music.path),
                     Err(reason) => with_music = format!(" ({reason})"),
                 }
@@ -1406,8 +1411,12 @@ impl MandelbrotApp {
             let path = flight.path();
             let size = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution()).map(|resolution| (resolution.width, resolution.height));
             let music_length = self.followed_music_length();
+            //(A typed length that is not the track's wins, see `video_spec`)
+            let typed = self.video_fit_length.then(|| self.target_length()).flatten();
+            let music_length = music_length.filter(|track| typed.is_none_or(|typed| (typed.as_secs_f64() - track.as_secs_f64()).abs() <= 0.5));
             let speed = size.clone().and_then(|_| match (self.followed_music(), music_length) {
                 (Some(_), Some(length)) => Ok(path.duration().as_secs_f64() * 100.0 / length.as_secs_f64()), //(The average speed: the video lasts as long as the track)
+                (Some(_), None) if typed.is_some() => self.video_speed_for(path.duration()),
                 (Some(music), None) => Err(format!("The music {} cannot be read", music.path)),
                 (None, _) => self.video_speed_for(path.duration()),
             });

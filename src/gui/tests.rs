@@ -2629,6 +2629,36 @@ fn a_video_that_follows_music_lasts_as_long_as_the_track_slows_down_in_its_quiet
 }
 
 #[test]
+fn a_typed_length_wins_over_the_song_which_is_cut_or_repeated_to_fit() {
+    if !ffmpeg_available() {
+        return;
+    }
+    //Issue #274: a 4 s song, and a video of 2 s or 6 s typed in Fit to length: the video lasts the typed length, and its sound as long (cut, or repeated)
+    for (typed, frames) in [(2_u64, 49), (6, 145)] {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        std::fs::create_dir_all(&folder).unwrap();
+        let track = folder.join("song.wav");
+        assert!(std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=4"]).arg(&track).status().unwrap().success());
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps) = (32, 24, 1, 24);
+        app.pace = super::flight::Pace::Fast;
+        app.go_to_point_of_interest(0);
+        app.skip_flight();
+        app.use_music_file(&track);
+        (app.video_fit_length, app.video_length) = (true, [String::new(), String::from("0"), typed.to_string()]);
+        app.start_video();
+        let message = wait_for_video(&mut app);
+        assert!(message.starts_with(&format!("Video of the flight: {frames} of {frames} frames")) && message.contains("with the music"), "{typed} s at 24 FPS: {message}");
+        let video = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mp4")).unwrap();
+        let probe = std::process::Command::new("ffprobe").args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=duration", "-of", "csv=p=0"]).arg(&video).output().unwrap();
+        let sound: f64 = String::from_utf8_lossy(&probe.stdout).trim().parse().unwrap();
+        assert!((sound - typed as f64).abs() < 0.2, "{typed} s of sound: {sound}");
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+#[test]
 fn a_video_that_pulses_on_the_beat_zooms_in_on_every_kick_and_is_at_rest_between_them() {
     if !ffmpeg_available() {
         return;

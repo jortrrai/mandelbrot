@@ -37,6 +37,14 @@ pub(super) struct Music {
     /// (Absent in the manifests of videos started before #221: no pulse)
     #[serde(default)]
     pub(super) pulse: f64,
+    /// Whether the video lasts as long as the track and moves with it (else a length typed in *Fit to length* that is not the track's: the video lasts that
+    /// long at an even speed, and the track is cut there or repeated until then, issue #274; absent in older manifests: it follows the track)
+    #[serde(default = "follows_by_default")]
+    pub(super) follows: bool,
+}
+
+const fn follows_by_default() -> bool {
+    true
 }
 
 /// The sample rate the kicks are found at, and the step of the envelope of the bass, in samples (10 ms)
@@ -294,12 +302,16 @@ pub(super) fn swells_of_track(path: &Path, count: usize) -> Result<(Vec<f64>, f6
 }
 
 /// Puts the track `music` into the video `video` (which then has it as its sound; a track longer than the video is cut at its end)
-pub(super) fn add_track(video: &Path, music: &Path) -> Result<(), String> {
+pub(super) fn add_track(video: &Path, music: &Path, repeat: bool) -> Result<(), String> {
     let extension = video.extension().and_then(|extension| extension.to_str()).unwrap_or("mp4");
     let with_track = video.with_extension(format!("with-music.{extension}"));
     let audio: &[&str] = if extension == "mkv" { &["-c:a", "flac"] } else { &["-c:a", "aac", "-b:a", "320k"] };
     let mut arguments: Vec<String> = ["-v", "error", "-y", "-i"].map(String::from).to_vec();
     arguments.push(video.display().to_string());
+    //(Repeated: as often as the video needs, `-shortest` ends it with the video)
+    if repeat {
+        arguments.extend(["-stream_loop", "-1"].map(String::from));
+    }
     arguments.push(String::from("-i"));
     arguments.push(music.display().to_string());
     arguments.extend(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"].map(String::from));
@@ -327,7 +339,7 @@ pub(super) fn is_audio(path: &Path) -> bool {
 }
 
 /// The length of the track at `path`, as ffprobe reads it
-fn track_length(path: &Path) -> Option<Duration> {
+pub(super) fn track_length(path: &Path) -> Option<Duration> {
     let output = std::process::Command::new("ffprobe").args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]).arg(path).stdin(std::process::Stdio::null()).output().ok()?;
     String::from_utf8_lossy(&output.stdout).trim().parse::<f64>().ok().filter(|seconds| seconds.is_finite() && *seconds > 0.0).map(Duration::from_secs_f64)
 }
@@ -336,7 +348,7 @@ impl super::MandelbrotApp {
     /// The music the next video follows: with *Follow the music* and a path
     pub(super) fn followed_music(&self) -> Option<Music> {
         let pulse = if self.beat_pulse { self.pulse_strength } else { 0.0 };
-        (self.follow_music && !self.music_path.trim().is_empty()).then(|| Music { path: self.music_path.trim().to_string(), strength: self.music_strength, pulse })
+        (self.follow_music && !self.music_path.trim().is_empty()).then(|| Music { path: self.music_path.trim().to_string(), strength: self.music_strength, pulse, follows: true })
     }
 
     /// The length of the followed track (read once per path), if it can be read
