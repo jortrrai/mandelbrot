@@ -11,7 +11,7 @@
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -270,13 +270,23 @@ pub(super) const fn extension(quality: VideoQuality) -> &'static str {
 /// 528 Mbit/s 4K60 video both played smoothly on Jort's PC, without a visible difference)
 pub(super) const DEFAULT_MAX_MBPS: u32 = 180;
 
-/// The arguments of ffmpeg that encode RGB frames at `fps` in `quality` for `playback` (with `nvenc`: on the GPU's HEVC encoder), at most `max_mbps` megabits
+/// Where a video is encoded: on the GPU's HEVC encoder (NVENC), on the CPU, or on the CPU because NVENC could not start for a video that was to use it: then
+/// in 10-bit HEVC like NVENC also for *Maximum* (where the CPU otherwise uses 10-bit H.264), at the same quality factor
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Encoder {
+    Gpu,
+    Cpu,
+    CpuInsteadOfGpu,
+}
+
+/// The arguments of ffmpeg that encode RGB frames at `fps` in `quality` for `playback` with `encoder`, at most `max_mbps` megabits
 /// per second on average over half a second when given (the quality level stays the target; only busier frames than the limit allows get fewer bits). The colors are converted
 /// with the BT.709 matrix and tagged so, so players show them as they were rendered; half-resolution color is made with a sharp filter. A keyframe every
 /// half second, B-frames and the index at the start of the file, as video sites ask for
-fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32, max_mbps: Option<u32>) -> Vec<String> {
+fn arguments(quality: VideoQuality, playback: Playback, encoder: Encoder, fps: u32, max_mbps: Option<u32>) -> Vec<String> {
     const FULL: &str = "scale=out_color_matrix=bt709:out_range=tv,format=";
     const HALF: &str = "scale=out_color_matrix=bt709:out_range=tv:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=";
+    let nvenc = encoder == Encoder::Gpu;
     if quality == VideoQuality::Lossless {
         return ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"].map(String::from).to_vec();
     }
@@ -285,6 +295,7 @@ fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32, m
     let mut arguments = vec![String::from("-vf")];
     arguments.extend(match playback {
         Playback::Maximum if nvenc => nvenc_hevc(&format!("{FULL}yuv444p16le")),
+        Playback::Maximum if encoder == Encoder::CpuInsteadOfGpu => vec![format!("{FULL}yuv444p10le"), "-c:v".into(), "libx265".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-tag:v".into(), "hvc1".into(), "-x265-params".into(), "log-level=error".into()],
         Playback::Maximum => vec![format!("{FULL}yuv444p10le"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into()],
         Playback::HighQuality if nvenc => [nvenc_hevc(&format!("{HALF}p010le")), vec!["-profile:v".into(), "main10".into()]].concat(),
         Playback::HighQuality => vec![format!("{HALF}yuv420p10le"), "-c:v".into(), "libx265".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-tag:v".into(), "hvc1".into(), "-x265-params".into(), "log-level=error".into()],
@@ -314,13 +325,43 @@ pub(super) fn estimate(duration: Duration, fps: u32, speed: f64, (width, height)
 /// The smallest video the GPU's HEVC encoder takes (NVENC needs at least about 129 x 33 pixels); a smaller one is encoded on the CPU
 const NVENC_SMALLEST: (usize, usize) = (160, 64);
 
-/// Whether ffmpeg can encode with the GPU's HEVC encoder in 10-bit 4:4:4 (an NVIDIA GPU with NVENC), found out once by encoding a tiny clip
-fn nvenc_works() -> bool {
-    static WORKS: OnceLock<bool> = OnceLock::new();
-    *WORKS.get_or_init(|| {
-        Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.04", "-vf", "format=yuv444p16le", "-c:v", "hevc_nvenc", "-f", "null", "-"])
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
-    })
+/// The warning of a video that the CPU encodes because the GPU's encoder is busy (see `Encoder::CpuInsteadOfGpu`)
+const CPU_INSTEAD_OF_GPU: &str = "Warning: the GPU's video encoder (NVENC) could not start (is another program using the GPU's memory?), so this video is encoded on the CPU: 10-bit HEVC at the same quality, slower to encode";
+
+/// How often, and how long apart, a chunk after the first tries the GPU's encoder again when it does not start (see `nvenc_state`)
+const NVENC_RETRIES: usize = 10;
+const NVENC_RETRY_PAUSE: Duration = Duration::from_secs(3);
+
+/// Whether the GPU's HEVC encoder works, see `nvenc_state`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Nvenc {
+    Works,
+    /// There is one, but it does not start now: other programs hold the GPU's memory (CUDA out of memory) or its encoding sessions
+    Busy,
+    /// No NVIDIA GPU or no ffmpeg with NVENC
+    Missing,
+}
+
+/// Whether the GPU's HEVC encoder starts now for a `width` x `height` video for `playback` (its pixel format), found out by encoding one black frame: it can
+/// be busy although it worked before. `path` is the file it is for (tests make it busy by name)
+fn nvenc_state((width, height): (usize, usize), playback: Playback, path: &str) -> Nvenc {
+    if cfg!(test) && path.contains("nvenc-fails") {
+        return Nvenc::Busy;
+    }
+    if width < NVENC_SMALLEST.0 || height < NVENC_SMALLEST.1 {
+        return Nvenc::Missing;
+    }
+    let format = if playback == Playback::Maximum { "yuv444p16le" } else { "p010le" };
+    let output = Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", &format!("color=black:s={width}x{height}:d=0.04"), "-vf", &format!("format={format}"), "-c:v", "hevc_nvenc", "-f", "null", "-"])
+        .stdin(Stdio::null()).stdout(Stdio::null()).output();
+    match output {
+        Ok(output) if output.status.success() => Nvenc::Works,
+        Ok(output) => {
+            let error = String::from_utf8_lossy(&output.stderr).to_lowercase();
+            if error.contains("out of memory") || error.contains("openencodesessionex failed") || error.contains("incompatible client key") { Nvenc::Busy } else { Nvenc::Missing }
+        }
+        Err(_) => Nvenc::Missing,
+    }
 }
 
 /// The time along the flight of frame `frame` of a video at `fps` and `speed` percent of the flight's speed
@@ -562,10 +603,10 @@ fn limit_at(scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations:
 
 /// `ffmpeg` encoding raw RGB frames of `width` x `height` at `fps` from its standard input into `path` in `quality` for `playback` (with `nvenc` on the GPU's
 /// encoder), if `ffmpeg` can be started
-fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, (quality, playback, max_mbps): (VideoQuality, Playback, Option<u32>), nvenc: bool) -> Option<Child> {
+fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, (quality, playback, max_mbps): (VideoQuality, Playback, Option<u32>), encoder: Encoder) -> Option<Child> {
     let (size, rate) = (format!("{width}x{height}"), fps.to_string());
     let mut command = Command::new("ffmpeg");
-    let mut arguments = arguments(quality, playback, nvenc, fps, max_mbps);
+    let mut arguments = arguments(quality, playback, encoder, fps, max_mbps);
     if std::path::Path::new(path).extension().is_some_and(|extension| extension == "mkv") {
         //Options of MP4 files only: a chunk is Matroska, and the joined file gets them (see `chunks::join_chunks`)
         for option in ["-tag:v", "-movflags"] {
@@ -691,6 +732,7 @@ impl MandelbrotApp {
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
         let (sender, result) = mpsc::channel();
+        let notices = self.notice_sender.clone();
         let destination = flight.name.clone();
         let saved = self.video_folder.clone();
         std::thread::spawn(move || {
@@ -705,8 +747,17 @@ impl MandelbrotApp {
             let video = saved.join(format!("{name}.{}", extension(quality)));
             //The chunks so far, when the video was started before (see `chunks`), or a new manifest; ffmpeg is needed for the video file
             let encoding = Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success());
-            let nvenc_now = width >= NVENC_SMALLEST.0 && height >= NVENC_SMALLEST.1 && nvenc_works();
-            let mut manifest = chunks::read_manifest(&parts).filter(|manifest| manifest.total == total).unwrap_or_else(|| chunks::Manifest::new(manifest_spec, total, chunk_frames, nvenc_now));
+            let nvenc = nvenc_state((width, height), playback, &parts.display().to_string());
+            let nvenc_now = nvenc == Nvenc::Works;
+            let mut manifest = chunks::read_manifest(&parts).filter(|manifest| manifest.total == total).unwrap_or_else(|| {
+                let mut manifest = chunks::Manifest::new(manifest_spec, total, chunk_frames, nvenc_now);
+                //A busy GPU encoder: the CPU encodes as it would (see `Encoder`)
+                manifest.cpu_instead_of_gpu = nvenc == Nvenc::Busy && quality != VideoQuality::Lossless && playback != Playback::MostCompatible;
+                if manifest.cpu_instead_of_gpu {
+                    let _ = notices.send(String::from(CPU_INSTEAD_OF_GPU));
+                }
+                manifest
+            });
             if encoding {
                 if manifest.nvenc && !nvenc_now {
                     let _ = sender.send(format!("Could not resume the video: it was started with the GPU's encoder (NVENC), which does not work now; its chunks are kept in {}", parts.display()));
@@ -776,7 +827,34 @@ impl MandelbrotApp {
                         let number = manifest.chunks_done;
                         if chunk.is_none() {
                             let path = chunks::chunk_path(&parts, number, chunks::CHUNK_EXTENSION).display().to_string();
-                            match start_ffmpeg((width, height), fps, &path, (quality, playback, max_mbps), manifest.nvenc) {
+                            //The GPU's encoder can stop working while the program runs (another program takes the GPU's memory): before the first chunk the
+                            //whole video goes to the CPU then; later the chunks so far need it (chunks of two encoders do not join), so it is waited for
+                            if manifest.nvenc && quality != VideoQuality::Lossless {
+                                let mut starts = nvenc_state((width, height), playback, &path) == Nvenc::Works;
+                                if !starts && manifest.chunks_done == 0 {
+                                    (manifest.nvenc, manifest.cpu_instead_of_gpu) = (false, playback != Playback::MostCompatible);
+                                    let _ = notices.send(String::from(CPU_INSTEAD_OF_GPU));
+                                    if let Err(err) = chunks::write_manifest(&parts, &manifest) {
+                                        *failure.lock().unwrap() = Some(format!("Could not save the progress of the video: {err}"));
+                                        cancel.store(true, Ordering::Relaxed);
+                                        return;
+                                    }
+                                    starts = true;
+                                }
+                                for _ in 0..NVENC_RETRIES {
+                                    if starts || cancel.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    std::thread::sleep(NVENC_RETRY_PAUSE);
+                                    starts = nvenc_state((width, height), playback, &path) == Nvenc::Works;
+                                }
+                                if !starts {
+                                    *failure.lock().unwrap() = Some(format!("The GPU's video encoder (NVENC) could not start for chunk {} of the video (is another program using the GPU's memory?)", number + 1));
+                                    cancel.store(true, Ordering::Relaxed);
+                                    return;
+                                }
+                            }
+                            match start_ffmpeg((width, height), fps, &path, (quality, playback, max_mbps), manifest.encoder()) {
                                 Some(child) => chunk = Some((child, 0)),
                                 None => {
                                     *failure.lock().unwrap() = Some(String::from("Could not start ffmpeg for the video"));
@@ -1026,7 +1104,7 @@ impl MandelbrotApp {
                 let _ = sender.send(message);
                 return;
             }
-            let hevc = arguments(quality, playback, manifest.nvenc, fps, max_mbps).iter().any(|argument| argument == "hevc_nvenc" || argument == "libx265");
+            let hevc = arguments(quality, playback, manifest.encoder(), fps, max_mbps).iter().any(|argument| argument == "hevc_nvenc" || argument == "libx265");
             if !chunks::join_chunks(&parts, manifest.chunks(), &video, hevc) {
                 let _ = sender.send(format!("Could not join the chunks of the video into {}; they are kept in {}", video.display(), parts.display()));
                 return;
@@ -1049,6 +1127,10 @@ impl MandelbrotApp {
 
     /// Takes the final message of the video job
     pub(super) fn poll_video(&mut self, ctx: &egui::Context) {
+        //(Its notices, such as the encoder it falls back to; the window also takes them in `poll_job`, the command line only here)
+        while let Ok(notice) = self.notices.try_recv() {
+            self.log(notice);
+        }
         let Some(job) = &self.video_job else { return };
         ctx.request_repaint_after(Duration::from_millis(200));
         if let Ok(message) = job.result.try_recv() {
@@ -1379,21 +1461,24 @@ mod tests {
     fn the_tiers_keep_a_fixed_quality_for_the_player_they_are_for() {
         let has = |arguments: &[String], wanted: &[&str]| wanted.iter().all(|wanted| arguments.iter().any(|argument| argument.contains(wanted)));
         //Maximum: full color in 10 bits, on the GPU or the CPU; a fixed quantizer that follows the tier
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, true, 60, None), &["hevc_nvenc", "yuv444p16le", "constqp", "20", "bt709"]));
-        assert!(has(&arguments(VideoQuality::UltraHigh, Playback::Maximum, true, 60, None), &["16"]));
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, false, 60, None), &["libx264", "yuv444p10le", "14"]));
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, Encoder::Gpu, 60, None), &["hevc_nvenc", "yuv444p16le", "constqp", "20", "bt709"]));
+        assert!(has(&arguments(VideoQuality::UltraHigh, Playback::Maximum, Encoder::Gpu, 60, None), &["16"]));
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, Encoder::Cpu, 60, None), &["libx264", "yuv444p10le", "14"]));
+        //Instead of the GPU's encoder: 10-bit HEVC as it would be, at the quality factor of the CPU's encoders
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, Encoder::CpuInsteadOfGpu, 60, None), &["libx265", "yuv444p10le", "14", "hvc1"]));
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::HighQuality, Encoder::CpuInsteadOfGpu, 60, None), &["libx265", "yuv420p10le", "14", "hvc1"]));
         //High quality: HEVC Main 10, half the color resolution made with a sharp filter; Most compatible: 8-bit H.264
-        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, true, 60, None), &["hevc_nvenc", "p010le", "main10", "lanczos"]));
-        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, false, 60, None), &["libx265", "yuv420p10le"]));
-        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60, None), &["libx264", "yuv420p", "18"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, Encoder::Gpu, 60, None), &["hevc_nvenc", "p010le", "main10", "lanczos"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, Encoder::Cpu, 60, None), &["libx265", "yuv420p10le"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, Encoder::Gpu, 60, None), &["libx264", "yuv420p", "18"]));
         //A keyframe every half second and the index at the start; lossless is FFV1 whatever the player
-        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60, None), &["-g", "30", "+faststart"]));
-        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60, None), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
+        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, Encoder::Gpu, 60, None), &["-g", "30", "+faststart"]));
+        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, Encoder::Gpu, 60, None), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
         //Max bitrate (issue #224): the GPU's encoder keeps its quality target under a variable rate, the CPU's keep their factor, both within a buffer of half a second
-        let capped = arguments(VideoQuality::VeryHigh, Playback::HighQuality, true, 60, Some(180));
+        let capped = arguments(VideoQuality::VeryHigh, Playback::HighQuality, Encoder::Gpu, 60, Some(180));
         assert!(has(&capped, &["hevc_nvenc", "vbr", "-cq", "20", "-b:v", "180M", "-maxrate", "-bufsize", "90000k"]) && !capped.iter().any(|argument| argument == "constqp"), "{capped:?}");
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::HighQuality, false, 60, Some(180)), &["libx265", "-crf", "14", "-maxrate", "180M", "-bufsize", "90000k"]));
-        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60, Some(180)), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"], "no limit for lossless");
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::HighQuality, Encoder::Cpu, 60, Some(180)), &["libx265", "-crf", "14", "-maxrate", "180M", "-bufsize", "90000k"]));
+        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, Encoder::Gpu, 60, Some(180)), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"], "no limit for lossless");
         assert_eq!((extension(VideoQuality::Lossless), extension(VideoQuality::NearLossless)), ("mkv", "mp4"));
     }
 
