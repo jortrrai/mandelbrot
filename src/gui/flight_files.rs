@@ -91,6 +91,9 @@ struct FlightFile {
     /// A flight through keyframes (see `sequence`); `start` and `destination` are then its first and last keyframes
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sequence: Option<super::sequence::Sequence>,
+    /// The Julia set the flight is in, by its parameter c (issue #229); a flight in the Mandelbrot set has none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    julia: Option<Center>,
 }
 
 /// A flight loaded from a file: the flight, the length its video should have (if the file gives one), and the name of the file
@@ -120,6 +123,7 @@ pub(super) fn to_json(flight: &VideoFlight, length: Option<std::time::Duration>)
         dive_zoom: flight.dive_zoom,
         length_seconds: length.map(|length| length.as_secs_f64()),
         sequence: flight.sequence.clone(),
+        julia: flight.julia.map(|(real, imaginary)| Center { real, imaginary }),
     };
     serde_json::to_string_pretty(&file).expect("a flight is plain text and numbers, which always serialize") + "\n"
 }
@@ -152,6 +156,7 @@ pub(super) fn parse(text: &str, file_name: &str) -> Result<SavedFlight, String> 
         to_depth: file.destination.scale_text.as_deref().and_then(crate::rendering::deep::Depth::parse).filter(|depth| file.destination.exact.is_some() && !depth.to_f64().is_normal()),
         to_exact: file.destination.exact.clone(),
         rotations: (rotation_of(file.start.rotation), rotation_of(file.destination.rotation)),
+        julia: file.julia.map(|center| (center.real, center.imaginary)).filter(|(real, imaginary)| real.is_finite() && imaginary.is_finite()),
     };
     let length = file.length_seconds.filter(|seconds| seconds.is_finite() && *seconds > 0.0).map(std::time::Duration::from_secs_f64);
     Ok(SavedFlight { flight, length, file_name: file_name.to_string() })
@@ -246,10 +251,19 @@ impl super::MandelbrotApp {
         self.c.set_view(&crate::complex_plane::View::new(flight.from.x, flight.from.y, flight.from.scale));
         self.c.set_rotation(flight.rotations.0);
         (self.m.palette, self.m.max_iterations, self.max_iterations_input) = (flight.palettes.0, flight.limits.0, flight.limits.0);
+        //The flight flies in its own set: a flight made in a Julia set goes into it (Back then returns to the Mandelbrot view before), one made in the
+        //Mandelbrot set leaves a Julia set (issue #229)
+        if flight.julia.is_some() && self.m.julia.is_none() {
+            self.mandelbrot_view = Some(self.c.get_view());
+        }
+        if flight.julia.is_none() {
+            self.mandelbrot_view = None;
+        }
+        self.m.julia = flight.julia;
         let point = crate::points_of_interest::PointOfInterest {
             name: flight.name.clone(),
             description: String::new(),
-            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, rotation: flight.rotations.1.to_degrees(), julia: None, exact: None, deep_scale: None },
+            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, rotation: flight.rotations.1.to_degrees(), julia: flight.julia, exact: None, deep_scale: None },
             appearance: None,
             file_name: String::new(),
         };
@@ -315,6 +329,7 @@ mod tests {
             to_exact: None,
             to_depth: None,
             rotations: (0.0, 0.5),
+            julia: None,
         }
     }
 
