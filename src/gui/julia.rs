@@ -3,14 +3,14 @@
 //!
 //! The Julia set of `c` iterates `z = z² + c` from every pixel `z` of its view, where the Mandelbrot set iterates from 0 with `c` the pixel. So the Mandelbrot
 //! set is a map of the Julia sets: inside it their sets are connected, near its edge they turn into dust. They are colored like the view (its coloring, palette
-//! and smooth colors), with a plain loop on all threads: the map is small, so the renderer of the Mandelbrot set (its interior checks only hold for it) is not
-//! needed.
+//! and smooth colors) and rendered by the renderer with `MandelbrotSet::julia` set, on the CPU (the GPU's loops are the Mandelbrot set's).
 
 use eframe::egui::{self, Color32};
 
 use crate::coloring::TrueColor;
 use crate::complex::Complex;
 use crate::complex_plane::ComplexPlane;
+#[cfg(test)]
 use crate::mandelbrot_set::MandelbrotSet;
 
 use super::MandelbrotApp;
@@ -20,13 +20,32 @@ pub(super) const MAP_SIZE: (usize, usize) = (240, 160);
 const MAP_WIDTH: f64 = 3.6;
 pub(super) const MAP_ITERATIONS: u32 = 400;
 
-/// What the Julia map was rendered for: its point (as bits), the coloring, the divide and offset (as bits), stretched and smooth colors
-pub(super) type MapKey = (u64, u64, usize, u64, u64, bool, bool);
+/// The most iterations the Julia map takes from the view (its limit is the view's, at least `MAP_ITERATIONS`)
+const MAP_MAX_ITERATIONS: u32 = 20_000;
+
+/// What the Julia map was rendered for: its point (as bits), the coloring, the divide and offset (as bits), stretched and smooth colors, and the quality:
+/// samples per pixel, adaptive, iteration limit
+pub(super) type MapKey = (u64, u64, usize, u64, u64, bool, bool, u8, bool, u32);
+
+/// The render of the Julia map's layers on its own thread (issue #229): what it renders, its cancel flag, and the colors of each finished layer
+pub(super) struct MapJob {
+    key: MapKey,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    layers: std::sync::mpsc::Receiver<Vec<TrueColor>>,
+}
+
+impl Drop for MapJob {
+    fn drop(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// How many steps of an orbit are drawn at most
 pub(super) const ORBIT_STEPS: usize = 500;
 
 /// The colors of the Julia set of `c`, `width` x `height` pixels of the plane `plane`, colored like `m` with `coloring_function`, on all render threads
+/// (one sample per pixel: the reference the renderer's Julia sets are checked against)
+#[cfg(test)]
 pub(super) fn julia_image(plane: &ComplexPlane, m: &MandelbrotSet, c: &Complex, (width, height): (usize, usize), coloring_function: fn(f64, f64) -> TrueColor) -> Vec<TrueColor> {
     let mut colors = vec![TrueColor::new(0, 0, 0); width * height];
     let rows_per_chunk = height.div_ceil(crate::rendering::render_thread_count()).max(1);
@@ -110,7 +129,9 @@ impl MandelbrotApp {
     }
 
     /// Draws the orbit of the point under the mouse over the image (with *Show orbit*), and the Julia map in the top right of the image (with *Julia map*):
-    /// the Julia set of the pinned point, or of the point under the mouse. A middle click pins the point under the mouse (or unpins)
+    /// the Julia set of the pinned point, of the point under the mouse, or else of the center of the view. A middle click pins the point under the mouse (or unpins).
+    /// The map is rendered with the view's quality, layer by layer on its own thread, and only once the view's image is finished: it never competes with it
+    /// (issue #229)
     pub(super) fn julia_overlays(&mut self, ui: &egui::Ui, rect: egui::Rect) {
         //(In a Julia set the orbits and the map of the Mandelbrot set's points do not apply)
         if (!self.show_orbit && !self.show_julia) || self.m.julia.is_some() {
@@ -141,25 +162,82 @@ impl MandelbrotApp {
         if !self.show_julia {
             return;
         }
-        let c = self.julia_pinned.map(|(x, y)| Complex::new(x, y)).or(hovered);
-        let Some(c) = c else { return };
-        //The map again only for another point or other colors
-        let key = (c.x.to_bits(), c.y.to_bits(), self.coloring_index, self.m.palette.divide.to_bits(), self.m.palette.offset.to_bits(), self.m.palette.stretch, self.m.smooth_coloring);
-        if self.julia_map.as_ref().is_none_or(|(old, _)| *old != key) {
-            let mut m = self.m.clone();
-            m.max_iterations = MAP_ITERATIONS;
-            let colors = julia_image(&map_plane(), &m, &c, MAP_SIZE, self.coloring_function);
-            let rgb = crate::pixel_buffer::rgb_bytes(&colors, self.p.color_channel_mapping);
-            let texture = ui.ctx().load_texture("julia", egui::ColorImage::from_rgb(MAP_SIZE.into(), &rgb), egui::TextureOptions::LINEAR);
-            self.julia_map = Some((key, texture));
-        }
-        let Some((_, texture)) = &self.julia_map else { return };
+        let (c, of) = match (self.julia_pinned, hovered) {
+            (Some((x, y)), _) => (Complex::new(x, y), " (pinned)"),
+            (None, Some(point)) => (point, ""),
+            (None, None) => (self.c.center(), " (center)"),
+        };
+        self.update_julia_map(ui.ctx(), &c);
+        let Some((_, texture, _)) = &self.julia_map else { return };
         let size = egui::vec2(MAP_SIZE.0 as f32, MAP_SIZE.1 as f32).min(rect.size() * 0.4);
         let map = egui::Rect::from_min_size(egui::pos2(rect.max.x - size.x - 8.0, rect.min.y + 8.0), size);
         painter.rect_filled(map.expand(2.0), 3.0, Color32::from_black_alpha(160));
         painter.image(texture.id(), map, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
-        let label = format!("Julia c = {}{}", complex_text((c.x, c.y)), if self.julia_pinned.is_some() { " (pinned)" } else { "" });
+        let label = format!("Julia c = {}{of}", complex_text((c.x, c.y)));
         painter.text(map.left_bottom() + egui::vec2(4.0, -4.0), egui::Align2::LEFT_BOTTOM, label, egui::FontId::proportional(11.0), Color32::WHITE);
+    }
+
+    /// Brings the Julia map toward the Julia set of `c`: takes the layers its render has finished, and starts its render once the view's image is finished.
+    /// While the view renders, a map render under way stops, so the view has every thread (the map keeps what it showed)
+    fn update_julia_map(&mut self, ctx: &egui::Context, c: &Complex) {
+        let iterations = self.m.max_iterations.clamp(MAP_ITERATIONS, MAP_MAX_ITERATIONS);
+        let key = (c.x.to_bits(), c.y.to_bits(), self.coloring_index, self.m.palette.divide.to_bits(), self.m.palette.offset.to_bits(), self.m.palette.stretch, self.m.smooth_coloring,
+            self.supersampling_amount.max(1), self.adaptive_supersampling, iterations);
+        if let Some(job) = &self.julia_map_job {
+            let (mut newest, mut finished) = (None, false);
+            loop {
+                match job.layers.try_recv() {
+                    Ok(colors) => newest = Some(colors),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+            let job_key = job.key;
+            let complete = finished && !job.cancel.load(std::sync::atomic::Ordering::Relaxed);
+            if let Some(colors) = newest {
+                let rgb = crate::pixel_buffer::rgb_bytes(&colors, self.p.color_channel_mapping);
+                let texture = ctx.load_texture("julia", egui::ColorImage::from_rgb(MAP_SIZE.into(), &rgb), egui::TextureOptions::LINEAR);
+                self.julia_map = Some((job_key, texture, complete));
+            } else if complete {
+                if let Some((shown, _, done)) = &mut self.julia_map {
+                    *done |= *shown == job_key;
+                }
+            }
+            if finished {
+                self.julia_map_job = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(30));
+            }
+        }
+        let view_busy = self.job.is_some() || !self.buffer_is_complete || self.flight.is_some();
+        if view_busy {
+            //The view first: a map render under way stops, and starts again once the view is finished
+            self.julia_map_job = None;
+            return;
+        }
+        let shown_done = self.julia_map.as_ref().is_some_and(|(shown, _, done)| *shown == key && *done);
+        let under_way = self.julia_map_job.as_ref().is_some_and(|job| job.key == key);
+        if shown_done || under_way {
+            return;
+        }
+        let mut m = self.m.clone();
+        (m.max_iterations, m.julia) = (iterations, Some((c.x, c.y)));
+        let (cancel, (sender, layers)) = (std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), std::sync::mpsc::channel());
+        let (thread_cancel, coloring_function, samples) = (std::sync::Arc::clone(&cancel), self.coloring_function, key.7);
+        let adaptive = self.adaptive_supersampling.then(crate::rendering::AdaptiveSampling::default);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let plane = map_plane();
+            crate::rendering::Render::new(&plane, &m, MAP_SIZE.0, MAP_SIZE.1, coloring_function).supersampling(samples).adaptive(adaptive).cancel_with(&thread_cancel).run(|colors, _| {
+                let _ = sender.send(colors.to_vec());
+                repaint.request_repaint();
+            });
+        });
+        self.julia_map_job = Some(MapJob { key, cancel, layers });
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
     }
 }
 

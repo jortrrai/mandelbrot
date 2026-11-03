@@ -5,6 +5,10 @@
 //! the swells and sections rather than every beat, and scaled between the quiet and the loud parts of the track (its 5th and 95th percentiles). The speed of
 //! the flight at a moment is `1 - strength + strength · (MIN_SPEED + (MAX_SPEED - MIN_SPEED) · loudness)`, and the flight's clock is that speed added up,
 //! scaled so the flight ends with the track. Rendering the same track again gives the same frames (also when a video is resumed).
+//!
+//! *Pulse on the beat* (issue #221) makes the view boom like a speaker cone on every kick drum of the track: the kicks are found in its bass (40 to 120 Hz, see
+//! `kicks_of_samples`), and on each the view zooms in quickly and settles back with a slight bounce past rest (see `pulse_shape`), on top of everything else
+//! the video does.
 
 use std::path::Path;
 use std::time::Duration;
@@ -24,11 +28,136 @@ const SMOOTHING: f64 = 2.0;
 const MIN_SPEED: f64 = 0.25;
 const MAX_SPEED: f64 = 1.75;
 
-/// The music of a video: the audio file, and how much it steers the speed (0: an even speed, 1: fully)
+/// The music of a video: the audio file, how much it steers the speed (0: an even speed, 1: fully), and how far the view zooms in on a kick (0: no pulse,
+/// 0.05: 5%; see `BeatPulse`)
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Music {
     pub(super) path: String,
     pub(super) strength: f64,
+    /// (Absent in the manifests of videos started before #221: no pulse)
+    #[serde(default)]
+    pub(super) pulse: f64,
+}
+
+/// The sample rate the kicks are found at, and the step of the envelope of the bass, in samples (10 ms)
+const BEAT_RATE: usize = 8000;
+const BEAT_HOP: usize = 80;
+
+/// The band of a kick drum, in Hz
+const KICK_BAND: (f64, f64) = (40.0, 120.0);
+
+/// Two kicks are at least this far apart, in seconds (at most 300 a minute)
+const KICK_GAP: f64 = 0.2;
+
+/// The pulse of a kick: how long it pushes in, how fast it decays and how long one swing of its bounce takes, in seconds, and when it is over
+const PULSE_ATTACK: f64 = 0.03;
+const PULSE_DECAY: f64 = 0.07;
+const PULSE_SWING: f64 = 0.4;
+const PULSE_END: f64 = 0.6;
+
+/// The strength of the pulse at first (5% zoom) and its range
+pub(super) const PULSE_STRENGTH: f64 = 0.05;
+pub(super) const PULSE_STRENGTHS: std::ops::RangeInclusive<f64> = 0.0..=0.3;
+
+/// The shape of one pulse `seconds` after its kick: 0 before it, up to 1 in `PULSE_ATTACK` (smoothly), then back to rest within about 0.2 s, past it by about
+/// 8% at the bottom of the bounce (a speaker cone), and 0 after `PULSE_END`
+pub(super) fn pulse_shape(seconds: f64) -> f64 {
+    if !(0.0..PULSE_END).contains(&seconds) {
+        return 0.0;
+    }
+    if seconds < PULSE_ATTACK {
+        let rise = seconds / PULSE_ATTACK;
+        return rise * rise * (3.0 - 2.0 * rise);
+    }
+    let after = seconds - PULSE_ATTACK;
+    (-after / PULSE_DECAY).exp() * (std::f64::consts::TAU * after / PULSE_SWING).cos()
+}
+
+/// The kicks of a track: the moments of its kick drums, each with its weight (harder kicks a little more)
+#[derive(Clone, Debug, Default)]
+pub(super) struct BeatPulse {
+    kicks: Vec<(f64, f64)>,
+}
+
+impl BeatPulse {
+    /// The kicks found in the samples of a track (see `kicks_of_samples`)
+    pub(super) fn of_samples(samples: &[f64], rate: usize) -> BeatPulse {
+        BeatPulse { kicks: kicks_of_samples(samples, rate) }
+    }
+
+    /// The moments of the kicks, in seconds
+    pub(super) fn moments(&self) -> Vec<f64> {
+        self.kicks.iter().map(|(moment, _)| *moment).collect()
+    }
+
+    /// How far the view is zoomed in by the pulses `seconds` into the track, at `strength` (0.05: 5% at the top of a normal kick); negative at the bottom of
+    /// a bounce. The scale of the view is divided by `1 + zoom`
+    pub(super) fn zoom_at(&self, seconds: f64, strength: f64) -> f64 {
+        let first = self.kicks.partition_point(|(moment, _)| *moment < seconds - PULSE_END);
+        self.kicks[first..].iter().take_while(|(moment, _)| *moment <= seconds).map(|(moment, weight)| strength * weight * pulse_shape(seconds - moment)).sum()
+    }
+}
+
+/// A biquad filter (RBJ's cookbook): `low` true for a low-pass, false for a high-pass at `frequency` Hz, run over `samples` at `rate`
+fn biquad(samples: &[f64], rate: usize, frequency: f64, low: bool) -> Vec<f64> {
+    let omega = std::f64::consts::TAU * frequency / rate as f64;
+    let (sin, cos) = omega.sin_cos();
+    let alpha = sin / std::f64::consts::SQRT_2; //(Q = 1/√2: Butterworth)
+    let (b0, b1) = if low { ((1.0 - cos) / 2.0, 1.0 - cos) } else { (f64::midpoint(1.0, cos), -(1.0 + cos)) };
+    let (a0, a1, a2) = (1.0 + alpha, -2.0 * cos, 1.0 - alpha);
+    let (b0, b1, b2, a1, a2) = (b0 / a0, b1 / a0, b0 / a0, a1 / a0, a2 / a0);
+    let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+    samples.iter().map(|&x| {
+        let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        (x2, x1, y2, y1) = (x1, x, y1, y);
+        y
+    }).collect()
+}
+
+/// The kicks of the mono `samples` at `rate`: the moments (in seconds) where the loudness of the bass (`KICK_BAND`, every 10 ms, in decibels) jumps up much
+/// more than it does around it, at least `KICK_GAP` apart, each with its weight: from 0.7 for a soft kick to 1.3 for a hard one (1 for a typical one)
+pub(super) fn kicks_of_samples(samples: &[f64], rate: usize) -> Vec<(f64, f64)> {
+    let hop = (rate * BEAT_HOP / BEAT_RATE).max(1);
+    let bass = biquad(&biquad(samples, rate, KICK_BAND.1, true), rate, KICK_BAND.0, false);
+    let level: Vec<f64> = bass.chunks(hop).map(|chunk| 10.0 * (chunk.iter().map(|sample| sample * sample).sum::<f64>() / chunk.len() as f64 + 1e-10).log10()).collect();
+    //The rise of the level (onset strength): how far it is above the highest of the two steps before. Before the track it is as quiet as the quietest bass of
+    //the track (its 5th percentile), so a kick right at its start counts, and a track that starts with its bass at its usual level does not
+    let mut quietest = level.clone();
+    quietest.sort_by(f64::total_cmp);
+    let before_the_track = quietest.get(quietest.len() / 20).copied().unwrap_or(0.0);
+    let rise: Vec<f64> = (0..level.len()).map(|index| (level[index] - level[index.saturating_sub(2)..index].iter().copied().fold(before_the_track, f64::max)).max(0.0)).collect();
+    let step = hop as f64 / rate as f64;
+    let (near, around) = ((0.05 / step).round() as usize, (0.5 / step).round() as usize);
+    let mut sorted = rise.clone();
+    sorted.sort_by(f64::total_cmp);
+    let typical = sorted.get(((sorted.len().saturating_sub(1)) as f64 * 0.99) as usize).copied().unwrap_or(0.0);
+    let mut kicks: Vec<(f64, f64)> = Vec::new();
+    for index in 0..rise.len() {
+        let window = |reach: usize| &rise[index.saturating_sub(reach)..(index + reach + 1).min(rise.len())];
+        let peak = window(near).iter().all(|other| *other <= rise[index]);
+        let mean = window(around).iter().sum::<f64>() / window(around).len() as f64;
+        //(A clear jump: well above the rises around it, and at least 6 dB and a quarter of the typical kick, so noise and the tails of notes are not kicks)
+        if peak && rise[index] > 2.0 * mean && rise[index] >= 6.0_f64.max(0.25 * typical) {
+            let moment = index as f64 * step;
+            match kicks.last_mut() {
+                Some((last, strength)) if moment - *last < KICK_GAP => {
+                    if rise[index] > *strength {
+                        (*last, *strength) = (moment, rise[index]);
+                    }
+                }
+                _ => kicks.push((moment, rise[index])),
+            }
+        }
+    }
+    let mut strengths: Vec<f64> = kicks.iter().map(|(_, strength)| *strength).collect();
+    strengths.sort_by(f64::total_cmp);
+    let median = strengths.get(strengths.len() / 2).copied().unwrap_or(1.0).max(f64::MIN_POSITIVE);
+    kicks.into_iter().map(|(moment, strength)| (moment, (strength / median).clamp(0.7, 1.3))).collect()
+}
+
+/// The kicks of the track at `path` (ffmpeg decodes it), see `kicks_of_samples`
+pub(super) fn pulse_of_track(path: &Path) -> Result<BeatPulse, String> {
+    Ok(BeatPulse::of_samples(&samples_of_track(path, BEAT_RATE)?, BEAT_RATE))
 }
 
 /// The clock of a flight that follows a track: the share of the flight (0 to 1) at every `STEP` of the track
@@ -94,14 +223,19 @@ pub(super) fn clock_of_track(path: &Path, strength: f64) -> Result<MusicClock, S
     Ok(clock_of_levels(&levels_of_track(path)?, strength))
 }
 
-/// The loudness (RMS) of the track at `path` every `STEP` seconds (ffmpeg decodes it)
-fn levels_of_track(path: &Path) -> Result<Vec<f64>, String> {
-    let output = std::process::Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(path).args(["-ac", "1", "-ar", &SAMPLE_RATE.to_string(), "-f", "s16le", "-"])
+/// The samples of the track at `path`, mono at `rate` (ffmpeg decodes it)
+fn samples_of_track(path: &Path, rate: usize) -> Result<Vec<f64>, String> {
+    let output = std::process::Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(path).args(["-ac", "1", "-ar", &rate.to_string(), "-f", "s16le", "-"])
         .stdin(std::process::Stdio::null()).output().map_err(|err| format!("Could not start ffmpeg to read the music: {err}"))?;
     if !output.status.success() || output.stdout.len() < 4 {
         return Err(format!("ffmpeg could not read the music {}: {}", path.display(), String::from_utf8_lossy(&output.stderr).trim()));
     }
-    let samples: Vec<f64> = output.stdout.as_chunks::<2>().0.iter().map(|pair| f64::from(i16::from_le_bytes(*pair)) / 32768.0).collect();
+    Ok(output.stdout.as_chunks::<2>().0.iter().map(|pair| f64::from(i16::from_le_bytes(*pair)) / 32768.0).collect())
+}
+
+/// The loudness (RMS) of the track at `path` every `STEP` seconds (ffmpeg decodes it)
+fn levels_of_track(path: &Path) -> Result<Vec<f64>, String> {
+    let samples = samples_of_track(path, SAMPLE_RATE)?;
     let per_step = (SAMPLE_RATE as f64 * STEP) as usize;
     Ok(samples.chunks(per_step).map(|chunk| (chunk.iter().map(|sample| sample * sample).sum::<f64>() / chunk.len() as f64).sqrt()).collect())
 }
@@ -201,7 +335,8 @@ fn track_length(path: &Path) -> Option<Duration> {
 impl super::MandelbrotApp {
     /// The music the next video follows: with *Follow the music* and a path
     pub(super) fn followed_music(&self) -> Option<Music> {
-        (self.follow_music && !self.music_path.trim().is_empty()).then(|| Music { path: self.music_path.trim().to_string(), strength: self.music_strength })
+        let pulse = if self.beat_pulse { self.pulse_strength } else { 0.0 };
+        (self.follow_music && !self.music_path.trim().is_empty()).then(|| Music { path: self.music_path.trim().to_string(), strength: self.music_strength, pulse })
     }
 
     /// The length of the followed track (read once per path), if it can be read
@@ -213,10 +348,17 @@ impl super::MandelbrotApp {
         self.music_length.as_ref().and_then(|(_, length)| *length)
     }
 
-    /// Takes the audio file `path` (dropped on the window) as the music of videos
+    /// Takes the audio file `path` (dropped on the window, or opened with *Open song...*) as the music of videos, which then last as long as it
     pub(super) fn use_music_file(&mut self, path: &Path) {
         self.music_path = path.display().to_string();
         self.follow_music = true;
+        //The length boxes show the song's length (issue #221): the video lasts as long as it
+        if let Some(length) = track_length(path) {
+            let seconds = length.as_secs_f64();
+            let (hours, minutes) = ((seconds / 3600.0).floor(), ((seconds % 3600.0) / 60.0).floor());
+            let rest = seconds - hours * 3600.0 - minutes * 60.0;
+            self.video_length = [if hours > 0.0 { format!("{hours}") } else { String::new() }, format!("{minutes}"), format!("{:.2}", rest).trim_end_matches('0').trim_end_matches('.').to_string()];
+        }
         self.log(format!("Videos follow the music of {} now (see Follow the music)", path.display()));
     }
 
@@ -226,8 +368,25 @@ impl super::MandelbrotApp {
             ui.checkbox(&mut self.follow_music, "Follow the music:").on_hover_text("The video lasts as long as the track, moves faster through its loud, energetic parts and slower through its calm ones, and has the track as its sound");
             ui.add(eframe::egui::TextEdit::singleline(&mut self.music_path).desired_width(160.0).hint_text("audio file (or drop it here)"))
                 .on_hover_text("The path of an audio file (MP3, WAV, FLAC, ...); an audio file dropped on the window lands here");
+            //(The system's file chooser, modal: the window waits for it. Not in the Android app, which has no file chooser of rfd)
+            #[cfg(not(target_os = "android"))]
+            if ui.button("Open song...").on_hover_text("Chooses an audio file as the music of videos: they get it as their sound and last exactly as long as it").clicked() {
+                let mut dialog = rfd::FileDialog::new().set_title("Open a song for videos").add_filter("Audio", &AUDIO_EXTENSIONS);
+                if let Some(home) = super::sharing::home_folder() {
+                    dialog = dialog.set_directory(home);
+                }
+                if let Some(path) = dialog.pick_file() {
+                    self.use_music_file(&path);
+                }
+            }
             ui.add_enabled(self.follow_music, eframe::egui::Slider::new(&mut self.music_strength, 0.0..=1.0).text("strength").custom_formatter(|value, _| format!("{:.0}%", value * 100.0)))
                 .on_hover_text("How much the music changes the speed: 0% an even speed all the way, 100% from a quarter of the average speed in the calmest parts to 1.75 times it in the loudest");
+        });
+        ui.horizontal(|ui| {
+            ui.add_enabled(self.follow_music, eframe::egui::Checkbox::new(&mut self.beat_pulse, "Pulse on the beat"))
+                .on_hover_text("On every kick drum of the music the view booms like a speaker: it zooms in quickly and settles back with a slight bounce, on top of everything else the video does (Fast dives are off then)");
+            ui.add_enabled(self.follow_music && self.beat_pulse, eframe::egui::Slider::new(&mut self.pulse_strength, PULSE_STRENGTHS).text("zoom").custom_formatter(|value, _| format!("{:.1}%", value * 100.0)))
+                .on_hover_text("How far the view zooms in on a typical kick; harder kicks a little more, softer ones less");
         });
     }
 }
@@ -235,6 +394,60 @@ impl super::MandelbrotApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pulse_pushes_in_fast_and_settles_back_with_a_slight_bounce() {
+        assert_eq!((pulse_shape(-0.01), pulse_shape(0.0)), (0.0, 0.0));
+        assert!((pulse_shape(PULSE_ATTACK) - 1.0).abs() < 1e-12, "the top after the attack");
+        let shape: Vec<f64> = (0..600).map(|ms| pulse_shape(f64::from(ms) / 1000.0)).collect();
+        let lowest = shape.iter().copied().fold(f64::MAX, f64::min);
+        assert!((-0.12..-0.04).contains(&lowest), "a slight bounce past rest: {lowest}");
+        assert!(shape[250..].iter().all(|value| value.abs() < 0.05) && shape[400..].iter().all(|value| value.abs() < 0.01), "at rest again after about a quarter of a second");
+        assert_eq!(pulse_shape(PULSE_END), 0.0);
+    }
+
+    /// Eight seconds at `rate`: a kick drum (60 Hz, decaying) every half second, hi-hats (2.5 kHz) between them, and a quiet chord all along
+    fn drum_loop(rate: usize) -> (Vec<f64>, Vec<f64>) {
+        let kicks: Vec<f64> = (0..16).map(|beat| 0.25 + 0.5 * f64::from(beat)).collect();
+        let samples = (0..8 * rate).map(|index| {
+            let t = index as f64 / rate as f64;
+            //(The first kick of every bar of four is louder)
+            let kick: f64 = kicks.iter().enumerate().filter(|(_, kick)| t >= **kick).map(|(beat, kick)| (t - kick, if beat % 4 == 0 { 0.8 } else { 0.5 })).map(|(age, loud)| loud * (-age / 0.12).exp() * (std::f64::consts::TAU * 60.0 * age).sin()).sum();
+            let hat: f64 = kicks.iter().map(|kick| t - kick - 0.25).filter(|age| *age >= 0.0).map(|age| 0.3 * (-age / 0.03).exp() * (std::f64::consts::TAU * 2500.0 * age).sin()).sum();
+            let chord = 0.05 * ((std::f64::consts::TAU * 440.0 * t).sin() + (std::f64::consts::TAU * 554.0 * t).sin());
+            kick + hat + chord
+        }).collect();
+        (samples, kicks)
+    }
+
+    #[test]
+    fn the_kicks_are_found_in_the_bass_and_not_on_the_hi_hats() {
+        let (samples, expected) = drum_loop(BEAT_RATE);
+        let kicks = kicks_of_samples(&samples, BEAT_RATE);
+        let found: Vec<f64> = kicks.iter().map(|(moment, _)| *moment).collect();
+        assert_eq!(found.len(), expected.len(), "every kick once, no hi-hat: {found:?}");
+        for (found, expected) in found.iter().zip(&expected) {
+            assert!((found - expected).abs() <= 0.03, "on the beat: {found} for {expected}");
+        }
+        //The first kick of every bar is harder: its pulse is bigger
+        assert!(kicks[0].1 > kicks[1].1 && kicks[4].1 > kicks[5].1, "{kicks:?}");
+        let pulse = BeatPulse::of_samples(&samples, BEAT_RATE);
+        let top = pulse.zoom_at(found[1] + PULSE_ATTACK, 0.05);
+        assert!((0.03..=0.07).contains(&top), "about 5% at the top of a kick: {top}");
+        assert!(pulse.zoom_at(found[1] - 0.05, 0.05).abs() < 1e-3, "still between the kicks");
+    }
+
+    #[test]
+    #[ignore = "the kicks of a real track (MANDELBROT_TRACK=song.mp3), by hand"]
+    fn the_kicks_of_a_real_track() {
+        let path = std::env::var("MANDELBROT_TRACK").expect("MANDELBROT_TRACK");
+        let moments = pulse_of_track(Path::new(&path)).unwrap().moments();
+        let gaps: Vec<f64> = moments.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        let mut sorted = gaps;
+        sorted.sort_by(f64::total_cmp);
+        let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+        println!("{} kicks, median gap {median:.3} s ({:.1} a minute); the first: {:?}", moments.len(), 60.0 / median.max(1e-9), &moments[..moments.len().min(24)]);
+    }
 
     #[test]
     fn the_swells_are_the_most_prominent_peaks_of_the_smoothed_loudness_in_order() {
