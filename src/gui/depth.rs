@@ -9,9 +9,12 @@ use eframe::egui;
 use super::MandelbrotApp;
 use crate::complex_plane::{Precision, View};
 
-/// The range of the depth slider, in zoom (1 / scale): from ten times further out than the reset view to 10^300, past where 64-bit coordinates end and the
-/// deep view takes over (see `deep_view`), as far as the 64-bit floats of its differences reach
+/// The range of the depth controls, in zoom (1 / scale), within 64-bit floats: from ten times further out than the reset view to 10^300, past where 64-bit
+/// coordinates end and the deep view takes over (see `deep_view`)
 pub(super) const DEPTH_ZOOMS: std::ops::RangeInclusive<f64> = 0.1..=1e300;
+
+/// The range of the depth slider, in powers of ten of the zoom: beyond the 64-bit floats of `DEPTH_ZOOMS`, to 10^1000 in the deep view (issue #263)
+pub(super) const DEPTH_POWERS: std::ops::RangeInclusive<f64> = -1.0..=1000.0;
 
 impl MandelbrotApp {
     /// The center of the view exactly as the depth control keeps it: the plane stores its edges, so its center read back can differ in the last bits, and
@@ -42,6 +45,22 @@ impl MandelbrotApp {
         }
         self.c = deeper;
         self.depth_center = Some(crate::complex::Complex::new(center.x, center.y));
+        true
+    }
+
+    /// Sets the zoom of the view to `10^power`, keeping its center exactly: `set_depth` within 64-bit floats, beyond them the deep view (refused, false, for a
+    /// Julia set, which has no deep view, and with the zoom limit on)
+    pub(super) fn set_depth_power(&mut self, power: f64) -> bool {
+        let power = power.clamp(*DEPTH_POWERS.start(), *DEPTH_POWERS.end());
+        if power <= DEPTH_ZOOMS.end().log10() {
+            return self.set_depth(10f64.powf(power));
+        }
+        let mut deepest = self.c.clone();
+        deepest.set_view(&View::new(self.c.center().x, self.c.center().y, f64::MIN_POSITIVE));
+        if self.m.julia.is_some() || self.zoom_refused(&deepest) {
+            return false;
+        }
+        self.set_deep_depth(crate::rendering::deep::Depth::from_log2(-power * std::f64::consts::LOG2_10));
         true
     }
 
@@ -92,15 +111,17 @@ impl MandelbrotApp {
     /// The depth slider and *Lock center*
     pub(super) fn depth_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let mut zoom = 1.0 / self.shown_scale();
+            //(In powers of ten of the zoom, which go beyond 64-bit floats: ×1e400 is 400)
+            let mut power = -self.shown_depth().log10();
             //(Only what is dragged or typed is clamped: a view beyond the range of the slider, zoomed out further with the wheel, stays where it is)
-            let response = ui.add(egui::Slider::new(&mut zoom, DEPTH_ZOOMS).clamping(egui::SliderClamping::Edits).logarithmic(true).text("depth").custom_formatter(|zoom, _| format!("×{zoom:.3e}")).custom_parser(|text| text.trim().trim_start_matches(['×', 'x']).trim().parse().ok()))
+            let response = ui.add(egui::Slider::new(&mut power, DEPTH_POWERS).clamping(egui::SliderClamping::Edits).text("depth").custom_formatter(|power, _| format_power(power))
+                .custom_parser(|text| crate::rendering::deep::Depth::parse(text.trim().trim_start_matches(['×', 'x'])).map(crate::rendering::deep::Depth::log10)))
                 .on_hover_text("Zooms in and out around the center of the view, without ever moving it: explore a dive up and down its exact path, and tune its colors at chosen depths");
             self.depth_dragging = response.dragged();
             if response.changed() {
                 self.gesture_active = self.depth_dragging; //A frame of a gesture while the slider moves; the full quality when it stops (see `settle_gesture`)
-                if self.set_depth(zoom) {
-                    self.render(&format!("Set the depth to ×{:.3e} around the center", 1.0 / self.shown_scale()));
+                if self.set_depth_power(power) {
+                    self.render(&format!("Set the depth to {} around the center", super::status::format_depth_zoom(self.shown_depth())));
                 }
             }
             ui.checkbox(&mut self.lock_center, "Lock center").on_hover_text("The mouse keeps the center of the view too: the wheel zooms around the center instead of the cursor, and dragging and right-clicking do not move the view");
@@ -110,4 +131,9 @@ impl MandelbrotApp {
             self.render(&format!("Turned fast deep zoom {}", if self.fast_deep { "on" } else { "off" }));
         }
     }
+}
+
+/// The zoom `10^power` as the depth slider shows it, `×1.000e400`
+fn format_power(power: f64) -> String {
+    format!("×{}", crate::rendering::deep::Depth::scientific(power, 3))
 }

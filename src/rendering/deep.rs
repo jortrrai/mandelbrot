@@ -62,6 +62,23 @@ impl Fixed {
         times_two_to(top, i32::try_from(i64::from(u32::try_from(shift).unwrap_or(u32::MAX)) - i64::from(self.bits)).unwrap_or(i32::MIN))
     }
 
+    /// This number plus `offset · 2^power`, exactly (a step of a view deeper than 64-bit floats reach, see `Depth`)
+    pub fn plus_scaled(&self, offset: f64, power: i32) -> Fixed {
+        let (shifted, power) = (Fixed { value: self.value.clone(), bits: self.bits }, i64::from(power));
+        if offset == 0.0 || !offset.is_finite() {
+            return shifted;
+        }
+        //offset = mantissa · 2^exponent exactly (a normal or subnormal float); in fixed point: mantissa · 2^(exponent + power + bits)
+        let raw = offset.to_bits();
+        let exponent = i64::from(((raw >> 52) & 0x7ff) as u16);
+        let mantissa = if exponent == 0 { (raw & ((1 << 52) - 1)) << 1 } else { (raw & ((1 << 52) - 1)) | (1 << 52) };
+        let shift = (exponent - 1075) + power + i64::from(self.bits);
+        let magnitude = BigInt::from(mantissa);
+        let scaled = if shift >= 0 { magnitude << u32::try_from(shift).unwrap_or(0) } else { magnitude >> u32::try_from(-shift).unwrap_or(u32::MAX) };
+        let scaled = if offset < 0.0 { -scaled } else { scaled };
+        Fixed { value: &self.value + scaled, bits: self.bits }
+    }
+
     /// This number plus the 64-bit float `offset` (a step of the view: panning, zooming around a point), exactly
     pub fn plus(&self, offset: f64) -> Fixed {
         if offset == 0.0 || !offset.is_finite() {
@@ -289,7 +306,7 @@ fn position_from(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (
 }
 
 /// A positive number beyond the range of 64-bit floats, `mantissa · 2^exponent`: the scale of a view deeper than 10⁻³⁰⁰ (issue #263)
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Depth {
     /// In `[1, 2)`
     pub mantissa: f64,
@@ -318,10 +335,71 @@ impl Depth {
     pub fn log2(self) -> f64 {
         self.mantissa.log2() + f64::from(self.exponent)
     }
+
+    /// The depth of a 64-bit float (positive and normal), exactly
+    pub fn from_f64(scale: f64) -> Depth {
+        let exponent = i32::try_from((scale.to_bits() >> 52) & 0x7ff).unwrap_or(1023) - 1023;
+        Depth { mantissa: times_two_to(scale, -exponent), exponent }
+    }
+
+    /// The depth as a 64-bit float: 0 below their range, infinite above it
+    pub fn to_f64(self) -> f64 {
+        times_two_to(self.mantissa, self.exponent)
+    }
+
+    /// The depth times `factor` (positive), normalized again
+    #[must_use]
+    pub fn times(self, factor: f64) -> Depth {
+        let other = Depth::from_f64(self.mantissa * factor);
+        Depth { mantissa: other.mantissa, exponent: other.exponent + self.exponent }
+    }
+
+    /// The depth `2^log2`
+    pub fn from_log2(log2: f64) -> Depth {
+        let exponent = log2.floor();
+        Depth { mantissa: (log2 - exponent).exp2().clamp(1.0, 2.0 - f64::EPSILON), exponent: exponent.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32 }
+    }
+
+    /// `1 / depth` (the magnification of a scale)
+    #[must_use]
+    pub fn reciprocal(self) -> Depth {
+        if self.mantissa <= 1.0 {
+            return Depth { mantissa: 1.0, exponent: -self.exponent };
+        }
+        Depth { mantissa: 2.0 / self.mantissa, exponent: -self.exponent - 1 }
+    }
+
+    /// The number `10^log10` in scientific notation with `decimals` decimals, `1.25e-1000` (rounded so the mantissa stays below 10)
+    pub fn scientific(log10: f64, decimals: usize) -> String {
+        let mut power = log10.floor();
+        let mut mantissa = 10f64.powf(log10 - power);
+        if format!("{mantissa:.decimals$}").starts_with("10") {
+            (mantissa, power) = (mantissa / 10.0, power + 1.0);
+        }
+        format!("{mantissa:.decimals$}e{}", power as i64)
+    }
+
+    /// The base-10 logarithm of the depth
+    pub fn log10(self) -> f64 {
+        self.log2() / std::f64::consts::LOG2_10
+    }
+
+    /// The depth as decimal text that `parse` reads back as nearly the same depth (to about 15 digits; for files)
+    pub fn to_exact_text(self) -> String {
+        Depth::scientific(self.log10(), 15)
+    }
+
+    /// The depth as decimal text, `1.25e-1000` (for the log and the view's text)
+    pub fn to_text(self) -> String {
+        Depth::scientific(self.log10(), 6)
+    }
 }
 
 /// `bits_for` for a depth beyond 64-bit floats
 pub fn bits_for_depth(depth: Depth, width: usize) -> u32 {
+    if depth.to_f64().is_normal() {
+        return bits_for(depth.to_f64(), width); //(The same bits as before at the depths of 64-bit floats: the same images)
+    }
     let pixel_log2 = depth.log2() + (2.5 / width.max(1) as f64).log2();
     (-pixel_log2).ceil().max(0.0) as u32 + 64
 }
@@ -440,11 +518,13 @@ pub fn render_positions(m: &MandelbrotSet, real: &str, imaginary: &str, scale: f
 /// `color_of` colors a smooth position. The view is turned counterclockwise by `rotation` radians; `approximate` skips steps by bilinear approximation
 /// (see `Reference`). False when `cancel` stopped it
 #[allow(clippy::too_many_arguments)] // The view, its size and samples, how to color, when to stop and where the layers go
-pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (scale, rotation): (f64, f64), (width, height): (usize, usize), samples: u8, color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync),
+pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (depth, rotation): (Depth, f64), (width, height): (usize, usize), samples: u8, color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync),
     approximate: bool, cancel: &std::sync::atomic::AtomicBool, mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
     use std::sync::atomic::Ordering;
-    let pixel = 2.5 * scale / width as f64;
-    let reference = Reference::new(m, (center_real, center_imaginary), max_offset(pixel, width, height), approximate);
+    //A pixel is `pixel · 2^depth.exponent`: the offsets are scaled by `2^-depth.exponent` (see `position_scaled`; within 64-bit floats' range bit for bit as before)
+    let pixel = 2.5 * depth.mantissa / width as f64;
+    let scaled = -depth.exponent;
+    let reference = Reference::new(m, (center_real, center_imaginary), times_two_to(max_offset(pixel, width, height), depth.exponent), approximate);
     let center = (center_real.to_f64(), center_imaginary.to_f64());
     let threads = super::render_thread_count().max(1);
     let rows_per_thread = height.div_ceil(threads);
@@ -463,7 +543,7 @@ pub fn render_layers(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &
                         //The first sample in the middle of the pixel, the others at the jitter of the 64-bit renderer
                         let (jx, jy) = if sample == 0 { (0.5, 0.5) } else { super::jitter::sample_jitter(x, y, sample) };
                         let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), rotation);
-                        let new = color_of(position(m, reference, center, offset));
+                        let new = color_of(position_scaled(m, reference, center, offset, scaled));
                         for (total, channel) in sum.iter_mut().zip([new.red, new.green, new.blue]) {
                             *total += u32::from(channel);
                         }
@@ -646,7 +726,7 @@ mod tests {
         let (real, imaginary) = (Fixed::parse("0.0000000000000000000000000000003", bits).unwrap(), Fixed::parse("1.0000000000000000000000000000002", bits).unwrap());
         let color_of = |position: f64| crate::coloring::TrueColor::new((position * 3.0) as u8, 0, 0);
         let mut layers = Vec::new();
-        assert!(render_layers(&m, &real, &imaginary, (1e-30, 0.0), (32, 24), 4, &color_of, false, &std::sync::atomic::AtomicBool::new(false), |colors, layer| layers.push((layer, colors.to_vec()))));
+        assert!(render_layers(&m, &real, &imaginary, (Depth::from_f64(1e-30), 0.0), (32, 24), 4, &color_of, false, &std::sync::atomic::AtomicBool::new(false), |colors, layer| layers.push((layer, colors.to_vec()))));
         assert_eq!(layers.iter().map(|(layer, _)| *layer).collect::<Vec<_>>(), [1, 2, 3, 4]);
         let first = render_fixed(&m, &real, &imaginary, (1e-30, 0.0), 32, 24, false, &std::sync::atomic::AtomicBool::new(false)).unwrap();
         assert!(layers[0].1.iter().zip(&first).all(|(color, position)| color.red == (position * 3.0) as u8), "the first layer: one sample in the middle of every pixel");

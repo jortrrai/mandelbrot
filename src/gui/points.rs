@@ -354,8 +354,8 @@ impl MandelbrotApp {
         if let Some(deep) = self.deep_shown() {
             //Deeper than 64-bit floats: the exact center as text, and the scale of the deep view (see `deep_view`)
             let mut point = self.point_of_the_plane(name, description);
-            point.location = points_of_interest::Location { real: deep.real.to_f64(), imaginary: deep.imaginary.to_f64(), scale: deep.scale, max_iterations: self.m.max_iterations, rotation: self.c.rotation().to_degrees(), julia: None,
-                exact: Some((deep.real.to_decimal(), deep.imaginary.to_decimal())) };
+            point.location = points_of_interest::Location { real: deep.real.to_f64(), imaginary: deep.imaginary.to_f64(), scale: deep.scale.to_f64().max(f64::MIN_POSITIVE), max_iterations: self.m.max_iterations, rotation: self.c.rotation().to_degrees(), julia: None,
+                exact: Some((deep.real.to_decimal(), deep.imaginary.to_decimal())), deep_scale: Some(deep.scale).filter(|depth| !depth.to_f64().is_normal()) };
             return point;
         }
         self.point_of_the_plane(name, description)
@@ -368,7 +368,7 @@ impl MandelbrotApp {
         PointOfInterest {
             name,
             description,
-            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations, rotation: self.c.rotation().to_degrees(), julia: self.m.julia, exact: None },
+            location: points_of_interest::Location { real: center.x, imaginary: center.y, scale: self.c.get_scale(), max_iterations: self.m.max_iterations, rotation: self.c.rotation().to_degrees(), julia: self.m.julia, exact: None, deep_scale: None },
             appearance: Some(points_of_interest::Appearance {
                 coloring: Some(coloring),
                 color_channels: Some(self.p.color_channel_mapping),
@@ -428,6 +428,11 @@ impl MandelbrotApp {
             return;
         }
         let flight = Flight::with(from, to, self.pace, self.route, self.constant_speed, self.speed_factor(), self.dive_zoom);
+        //(To a place deeper than 64-bit floats: the whole zoom, in logarithms, see `Flight::deeper`)
+        let flight = match point.location.deep_scale {
+            Some(depth) => flight.deeper(depth.log2() * std::f64::consts::LN_2),
+            None => flight,
+        };
         self.fly_path(point, destination_palette, flight);
     }
 
@@ -444,7 +449,7 @@ impl MandelbrotApp {
         let palettes = (self.m.palette, destination_palette);
         let rotations = (self.c.rotation(), point.location.rotation.to_radians());
         self.flight_name_input.clone_from(&point.name); //The name the flight is saved under, unless it is changed (see `flight_files`)
-        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None, rotations, to_exact: point.location.exact.clone() });
+        self.last_flight = Some(super::video::VideoFlight { from, to, pace: self.pace, route: self.route, constant_speed: self.constant_speed, speed: self.speed_factor(), dive_zoom: self.dive_zoom, name: point.name.clone(), limits: (self.m.max_iterations, point.location.max_iterations), palettes, sequence: None, rotations, to_exact: point.location.exact.clone(), to_depth: point.location.deep_scale });
         self.flight = Some(PointFlight { flight, elapsed: Duration::ZERO, last_frame: now, point, limits, started: now, frames: Vec::new(), fps_shown: 0, fps_updated: now, palettes, rotations, wait_logged: false });
         self.frame_ready = true; //The view on the screen is where the flight starts
     }
@@ -593,7 +598,7 @@ impl MandelbrotApp {
         self.c.set_view(&View::new(location.real, location.imaginary, location.scale));
         self.c.set_rotation(location.rotation.to_radians());
         if let Some(exact) = &location.exact {
-            self.go_to_exact(exact, location.scale); //A place saved in a deep view: there again (see `deep_view`)
+            self.go_to_exact(exact, location.deep_scale.unwrap_or_else(|| crate::rendering::deep::Depth::from_f64(location.scale))); //A place saved in a deep view: there again (see `deep_view`)
         }
         self.m.max_iterations = location.max_iterations;
         self.max_iterations_input = location.max_iterations;

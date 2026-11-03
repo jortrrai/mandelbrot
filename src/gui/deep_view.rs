@@ -16,13 +16,13 @@ use std::time::Instant;
 use super::render_job::{JobMessage, Progress};
 use super::MandelbrotApp;
 use crate::complex_plane::{Precision, View};
-use crate::rendering::deep::{self, Fixed};
+use crate::rendering::deep::{self, Depth, Fixed};
 
 /// The exact view deeper than 64-bit floats: its center, its scale, and the view of the complex plane it left (to tell when something else moved it)
 pub(super) struct DeepView {
     pub(super) real: Fixed,
     pub(super) imaginary: Fixed,
-    pub(super) scale: f64,
+    pub(super) scale: Depth,
     plane: String,
 }
 
@@ -32,6 +32,10 @@ impl MandelbrotApp {
     fn too_deep(&self, scale: f64) -> bool {
         if self.m.julia.is_some() {
             return false;
+        }
+        //(Beyond 64-bit floats' range always, #263)
+        if !(scale.is_normal()) {
+            return true;
         }
         let center = self.c.center();
         let mut plane = self.c.clone();
@@ -48,26 +52,26 @@ impl MandelbrotApp {
     }
 
     /// Sets the exact view (entering or leaving the deep view): deeper than 64-bit floats a deep view, else the complex plane alone
-    fn set_deep(&mut self, real: &Fixed, imaginary: &Fixed, scale: f64) {
-        let center = (real.to_f64(), imaginary.to_f64());
+    fn set_deep(&mut self, real: &Fixed, imaginary: &Fixed, depth: Depth) {
+        let (center, scale) = ((real.to_f64(), imaginary.to_f64()), depth.to_f64());
         if !self.too_deep(scale) {
             self.deep = None;
             self.c.set_view(&View::new(center.0, center.1, scale));
             return;
         }
-        //The complex plane at the deepest scale that 64-bit floats can show (the scale doubles until they can)
-        let mut plane_scale = scale;
+        //The complex plane at the deepest scale that 64-bit floats can show (the scale doubles until they can; from the deepest normal float for deeper views)
+        let mut plane_scale = if scale.is_normal() { scale } else { f64::MIN_POSITIVE };
         while self.too_deep(plane_scale) && plane_scale < 1.0 {
             plane_scale *= 2.0;
         }
         self.c.set_view(&View::new(center.0, center.1, plane_scale));
         //The bits the scale needs, and never fewer than the center has: zooming out and in again comes back to exactly the same point
-        let bits = deep::bits_for(scale, self.p.pixel_plane.width).max(real.bits()).max(imaginary.bits());
-        self.deep = Some(DeepView { real: real.with_bits(bits), imaginary: imaginary.with_bits(bits), scale, plane: format!("{:?}", self.c.get_view()) });
+        let bits = deep::bits_for_depth(depth, self.p.pixel_plane.width).max(real.bits()).max(imaginary.bits());
+        self.deep = Some(DeepView { real: real.with_bits(bits), imaginary: imaginary.with_bits(bits), scale: depth, plane: format!("{:?}", self.c.get_view()) });
     }
 
     /// The exact center and scale: of the deep view, or of the complex plane
-    fn exact_view(&mut self) -> (Fixed, Fixed, f64) {
+    fn exact_view(&mut self) -> (Fixed, Fixed, Depth) {
         if let Some(deep) = self.deep_view() {
             return (deep.real.clone(), deep.imaginary.clone(), deep.scale);
         }
@@ -75,7 +79,7 @@ impl MandelbrotApp {
         let (scale, width) = (self.c.get_scale(), self.p.pixel_plane.width);
         let bits = deep::bits_for(scale * 1e-6, width); //(Room to zoom in)
         let zero = Fixed::parse("0", bits).expect("0 is a number");
-        (zero.plus(center.x), zero.plus(center.y), scale)
+        (zero.plus(center.x), zero.plus(center.y), Depth::from_f64(scale))
     }
 
     /// Whether a zoom by `factor` (below 1: in) is handled by the deep view: zooming in where 64-bit floats run out, or any zoom in a deep view
@@ -85,25 +89,32 @@ impl MandelbrotApp {
 
     /// Zooms by `factor` around the pixel `(x, y)` of the view (exactly: the point under the cursor stays there), in the deep view
     pub(super) fn zoom_deep(&mut self, factor: f64, (x, y): (f64, f64)) {
-        let (real, imaginary, scale) = self.exact_view();
+        let (real, imaginary, depth) = self.exact_view();
         let (width, height) = (self.p.pixel_plane.width as f64, self.p.pixel_plane.height as f64);
-        let pixel = 2.5 * scale / width;
+        //(A pixel is `pixel · 2^depth.exponent`, see `Depth`)
+        let pixel = 2.5 * depth.mantissa / width;
         let (anchor_x, anchor_y) = deep::turned(((x - width / 2.0) * pixel, (height / 2.0 - y) * pixel), self.c.rotation());
-        self.set_deep(&real.plus(anchor_x * (1.0 - factor)), &imaginary.plus(anchor_y * (1.0 - factor)), scale * factor);
+        self.set_deep(&real.plus_scaled(anchor_x * (1.0 - factor), depth.exponent), &imaginary.plus_scaled(anchor_y * (1.0 - factor), depth.exponent), depth.times(factor));
     }
 
     /// Moves the deep view by whole pixels (as a drag does), exactly
     pub(super) fn pan_deep(&mut self, columns: i64, rows_up: i64) {
-        let (real, imaginary, scale) = self.exact_view();
-        let pixel = 2.5 * scale / self.p.pixel_plane.width as f64;
+        let (real, imaginary, depth) = self.exact_view();
+        let pixel = 2.5 * depth.mantissa / self.p.pixel_plane.width as f64;
         let (right, up) = deep::turned((columns as f64 * pixel, rows_up as f64 * pixel), self.c.rotation());
-        self.set_deep(&real.plus(right), &imaginary.plus(up), scale);
+        self.set_deep(&real.plus_scaled(right, depth.exponent), &imaginary.plus_scaled(up, depth.exponent), depth);
     }
 
     /// Sets the zoom to `zoom` around the exact center, in the deep view when it is too deep for 64-bit floats (for the depth control)
     pub(super) fn set_deep_zoom(&mut self, zoom: f64) {
         let (real, imaginary, _) = self.exact_view();
-        self.set_deep(&real, &imaginary, 1.0 / zoom);
+        self.set_deep(&real, &imaginary, Depth::from_f64(1.0 / zoom));
+    }
+
+    /// Sets the scale to `depth` around the exact center, in the deep view (for the depth control, beyond 64-bit floats)
+    pub(super) fn set_deep_depth(&mut self, depth: Depth) {
+        let (real, imaginary, _) = self.exact_view();
+        self.set_deep(&real, &imaginary, depth);
     }
 
     /// The deep view if the window shows it (without leaving it when it does not, see `deep_view`)
@@ -113,29 +124,34 @@ impl MandelbrotApp {
 
     /// The scale of the view that is shown: the deep view's, or the complex plane's
     pub(super) fn shown_scale(&self) -> f64 {
-        self.deep_shown().map_or_else(|| self.c.get_scale(), |deep| deep.scale)
+        self.deep_shown().map_or_else(|| self.c.get_scale(), |deep| deep.scale.to_f64())
+    }
+
+    /// The depth of the view that is shown, also beyond 64-bit floats (see `shown_scale`)
+    pub(super) fn shown_depth(&self) -> Depth {
+        self.deep_shown().map_or_else(|| Depth::from_f64(self.c.get_scale()), |deep| deep.scale)
     }
 
     /// Renders the deep view on a background thread (one sample a pixel), as a render of the window: its image arrives as the one layer of the render
     pub(super) fn start_deep_render(&mut self, message: &str) {
         let Some(deep) = self.deep_view() else { return };
-        let (real, imaginary, scale) = (deep.real.clone(), deep.imaginary.clone(), deep.scale);
+        let (real, imaginary, depth) = (deep.real.clone(), deep.imaginary.clone(), deep.scale);
         let (width, height) = (self.p.pixel_plane.width, self.p.pixel_plane.height);
         let mut m = self.m.clone();
         if self.auto_iterations {
-            m.max_iterations = self.auto_settings.initial_limit(scale); //(The starting limit of auto iterations, which grows with the zoom)
+            m.max_iterations = if depth.to_f64().is_normal() { self.auto_settings.initial_limit(depth.to_f64()) } else { self.auto_settings.initial_limit_at(-depth.log2()) }; //(The starting limit of auto iterations, which grows with the zoom)
         }
         let (c, coloring_function, fast_deep) = (self.c.clone(), self.coloring_function, self.fast_deep);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let (sender, receiver) = mpsc::channel();
         let samples = if self.quality_blur { self.supersampling_amount.max(1) } else { self.supersampling_amount.clamp(1, 64) };
-        let message = format!("{message} (deep zoom, ×{:.3e}, {} iterations, {samples} samples)", 1.0 / scale, m.max_iterations);
+        let message = format!("{message} (deep zoom, scale {}, {} iterations, {samples} samples)", depth.to_text(), m.max_iterations);
         std::thread::spawn(move || {
             let started = Instant::now();
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut layer_started = Instant::now();
-            let completed = deep::render_layers(&m, &real, &imaginary, (scale, c.rotation()), (width, height), samples, &color_of, fast_deep, &thread_cancel, |colors, layer| {
+            let completed = deep::render_layers(&m, &real, &imaginary, (depth, c.rotation()), (width, height), samples, &color_of, fast_deep, &thread_cancel, |colors, layer| {
                 let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass: layer, total: samples, layer_time: layer_started.elapsed(), whole: true });
                 layer_started = Instant::now();
             });
@@ -147,10 +163,10 @@ impl MandelbrotApp {
     }
 
     /// Goes to the exact center `exact` (decimal text) at `scale`: the deep view when it is too deep for 64-bit floats (a place saved in a deep view)
-    pub(super) fn go_to_exact(&mut self, exact: &(String, String), scale: f64) {
-        let bits = deep::bits_for(scale, self.p.pixel_plane.width);
+    pub(super) fn go_to_exact(&mut self, exact: &(String, String), depth: Depth) {
+        let bits = deep::bits_for_depth(depth, self.p.pixel_plane.width);
         if let (Some(real), Some(imaginary)) = (Fixed::parse(&exact.0, bits), Fixed::parse(&exact.1, bits)) {
-            self.set_deep(&real, &imaginary, scale);
+            self.set_deep(&real, &imaginary, depth);
         }
     }
 
@@ -158,7 +174,7 @@ impl MandelbrotApp {
     /// view (then the image is saved as always)
     pub(super) fn save_deep_image(&mut self) -> bool {
         let Some(deep) = self.deep_view() else { return false };
-        let (real, imaginary, scale) = (deep.real.clone(), deep.imaginary.clone(), deep.scale);
+        let (real, imaginary, depth) = (deep.real.clone(), deep.imaginary.clone(), deep.scale);
         let resolution = match self.save_size.resolve(self.default_save_resolution(), self.view_resolution()) {
             Ok(resolution) => resolution,
             Err(reason) => {
@@ -168,7 +184,7 @@ impl MandelbrotApp {
         };
         let (width, height) = (resolution.width, resolution.height);
         //The center needs the bits of a pixel of the saved size, which can be smaller than a pixel of the window
-        let bits = deep::bits_for(scale, width).max(real.bits());
+        let bits = deep::bits_for_depth(depth, width).max(real.bits());
         let (real, imaginary) = (real.with_bits(bits), imaginary.with_bits(bits));
         let time_stamp = chrono::Utc::now().to_string();
         let file_name = time_stamp.replace(':', "-").replace(' ', "_");
@@ -180,13 +196,13 @@ impl MandelbrotApp {
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut image = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(width, height));
             image.color_channel_mapping = mapping;
-            deep::render_layers(&m, &real, &imaginary, (scale, rotation), (width, height), samples, &color_of, fast_deep, &AtomicBool::new(false), |colors, layer| {
+            deep::render_layers(&m, &real, &imaginary, (depth, rotation), (width, height), samples, &color_of, fast_deep, &AtomicBool::new(false), |colors, layer| {
                 if layer == samples.max(1) {
                     image.colors.copy_from_slice(colors);
                 }
             });
             image.update_pixels();
-            let view = View::new(real.to_f64(), imaginary.to_f64(), scale);
+            let view = View::new(real.to_f64(), imaginary.to_f64(), depth.to_f64());
             let message = match image.save_as_png(&time_stamp, &view, &m, samples, Some(&place)) {
                 Ok(()) => format!("Saved the deep image to saved/{file_name}.png"),
                 Err(err) => format!("Could not save the image to saved/{file_name}.png: {err}"),

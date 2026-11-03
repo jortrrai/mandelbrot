@@ -79,6 +79,20 @@ impl CurrentView {
     }
 }
 
+/// The scale `depth` as text: all digits within 64-bit floats, beyond them (issue #263) seven, `1.250000e-400`
+pub fn format_depth(depth: crate::rendering::deep::Depth) -> String {
+    if depth.to_f64().is_normal() { format!("{}", depth.to_f64()) } else { depth.to_text() }
+}
+
+/// The zoom of the scale `depth` as text: `format_zoom` within 64-bit floats, beyond them in the same scientific notation, `×1.25e400`
+pub fn format_depth_zoom(depth: crate::rendering::deep::Depth) -> String {
+    let magnification = 1.0 / depth.to_f64();
+    if depth.to_f64().is_normal() && magnification.is_finite() {
+        return format_zoom(magnification);
+    }
+    format!("\u{d7}{}", crate::rendering::deep::Depth::scientific(depth.reciprocal().log10(), 2))
+}
+
 /// The zoom as text, "x" and the magnification: ordinary decimal numbers from 0.001 up to a billion (at most two decimals, none for a whole number, thousands separated by commas:
 ///
 /// "x1", "x2.5", "x156.25", "x15,625", "x250,000"), and scientific notation only beyond that ("x1.00e9", "x1.00e-4").
@@ -215,7 +229,7 @@ impl MandelbrotApp {
 
     /// The center and zoom of the view that is shown, read from the complex plane every frame, so it follows every move, zoom and jump at once
     pub(super) fn current_view_ui(&self, ui: &mut egui::Ui) {
-        let deep = self.deep_shown().map(|deep| CurrentView { real: deep.real.to_decimal(), imaginary: deep.imaginary.to_decimal(), scale: format!("{}", deep.scale), zoom: format_zoom(1.0 / deep.scale) });
+        let deep = self.deep_shown().map(|deep| CurrentView { real: deep.real.to_decimal(), imaginary: deep.imaginary.to_decimal(), scale: format_depth(deep.scale), zoom: format_depth_zoom(deep.scale) });
         let view = deep.clone().unwrap_or_else(|| CurrentView::new(&self.c.center(), self.c.get_scale()));
         ui.horizontal(|ui| {
             ui.heading("Current view");

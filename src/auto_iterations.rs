@@ -87,7 +87,12 @@ impl AutoPreset {
 impl AutoIterationSettings {
     /// The logarithmic starting limit for a view with the given scale (scale 1 = magnification 1; a smaller scale is a higher magnification)
     pub fn initial_limit(&self, scale: f64) -> u32 {
-        let doublings = (1.0 / scale).log2().max(0.0);
+        self.initial_limit_at((1.0 / scale).log2())
+    }
+
+    /// `initial_limit` for a magnification of `2^doublings`, also beyond the range of 64-bit floats (see `rendering::deep::Depth`)
+    pub fn initial_limit_at(&self, doublings: f64) -> u32 {
+        let doublings = doublings.max(0.0);
         let limit = f64::from(self.start) + f64::from(self.per_doubling) * doublings;
         (limit.round() as u32).clamp(self.minimum.min(self.ceiling), self.ceiling)
     }

@@ -413,6 +413,10 @@ pub(super) struct VideoFlight {
     /// deep renderer
     #[serde(default)]
     pub(super) to_exact: Option<(String, String)>,
+    /// The scale of the destination when it is deeper than 64-bit floats reach (issue #263; `to.scale` is then the smallest normal 64-bit float), see
+    /// `Flight::deeper`
+    #[serde(default)]
+    pub(super) to_depth: Option<crate::rendering::deep::Depth>,
     /// The rotation at the start and at the place, in radians, turned the short way on the way (issue #217)
     #[serde(default)]
     pub(super) rotations: (f64, f64),
@@ -422,7 +426,13 @@ impl VideoFlight {
     /// The path of the flight: through its keyframes, or from `from` to `to` at its pace along its route
     pub(super) fn path(&self) -> Flight {
         self.sequence.as_ref().map_or_else(
-            || Flight::with(self.from, self.to, self.pace, self.route, self.constant_speed, self.speed, self.dive_zoom),
+            || {
+                let flight = Flight::with(self.from, self.to, self.pace, self.route, self.constant_speed, self.speed, self.dive_zoom);
+                match self.to_depth {
+                    Some(depth) => flight.deeper(depth.log2() * std::f64::consts::LN_2),
+                    None => flight,
+                }
+            },
             |sequence| Flight::of_sequence(sequence.clone(), (self.constant_speed, self.speed)),
         )
     }
@@ -526,6 +536,29 @@ pub(super) struct VideoJob {
 
 /// The iteration limit of a frame at `scale`: the limits at the ends scaled like the zoom rule of auto iterations (`initial_limit`), blended by the zoom, as a
 /// flight with auto iterations does (see `points::FlightLimits`)
+/// `limit_at` for a flight to a destination deeper than 64-bit floats (see `VideoFlight::to_depth`), for the frame at the scale `e^ln_scale`: the same rule in
+/// logarithms
+fn deep_limit_at(ln_scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations::AutoIterationSettings) -> u32 {
+    let doublings = |ln_scale: f64| -ln_scale / std::f64::consts::LN_2;
+    let factor = |limit: u32, ln_scale: f64| f64::from(limit) / f64::from(settings.initial_limit_at(doublings(ln_scale)).max(1));
+    let (ln_from, ln_to) = (flight.from.scale.ln(), flight.to_depth.map_or_else(|| flight.to.scale.ln(), |depth| depth.log2() * std::f64::consts::LN_2));
+    let (from, to) = (factor(flight.limits.0, ln_from), factor(flight.limits.1, ln_to));
+    let t = if (ln_to - ln_from).abs() < 1e-12 { 1.0 } else { ((ln_scale - ln_from) / (ln_to - ln_from)).clamp(0.0, 1.0) };
+    let limit = f64::from(settings.initial_limit_at(doublings(ln_scale))) * from.powf(1.0 - t) * to.powf(t);
+    (limit.round() as u32).clamp(1, 1_000_000)
+}
+
+/// The exact center and the scale of the frame of a flight to a destination deeper than 64-bit floats (see `VideoFlight::to_depth`) whose camera is `camera`:
+/// the exact center of the destination moved by the camera's offset, with the bits the scale needs (`None` if the flight has no exact destination)
+fn deep_frame_view(flight: &VideoFlight, camera: super::flight::DeepCamera, width: usize) -> Option<(crate::rendering::deep::Fixed, crate::rendering::deep::Fixed, crate::rendering::deep::Depth)> {
+    use crate::rendering::deep::{bits_for_depth, Depth, Fixed};
+    let exact = flight.to_exact.as_ref()?;
+    let depth = Depth::from_log2(camera.ln_scale / std::f64::consts::LN_2);
+    let bits = bits_for_depth(depth, width);
+    let (real, imaginary) = (Fixed::parse(&exact.0, bits)?, Fixed::parse(&exact.1, bits)?);
+    Some((real.plus_scaled(camera.right * depth.mantissa, depth.exponent), imaginary.plus_scaled(camera.up * depth.mantissa, depth.exponent), depth))
+}
+
 fn limit_at(scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations::AutoIterationSettings) -> u32 {
     let factor = |limit: u32, scale: f64| f64::from(limit) / f64::from(settings.initial_limit(scale).max(1));
     let (from, to) = (factor(flight.limits.0, flight.from.scale), factor(flight.limits.1, flight.to.scale));
@@ -650,7 +683,8 @@ impl MandelbrotApp {
         let gpu = self.gpu.clone().filter(|_| use_gpu);
         //With a GPU, one more renderer renders whole frames on the GPU alone (see the renderers below)
         //A dive into a fixed center with the same colors all the way, at most 4K: composed from keyframe images (see `dive_keyframes`)
-        let dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1)
+        //(Not a dive to an exact center: its deep frames are rendered by the deep renderer, see `deep_view`)
+        let dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1 && flight.to_exact.is_none())
             .then(|| super::dive_keyframes::DivePlan::of((0..total).map(|frame| clock.time(frame)), |time| {
                 let camera = path.camera_at(time);
                 ((camera.x, camera.y), camera.scale)
@@ -709,10 +743,14 @@ impl MandelbrotApp {
                         let time = png_clock.time(frame);
                         let camera = path.camera_at(time);
                         let palette = flight.palette_at(&path, time);
+                        //(A frame of a flight to a deep destination keeps its exact center and its depth, see `deep_frame_view`)
+                        let deep_camera = flight.to_depth.and_then(|_| deep_frame_view(&flight, path.deep_at(time), width)).filter(|(_, _, depth)| depth.to_f64() < 1e-13);
+                        let limit = path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| if flight.to_depth.is_some() { deep_limit_at(path.deep_at(time).ln_scale, &flight, settings) } else { limit_at(camera.scale, &flight, settings) }));
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
                             description: format!("Frame {} of {total} of the video {name}", frame + 1),
-                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))), rotation: flight.rotation_at(&path, time).to_degrees(), julia: None, exact: None },
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: limit, rotation: flight.rotation_at(&path, time).to_degrees(), julia: None,
+                                exact: deep_camera.as_ref().map(|(real, imaginary, _)| (real.to_decimal(), imaginary.to_decimal())), deep_scale: deep_camera.map(|(_, _, depth)| depth).filter(|depth| !depth.to_f64().is_normal()) },
                             appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
                             file_name: String::new(),
                         });
@@ -890,7 +928,7 @@ impl MandelbrotApp {
                             if let Some(limit) = path.limit_at(time) {
                                 m.max_iterations = limit; //The limits of the keyframes
                             } else if let Some(settings) = auto_settings {
-                                m.max_iterations = limit_at(camera.scale, flight, settings);
+                                m.max_iterations = if flight.to_depth.is_some() { deep_limit_at(path.deep_at(time).ln_scale, flight, settings) } else { limit_at(camera.scale, flight, settings) };
                             }
                             m.palette = flight.palette_at(path, time);
                             //Motion blur: every sample in the view of its own moment within the shutter (the limit and the colors stay those of the frame)
@@ -908,14 +946,23 @@ impl MandelbrotApp {
                             let mut colors = Vec::new();
                             //A frame deeper than 64-bit floats, of a flight to an exact center: rendered there by the deep renderer (see `deep_view`)
                             let deep = flight.to_exact.as_ref().filter(|_| m.julia.is_none() && plane.precision() == crate::complex_plane::Precision::Exhausted);
-                            let completed = if let Some(exact) = deep {
+                            let deeper = deep.filter(|_| flight.to_depth.is_some()).and_then(|_| deep_frame_view(flight, path.deep_at(time), width));
+                            let completed = if let Some((real, imaginary, depth)) = deeper {
+                                //Beyond 64-bit floats: the camera of the flight in logarithms (see `Flight::deeper`), at the exact center of the destination
+                                let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
+                                crate::rendering::deep::render_layers(&m, &real, &imaginary, (depth, plane.rotation()), (width, height), samples, &color_of, fast_deep, thread_cancel, |layer, number| {
+                                    if number == samples.max(1) {
+                                        colors = layer.to_vec();
+                                    }
+                                })
+                            } else if let Some(exact) = deep {
                                 let bits = crate::rendering::deep::bits_for(camera.scale, width);
                                 let parse = |text: &str| crate::rendering::deep::Fixed::parse(text, bits);
                                 match (parse(&exact.0), parse(&exact.1)) {
                                     (Some(real), Some(imaginary)) => {
                                         let (real, imaginary) = (real.plus(camera.x - flight.to.x), imaginary.plus(camera.y - flight.to.y));
                                         let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
-                                        crate::rendering::deep::render_layers(&m, &real, &imaginary, (camera.scale, plane.rotation()), (width, height), samples, &color_of, fast_deep, thread_cancel, |layer, number| {
+                                        crate::rendering::deep::render_layers(&m, &real, &imaginary, (crate::rendering::deep::Depth::from_f64(camera.scale), plane.rotation()), (width, height), samples, &color_of, fast_deep, thread_cancel, |layer, number| {
                                             if number == samples.max(1) {
                                                 colors = layer.to_vec();
                                             }
@@ -1328,7 +1375,7 @@ mod tests {
     #[test]
     fn the_limit_of_a_video_frame_goes_from_the_limit_at_the_start_to_that_of_the_place() {
         let settings = crate::auto_iterations::AutoPreset::Balanced.settings();
-        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, rotations: (0.0, 0.0), to_exact: None };
+        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, rotations: (0.0, 0.0), to_exact: None, to_depth: None };
         assert_eq!(limit_at(1.0, &flight, &settings), 300);
         assert_eq!(limit_at(6.4e-5, &flight, &settings), 5000);
         let middle = limit_at(8e-3, &flight, &settings);

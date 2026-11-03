@@ -126,6 +126,7 @@ impl MandelbrotApp {
             rotations: (first.rotation, last.rotation),
             sequence: Some(sequence),
             to_exact: None,
+            to_depth: None,
         };
         self.fly_video_flight(&flight);
     }

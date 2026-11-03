@@ -47,6 +47,9 @@ struct End {
     /// The center as decimal text, when it is deeper than 64-bit floats (see `deep_view`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exact: Option<(String, String)>,
+    /// The scale as decimal text, when it is deeper than 64-bit floats reach (issue #263, see `points_of_interest::Location::deep_scale`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scale_text: Option<String>,
     /// The rotation of the view in degrees, counterclockwise (issue #217; files of unturned flights have none)
     #[serde(default, skip_serializing_if = "is_zero")]
     rotation: f64,
@@ -59,7 +62,7 @@ fn is_zero(value: &f64) -> bool {
 
 impl End {
     fn of(camera: Camera, max_iterations: u32, palette: ColorCycle, rotation: f64) -> End {
-        End { center: Center { real: camera.x, imaginary: camera.y }, scale: camera.scale, max_iterations, iteration_divide: palette.divide, color_offset: palette.offset, stretch_palette: palette.stretch, rotation: rotation.to_degrees(), exact: None }
+        End { center: Center { real: camera.x, imaginary: camera.y }, scale: camera.scale, max_iterations, iteration_divide: palette.divide, color_offset: palette.offset, stretch_palette: palette.stretch, rotation: rotation.to_degrees(), exact: None, scale_text: None }
     }
 
     const fn camera(&self) -> Camera {
@@ -109,7 +112,7 @@ pub(super) fn to_json(flight: &VideoFlight, length: Option<std::time::Duration>)
         format_version: FORMAT_VERSION,
         name: flight.name.clone(),
         start: End::of(flight.from, flight.limits.0, flight.palettes.0, flight.rotations.0),
-        destination: End { exact: flight.to_exact.clone(), ..End::of(flight.to, flight.limits.1, flight.palettes.1, flight.rotations.1) },
+        destination: End { exact: flight.to_exact.clone(), scale_text: flight.to_depth.map(crate::rendering::deep::Depth::to_exact_text), ..End::of(flight.to, flight.limits.1, flight.palettes.1, flight.rotations.1) },
         route: flight.route.name().to_string(),
         pace: flight.pace.name().to_string(),
         constant_speed: flight.constant_speed,
@@ -146,6 +149,7 @@ pub(super) fn parse(text: &str, file_name: &str) -> Result<SavedFlight, String> 
         limits: (file.start.max_iterations.max(1), file.destination.max_iterations.max(1)),
         palettes: (file.start.palette(), file.destination.palette()),
         sequence: file.sequence.filter(super::sequence::Sequence::is_complete),
+        to_depth: file.destination.scale_text.as_deref().and_then(crate::rendering::deep::Depth::parse).filter(|depth| file.destination.exact.is_some() && !depth.to_f64().is_normal()),
         to_exact: file.destination.exact.clone(),
         rotations: (rotation_of(file.start.rotation), rotation_of(file.destination.rotation)),
     };
@@ -245,7 +249,7 @@ impl super::MandelbrotApp {
         let point = crate::points_of_interest::PointOfInterest {
             name: flight.name.clone(),
             description: String::new(),
-            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, rotation: flight.rotations.1.to_degrees(), julia: None, exact: None },
+            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, rotation: flight.rotations.1.to_degrees(), julia: None, exact: None, deep_scale: None },
             appearance: None,
             file_name: String::new(),
         };
@@ -309,6 +313,7 @@ mod tests {
             palettes: (ColorCycle { divide: 1.0, offset: 0.0, stretch: false }, ColorCycle { divide: 0.113, offset: 278.0, stretch: false }),
             sequence: None,
             to_exact: None,
+            to_depth: None,
             rotations: (0.0, 0.5),
         }
     }
