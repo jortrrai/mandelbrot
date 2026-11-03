@@ -59,6 +59,7 @@ pub(super) struct Settings {
     f32_frames: Option<bool>,
     #[serde(default)]
     fast_deep: Option<bool>,
+    deep_f32: Option<bool>,
     quality_blur: Option<bool>,
     saved_image_blur: Option<bool>,
     render_neighborhood: Option<bool>,
@@ -181,6 +182,7 @@ impl MandelbrotApp {
             blend_frames: Some(self.blend_frames),
             f32_frames: Some(self.f32_frames),
             fast_deep: Some(self.fast_deep),
+            deep_f32: Some(self.deep_f32),
             quality_blur: Some(self.quality_blur),
             saved_image_blur: Some(self.image_quality_blur),
             render_neighborhood: Some(self.render_neighborhood),
@@ -309,6 +311,7 @@ impl MandelbrotApp {
         set(settings.blend_frames, &mut self.blend_frames);
         set(settings.f32_frames, &mut self.f32_frames);
         set(settings.fast_deep, &mut self.fast_deep);
+        set(settings.deep_f32, &mut self.deep_f32);
         set(settings.quality_blur, &mut self.quality_blur);
         set(settings.saved_image_blur, &mut self.image_quality_blur);
         set(settings.render_neighborhood, &mut self.render_neighborhood);

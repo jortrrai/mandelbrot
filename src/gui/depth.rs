@@ -176,6 +176,12 @@ impl MandelbrotApp {
         if response.changed() && self.deep_shown().is_some() {
             self.render(&format!("Turned fast deep zoom {}", if self.fast_deep { "on" } else { "off" }));
         }
+        let available = self.gpu.as_ref().is_some_and(|gpu| gpu.has_deep32()) && self.use_gpu;
+        let response = ui.add_enabled(available, egui::Checkbox::new(&mut self.deep_f32, "Fast deep GPU math (32-bit)")).on_hover_text("Off by default, an experiment (issue #288). The GPU's share of views deeper than ×10¹³ in 32-bit floats instead of 64: much faster on a GPU whose 64-bit math is slow, while chaotic pixels can get other colors. Also for saved images and videos.")
+            .on_disabled_hover_text("Needs the GPU");
+        if response.changed() && self.deep_shown().is_some() {
+            self.render(&format!("Turned fast deep GPU math {}", if self.deep_f32 { "on" } else { "off" }));
+        }
     }
 }
 

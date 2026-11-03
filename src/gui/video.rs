@@ -551,6 +551,9 @@ pub(super) struct VideoSpec {
     /// Whether frames deeper than 64-bit floats skip steps by bilinear approximation, see `rendering::deep::Reference`
     #[serde(default)]
     pub(super) fast_deep: bool,
+    /// Whether the GPU's share of deep frames is iterated in 32-bit floats, see `MandelbrotApp::deep_f32`
+    #[serde(default)]
+    pub(super) deep_f32: bool,
     /// The name of the video file (without extension), given when it is first started: a resumed video keeps its name (see `chunks`)
     #[serde(default)]
     pub(super) output: Option<String>,
@@ -712,6 +715,7 @@ impl MandelbrotApp {
             use_gpu: self.use_gpu,
             fast_gpu: self.fast_gpu,
             fast_deep: self.fast_deep,
+            deep_f32: self.deep_f32,
             output: None,
             music,
             shutter: self.video_shutter,
@@ -737,7 +741,7 @@ impl MandelbrotApp {
         let job_name = name.clone();
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, max_mbps, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, fast_deep, output: _, music, shutter, keyframe_dives } = spec;
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, max_mbps, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, fast_deep, deep_f32, output: _, music, shutter, keyframe_dives } = spec;
         let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
@@ -1021,7 +1025,7 @@ impl MandelbrotApp {
                 } else {
                     let orbit = shared_orbit.as_ref().expect("a deep dive has the orbit of its center");
                     let color_of = |position: f64| set.interpolated_color(position, |count| set.color(coloring_function, count));
-                    crate::rendering::deep::render_layers_on(&set, (orbit, (0.0, 0.0)), (depth, 0.0), (big_width, big_height), samples, &color_of, fast_deep, gpu.as_deref(), &thread_cancel, |layer, number| {
+                    crate::rendering::deep::render_layers_on(&set, (orbit, (0.0, 0.0)), (depth, 0.0), (big_width, big_height), samples, &color_of, fast_deep, gpu.as_deref().map(|gpu| (gpu, deep_f32)), &thread_cancel, |layer, number| {
                         if number == samples.max(1) {
                             colors = layer.to_vec();
                         }
@@ -1148,7 +1152,7 @@ impl MandelbrotApp {
                                 let camera = path.deep_at(time);
                                 let depth = crate::rendering::deep::Depth::from_log2(camera.ln_scale / std::f64::consts::LN_2);
                                 let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
-                                crate::rendering::deep::render_layers_on(&m, (orbit, (camera.right, camera.up)), (depth, plane.rotation()), (width, height), samples, &color_of, fast_deep, gpu.as_deref(), thread_cancel, |layer, number| {
+                                crate::rendering::deep::render_layers_on(&m, (orbit, (camera.right, camera.up)), (depth, plane.rotation()), (width, height), samples, &color_of, fast_deep, gpu.as_deref().map(|gpu| (gpu, deep_f32)), thread_cancel, |layer, number| {
                                     if number == samples.max(1) {
                                         colors = layer.to_vec();
                                     }

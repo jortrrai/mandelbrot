@@ -622,6 +622,9 @@ fn times_two_to(x: f64, power: i32) -> f64 {
 /// Below `2^-SCALED_BELOW` a pixel's difference from the reference orbit is kept scaled by a power of two, see `position_scaled`
 const SCALED_BELOW: i32 = 1000;
 
+/// `SCALED_BELOW` of the GPU's 32-bit deep loop (issue #288), within the range of 32-bit floats
+const SCALED_BELOW_32: i32 = 100;
+
 /// The position of the pixel at the offset `c · 2^-scaled` from the center (an `f64` offset that would underflow, scaled up by `2^scaled`), for views deeper
 /// than 64-bit floats reach (issue #263).
 ///
@@ -744,7 +747,7 @@ pub fn render_layers_around(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrb
 /// `position_scaled`); the CPU computes the rest
 #[allow(clippy::too_many_arguments)] // The orbit and the view, its size and samples, how to color, the GPU, when to stop and where the layers go
 pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, (f64, f64)), (depth, rotation): (Depth, f64), (width, height): (usize, usize), samples: u8,
-    color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<&super::gpu::GpuIterator>, cancel: &std::sync::atomic::AtomicBool,
+    color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<(&super::gpu::GpuIterator, bool)>, cancel: &std::sync::atomic::AtomicBool,
     mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
     use std::sync::atomic::Ordering;
     //A pixel is `pixel · 2^depth.exponent`: the offsets are scaled by `2^-depth.exponent` (see `position_scaled`; within 64-bit floats' range bit for bit as before)
@@ -767,7 +770,8 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
         let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), rotation);
         if shift == (0.0, 0.0) { offset } else { (offset.0 + shift.0, offset.1 + shift.1) }
     };
-    let gpu = gpu.filter(|gpu| gpu.deep_works());
+    //(With `true`: the 32-bit loop, an approximation, see `GpuIterator::deep_outcomes32`)
+    let gpu = gpu.filter(|(gpu, single)| if *single { gpu.has_deep32() } else { gpu.deep_works() });
     let table = gpu.map(|_| reference.gpu_table());
     let pixels = width * height;
     let chunks = pixels.div_ceil(SHARE_CHUNK);
@@ -789,7 +793,7 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
                     let _ = sender.send((range.start, cpu_positions(range)));
                 });
             }
-            if let Some((gpu, table)) = gpu.zip(table.as_ref()) {
+            if let Some(((gpu, single), table)) = gpu.zip(table.as_ref()) {
                 let (sender, next, cpu_positions, offset_of, reference) = (sender.clone(), &next, &cpu_positions, &offset_of, &reference);
                 scope.spawn(move || loop {
                     let chunk = next.fetch_add(GPU_CHUNKS, Ordering::Relaxed);
@@ -798,7 +802,7 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
                     }
                     let range = chunk * SHARE_CHUNK..((chunk + GPU_CHUNKS) * SHARE_CHUNK).min(pixels);
                     //The offsets as `position_scaled` takes them: unscaled at this depth, else scaled (the GPU does the scaled phase too)
-                    let plain = scaled <= SCALED_BELOW;
+                    let plain = scaled <= if single { SCALED_BELOW_32 } else { SCALED_BELOW };
                     let offsets: Vec<(f64, f64)> = range.clone().map(|index| {
                         let (cx, cy) = offset_of(index % width, index / width, sample);
                         if plain { (times_two_to(cx, -scaled), times_two_to(cy, -scaled)) } else { (cx, cy) }
@@ -806,7 +810,8 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
                     //The smooth position of an escaped orbit as `position_from` and `position_scaled` end (in the scaled phase: of the center); the GPU failed:
                     //these on the CPU
                     let scale = if plain { 0 } else { scaled };
-                    let positions = gpu.deep_outcomes(m, &table.input(reference.points()), &offsets, scale).map_or_else(|_| cpu_positions(range.clone()), |outcomes| {
+                    let dispatched = if single { gpu.deep_outcomes32(m, &table.input(reference.points()), &offsets, scale) } else { gpu.deep_outcomes(m, &table.input(reference.points()), &offsets, scale) };
+                    let positions = dispatched.map_or_else(|_| cpu_positions(range.clone()), |outcomes| {
                         offsets.iter().zip(&outcomes).map(|(&offset, outcome)| position_of_outcome(m, center, offset, scale, outcome)).collect()
                     });
                     let _ = sender.send((range.start, positions));
@@ -853,6 +858,43 @@ fn position_of_outcome(m: &MandelbrotSet, center: (f64, f64), (cx, cy): (f64, f6
         2 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), center),
         _ => f64::from(m.max_iterations),
     }
+}
+
+/// The share of pixels whose iteration count the GPU's 32-bit deep loop (`GpuIterator::deep_outcomes32`, issue #288) gives as the CPU's 64-bit one, on views
+/// next to c = i at 10⁻³⁰, 10⁻²⁰⁰ and 10⁻³²⁰ (the scaled phase) and in the seahorse valley at 10⁻²⁰, with and without BLA: an approximation, so not all;
+/// the self-test takes the loop when the share is high (a broken shader gives far less)
+pub(crate) fn gpu32_agrees(gpu: &super::gpu::GpuIterator) -> f64 {
+    let near_i = |power: i64| (power, format!("3e{}", power - 1), format!("1.{}2", "0".repeat((-power) as usize)));
+    let cases = [near_i(-30), near_i(-200), near_i(-320), (-20, String::from("-0.74364388703715870475"), String::from("0.13182590420531197049"))];
+    let (mut same, mut all) = (0_usize, 0_usize);
+    for (power, real, imaginary) in cases {
+        let mut m = MandelbrotSet::new(3000, 2.0);
+        m.smooth_coloring = false;
+        let (width, height) = (40, 30);
+        let Some(depth) = Depth::parse(&format!("1e{power}")) else { return 0.0 };
+        let bits = bits_for_depth(depth, width);
+        let (Some(cx), Some(cy)) = (Fixed::parse(&real, bits), Fixed::parse(&imaginary, bits)) else { return 0.0 };
+        let center = (cx.to_f64(), cy.to_f64());
+        let pixel = 2.5 * depth.mantissa / width as f64;
+        let scaled = -depth.exponent;
+        let plain = scaled <= SCALED_BELOW_32;
+        let offsets: Vec<(f64, f64)> = (0..width * height).map(|index| {
+            let (x, y) = (index % width, index / width);
+            let offset = turned(((x as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - 0.5) * pixel), 0.3);
+            if plain { (times_two_to(offset.0, depth.exponent), times_two_to(offset.1, depth.exponent)) } else { offset }
+        }).collect();
+        for approximate in [false, true] {
+            let reference = Reference::new(&m, (&cx, &cy), times_two_to(max_offset(pixel, width, height), depth.exponent), approximate);
+            let table = reference.gpu_table();
+            let Ok(outcomes) = gpu.deep_outcomes32(&m, &table.input(reference.points()), &offsets, if plain { 0 } else { scaled }) else { return 0.0 };
+            for (&offset, outcome) in offsets.iter().zip(&outcomes) {
+                let cpu = position_scaled(&m, &reference, center, if plain { (times_two_to(offset.0, scaled), times_two_to(offset.1, scaled)) } else { offset }, scaled);
+                same += usize::from(position_of_outcome(&m, center, offset, if plain { 0 } else { scaled }, outcome).floor().to_bits() == cpu.floor().to_bits());
+                all += 1;
+            }
+        }
+    }
+    if all == 0 { 0.0 } else { same as f64 / all as f64 }
 }
 
 /// Whether `gpu`'s deep loop (`gpu_deep.wgsl`) gives every pixel the CPU's position, bit for bit: views of 10⁻³⁰ and 10⁻²⁰⁰ next to c = i, of 10⁻²⁰ in
@@ -988,7 +1030,7 @@ mod tests {
             for approximate in [false, true] {
                 let (mut cpu, mut on_gpu) = (Vec::new(), Vec::new());
                 assert!(render_layers_on(&m, (&orbit, (0.4, -1.5)), (depth, 0.7), (64, 48), 3, &color_of, approximate, None, &cancel, |colors, _| cpu = colors.to_vec()));
-                assert!(render_layers_on(&m, (&orbit, (0.4, -1.5)), (depth, 0.7), (64, 48), 3, &color_of, approximate, Some(&gpu), &cancel, |colors, _| on_gpu = colors.to_vec()));
+                assert!(render_layers_on(&m, (&orbit, (0.4, -1.5)), (depth, 0.7), (64, 48), 3, &color_of, approximate, Some((&gpu, false)), &cancel, |colors, _| on_gpu = colors.to_vec()));
                 assert!(cpu.iter().zip(&on_gpu).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "10^-{power}, BLA {approximate}: the same colors");
             }
         }
@@ -1428,11 +1470,73 @@ mod depth_timing {
                 for on_the_gpu in [false, true] {
                     let started = std::time::Instant::now();
                     let mut colors = Vec::new();
-                    render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, 0.0), (width, height), 1, &color_of, approximate, on_the_gpu.then_some(&gpu), &cancel, |layer, _| colors = layer.to_vec());
+                    render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, 0.0), (width, height), 1, &color_of, approximate, on_the_gpu.then_some((&gpu, false)), &cancel, |layer, _| colors = layer.to_vec());
                     timed.push((started.elapsed().as_secs_f64() * 1000.0, colors));
                 }
                 let same = timed[0].1.iter().zip(&timed[1].1).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue));
                 println!("{name} 10^{power}, BLA {approximate}: CPU {:.0} ms, CPU + GPU {:.0} ms ({:.2}x), the same image: {same}", timed[0].0, timed[1].0, timed[0].0 / timed[1].0);
+            }
+        }
+    }
+
+    /// Issue #288: the GPU's 32-bit deep loop against its 64-bit one, at 1920 x 1080 next to c = i (10⁻¹⁰⁰, 10⁻³⁰⁸, 10⁻⁵⁰⁰) and in the seahorse valley
+    /// (10⁻³⁰), with and without BLA: the times (CPU and GPU sharing the frame), the share of pixels of the same color and the PSNR of the colors; and at
+    /// 16 x 12 against exact arithmetic, the share of pixels whose count is exact in each. Run by hand on an idle GPU with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand on an idle GPU"]
+    fn measure_deep_views_in_32_bit_floats() {
+        let Ok(gpu) = crate::rendering::gpu::GpuIterator::new() else { return };
+        println!("the 32-bit loop agrees with the CPU's counts on {:.1}% of the self-test's pixels; usable: {}", 100.0 * gpu32_agrees(&gpu), gpu.has_deep32());
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        //(The position in 24 bits, in 1/256ths of an iteration, so the two loops' positions can be compared, not just colors)
+        let color_of = |position: f64| {
+            let code = (position * 256.0) as u32;
+            crate::coloring::TrueColor::new((code & 255) as u8, (code >> 8 & 255) as u8, (code >> 16 & 255) as u8)
+        };
+        let decode = |color: &crate::coloring::TrueColor| f64::from(u32::from(color.red) | u32::from(color.green) << 8 | u32::from(color.blue) << 16) / 256.0;
+        let near_i = |power: i64| (String::from("i"), power, format!("3e{}", power - 1), format!("1.{}2", "0".repeat((-power) as usize)), 20_000_u32);
+        for (name, power, real, imaginary, iterations) in [near_i(-100), near_i(-308), near_i(-500),
+            (String::from("seahorse"), -30, String::from("-0.743643887037158704752191506114774"), String::from("0.131825904205311970493132056385139"), 50_000)] {
+            let m = MandelbrotSet::new(iterations, 2.0);
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let (width, height) = (1920, 1080);
+            let bits = bits_for_depth(depth, width);
+            let orbit = SharedOrbit::new(&Fixed::parse(&real, bits).unwrap(), &Fixed::parse(&imaginary, bits).unwrap());
+            orbit.orbit(iterations);
+            for approximate in [false, true] {
+                let mut runs = Vec::new();
+                for single in [false, true] {
+                    let started = std::time::Instant::now();
+                    let mut colors = Vec::new();
+                    render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, 0.0), (width, height), 1, &color_of, approximate, Some((&gpu, single)), &cancel, |layer, _| colors = layer.to_vec());
+                    runs.push((started.elapsed().as_secs_f64() * 1000.0, colors));
+                }
+                let (f64_colors, f32_colors) = (&runs[0].1, &runs[1].1);
+                let differences: Vec<f64> = f64_colors.iter().zip(f32_colors).map(|(a, b)| (decode(a) - decode(b)).abs()).collect();
+                let same = differences.iter().filter(|difference| **difference == 0.0).count();
+                let (over_one, worst) = (differences.iter().filter(|difference| **difference >= 1.0).count(), differences.iter().copied().fold(0.0, f64::max));
+                let mean = differences.iter().sum::<f64>() / differences.len() as f64;
+                println!("{name} 10^{power}, BLA {approximate}: f64 {:.0} ms, f32 {:.0} ms ({:.2}x); positions the same (to 1/256) {:.2}%, off by a whole iteration or more {:.3}%, mean difference {mean:.4}, worst {worst:.1}",
+                    runs[0].0, runs[1].0, runs[0].0 / runs[1].0, 100.0 * same as f64 / differences.len() as f64, 100.0 * over_one as f64 / differences.len() as f64);
+            }
+            //Against exact arithmetic, small
+            let mut counting = m.clone();
+            counting.smooth_coloring = false;
+            counting.max_iterations = counting.max_iterations.min(5000);
+            let (small_width, small_height) = (16, 12);
+            let exact = super::tests::exact_counts(&real, &imaginary, (1.0, power), (small_width, small_height), counting.max_iterations);
+            let small_orbit = SharedOrbit::new(&Fixed::parse(&real, bits_for_depth(depth, small_width) + 16).unwrap(), &Fixed::parse(&imaginary, bits_for_depth(depth, small_width) + 16).unwrap());
+            let count_color = |position: f64| {
+                let count = position as u32;
+                crate::coloring::TrueColor::new((count & 255) as u8, (count >> 8 & 255) as u8, (count >> 16) as u8)
+            };
+            for single in [false, true] {
+                let mut counts = Vec::new();
+                render_layers_on(&counting, (&small_orbit, (0.0, 0.0)), (depth, 0.0), (small_width, small_height), 1, &count_color, false, Some((&gpu, single)), &cancel, |colors, _| {
+                    counts = colors.iter().map(|color| u32::from(color.red) | u32::from(color.green) << 8 | u32::from(color.blue) << 16).collect();
+                });
+                let right = counts.iter().zip(&exact).filter(|(a, b)| a == b).count();
+                println!("{name} 10^{power}, {}: {right} of {} counts exact", if single { "f32" } else { "f64" }, exact.len());
             }
         }
     }

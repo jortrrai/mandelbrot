@@ -392,6 +392,9 @@ pub struct MandelbrotApp {
     /// Whether views deeper than 64-bit floats skip steps by bilinear approximation (off by default: much faster, a few pixels differ), see
     /// `rendering::deep::Reference`
     fast_deep: bool,
+    /// Whether the GPU's share of views deeper than 64-bit floats is iterated in 32-bit floats (issue #288: off by default, an approximation, much faster on
+    /// GPUs with a low f64 rate), see `GpuIterator::deep_outcomes32`
+    deep_f32: bool,
     /// Whether nothing deeper than the fast GPU math is rendered (on by default: deeper views are left to the CPU and are slow), see `zoom_refused` and `keep_within_zoom_limit`
     limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
@@ -575,6 +578,7 @@ impl MandelbrotApp {
             fast_gpu: true,
             f32_frames: true,
             fast_deep: false,
+            deep_f32: false,
             limit_zoom: true,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
