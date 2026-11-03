@@ -508,7 +508,7 @@ impl MandelbrotApp {
             song_results: Vec::new(),
             music_path: String::new(),
             follow_music: false,
-            music_strength: 0.5,
+            music_strength: 0.0, //(The music plugin is off by default: an even speed, see `music`)
             beat_pulse: false,
             pulse_strength: music::PULSE_STRENGTH,
             music_length: None,

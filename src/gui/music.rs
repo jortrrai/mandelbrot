@@ -1,3 +1,7 @@
+//! **Music plugin (branch `plugin/music`, not in the standard app):** this module is kept here as an optional plugin, off by default: the speed that
+//! follows the loudness (strength 0 at first), *Fit to the music* and *Pulse on the beat* (off at first). Taken out of develop because the beat detection
+//! triggers on hi-hats and noise, misses the beats of some songs and the pacing does not feel right yet (Jort, 2026-11-03). Low priority: not improved here.
+//!
 //! Music that steers a flight (issue #185): with *Follow the music* a video of a flight lasts exactly as long as its audio track, moves faster through the
 //! loud, energetic parts and slower through the calm ones, and has the track in its file.
 //!
@@ -56,7 +60,7 @@ const PULSE_SWING: f64 = 0.4;
 const PULSE_END: f64 = 0.6;
 
 /// The strength of the pulse at first (5% zoom) and its range
-pub(super) const PULSE_STRENGTH: f64 = 0.05;
+pub(super) const PULSE_STRENGTH: f64 = 0.02; //(Jort, review 8: "5% is a little bit crazy, 2% is really nice")
 pub(super) const PULSE_STRENGTHS: std::ops::RangeInclusive<f64> = 0.0..=0.3;
 
 /// The shape of one pulse `seconds` after its kick: 0 before it, up to 1 in `PULSE_ATTACK` (smoothly), then back to rest within about 0.2 s, past it by about
