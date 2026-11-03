@@ -2253,6 +2253,55 @@ fn a_paused_video_resumes_from_its_chunks_to_exactly_the_same_video() {
 }
 
 #[test]
+fn a_deep_dive_paused_halfway_resumes_to_exactly_the_same_video_frame_by_frame_and_with_fast_dives() {
+    if !ffmpeg_available() {
+        return;
+    }
+    //Issue #263: an hour-long dive is rendered in chunks and can be paused and resumed; deep, the frames after the pause (a deep frame's orbit, the keyframes
+    //of a Fast dive rendered again from where it went on) are exactly those of the video that was not paused. Here a dive to 10^-400 in lossless chunks
+    let power: u32 = 400;
+    let (real, imaginary) = (format!("3e-{}", power + 1), format!("1.{}2", "0".repeat(power as usize)));
+    let place = format!(r#"{{ "format_version": 1, "name": "Deep", "location": {{ "center": {{ "real": 0.0, "imaginary": 1.0, "real_text": "{real}", "imaginary_text": "{imaginary}" }}, "scale": 2.2250738585072014e-308, "scale_text": "1e-{power}", "max_iterations": 20000 }} }}"#);
+    for keyframe_dives in [false, true] {
+        let deep_app = || {
+            let (mut app, folder) = app_with_points(&[("deep.json", &place)]);
+            app.video_folder = folder.join("saved");
+            app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+            (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_speed) = (32, 24, 1, 2, 400);
+            (app.video_quality, app.video_chunk_frames, app.pace, app.route, app.constant_speed, app.video_keyframe_dives) = (super::video::VideoQuality::Lossless, Some(5), super::flight::Pace::Constant, super::flight::Route::Dive, 20.0, keyframe_dives);
+            app.go_to_point_of_interest(0);
+            app.skip_flight();
+            (app, folder)
+        };
+        let (mut whole, whole_folder) = deep_app();
+        whole.start_video();
+        let message = wait_for_video(&mut whole);
+        let video = std::fs::read_dir(whole_folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mkv")).expect(&message);
+        let expected = decoded_frames(&video);
+        let (mut app, folder) = deep_app();
+        app.start_video();
+        let saved = folder.join("saved");
+        let parts = || std::fs::read_dir(&saved).ok().and_then(|entries| entries.filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "parts")));
+        let started = std::time::Instant::now();
+        while parts().and_then(|parts| super::chunks::read_manifest(&parts)).is_none_or(|manifest| manifest.chunks_done < 3) {
+            assert!(started.elapsed() < Duration::from_secs(60) && app.video_job.is_some(), "three chunks done before the video ends");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.video_job.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
+        let paused = wait_for_video(&mut app);
+        assert!(paused.contains("paused"), "{paused}");
+        app.unfinished_videos = None;
+        let name = super::chunks::unfinished(&saved).first().map(|(name, _)| name.clone()).expect("listed as unfinished");
+        app.resume_video(&name);
+        let resumed = wait_for_video(&mut app);
+        assert!(resumed.contains("resumed at frame"), "Fast dives {keyframe_dives}: {resumed}");
+        assert!(expected.len() > 30 * 32 * 24 * 3, "a dive of many frames: {} bytes", expected.len());
+        assert!(decoded_frames(&saved.join(format!("{name}.mkv"))) == expected, "Fast dives {keyframe_dives}: exactly the frames of the video that was not paused");
+        let _ = (std::fs::remove_dir_all(folder), std::fs::remove_dir_all(whole_folder));
+    }
+}
+
+#[test]
 fn a_video_whose_gpu_encoder_does_not_start_is_encoded_on_the_cpu_in_10_bit_hevc() {
     //The GPU's encoder (NVENC) can be busy, as when another program holds the GPU's memory: the video is then encoded on the CPU, in the 10-bit HEVC of the
     //GPU's encoder at the same quality, and the log warns. (A test name with "nvenc-fails" makes the encoder busy, see `video::nvenc_state`)
