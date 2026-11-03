@@ -24,6 +24,8 @@ pub use cli::command_line;
 mod cycle;
 mod depth;
 mod dive_keyframes;
+#[cfg(test)]
+mod dive_quality;
 mod export;
 mod fit;
 mod flight;
