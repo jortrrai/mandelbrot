@@ -298,10 +298,8 @@ impl MandelbrotApp {
             let current = Quality { samples: self.supersampling_amount, blurred: self.quality_blur };
             let mut chosen = current;
             egui::ComboBox::from_id_salt("quality").selected_text(current.name()).show_ui(ui, |ui| {
-                for preset in Quality::PRESETS.into_iter().filter(|preset| !preset.blurred || self.blur.is_some()) {
-                    ui.selectable_value(&mut chosen, preset, preset.name());
-                }
-            }).response.on_hover_text("Samples per pixel (supersampling): more is smoother and sharper at the edges of the set, and takes longer. The blur preset takes one sample per pixel and blurs the image a little (σ 0.8 pixel), which comes close to 4x for the time of 1x.");
+                Quality::menu(ui, &mut chosen, |preset| !preset.blurred || self.blur.is_some());
+            }).response.on_hover_text("Samples per pixel (supersampling): more is smoother and sharper at the edges of the set, and takes longer. The recommended tiers go from Performance (1x + blur: one sample, blurred a little) to Ultra (32x); past 32x the difference hardly shows, so 64x and the other presets are under Advanced.");
             if chosen != current {
                 (self.supersampling_amount, self.supersampling_input, self.quality_blur) = (chosen.samples, chosen.samples, chosen.blurred);
                 (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
@@ -470,9 +468,7 @@ impl MandelbrotApp {
             let current = Quality { samples: self.image_supersampling_amount, blurred: self.image_quality_blur };
             let mut chosen = current;
             egui::ComboBox::from_id_salt("saved_quality").selected_text(current.name()).show_ui(ui, |ui| {
-                for preset in Quality::PRESETS {
-                    ui.selectable_value(&mut chosen, preset, preset.name());
-                }
+                Quality::menu(ui, &mut chosen, |_| true);
             });
             (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
         });
