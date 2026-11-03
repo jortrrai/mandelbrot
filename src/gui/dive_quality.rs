@@ -10,6 +10,10 @@
 //! PSNR is over the RGB channels against the frame by frame render (8 bits, peak 255); SSIM is the mean of 8 x 8 windows of the luma (BT.709), with the usual
 //! constants. With the fast GPU math, frame by frame is not the same twice either (two runs of a 4K flight measured 61.8 dB against each other, see #254):
 //! `MANDELBROT_NOISE=1` also renders it twice, for that floor.
+//!
+//! Frame by frame at the same samples is itself noisy where the image is detailed (a few samples a pixel), and Fast dives averages 1 to 4 keyframe pixels
+//! per pixel, so it is smoother: against it, Fast dives can look worse than it is. `MANDELBROT_REFERENCE_SAMPLES=64` renders the flight frame by frame
+//! at that many samples as well, and the report compares both, frame by frame and Fast dives, against that better reference.
 
 /// The PSNR of `test` against `reference` (RGB bytes), in dB; infinite when they are the same
 pub(super) fn psnr(reference: &[u8], test: &[u8]) -> f64 {
@@ -224,16 +228,33 @@ mod tests {
             write_rgb(&out.join(format!("{label}-frame-{}-crop-400.png", index + 1)), &side_by_side(&crop_a, &crop_b, (square * 4, square * 4)), square * 12, square * 4);
         }
         let worst_list: Vec<String> = by_psnr.iter().take(5).map(|(index, value, structure)| format!("frame {} ({value:.1} dB, SSIM {structure:.4})", index + 1)).collect();
+        //Against a better reference: frame by frame at more samples
+        let better = std::env::var("MANDELBROT_REFERENCE_SAMPLES").ok().and_then(|samples| samples.parse::<u8>().ok()).map(|reference_samples| {
+            let (truth, truth_seconds, truth_folder) = render(&flight, (width, height, reference_samples), false, settings.as_deref());
+            let against = |frames: &[std::path::PathBuf]| {
+                let values: Vec<(f64, f64)> = truth.iter().zip(frames).map(|(a, b)| {
+                    let ((a, w, h), (b, _, _)) = (read_rgb(a), read_rgb(b));
+                    (psnr(&a, &b), ssim(&a, &b, w, h))
+                }).collect();
+                let worst = values.iter().map(|value| value.0).fold(f64::INFINITY, f64::min);
+                (values.iter().map(|value| value.0.min(100.0)).sum::<f64>() / values.len().max(1) as f64, values.iter().map(|value| value.1).sum::<f64>() / values.len().max(1) as f64, worst)
+            };
+            let (one_by_one, fast) = (against(&reference), against(&fast));
+            let _ = std::fs::remove_dir_all(truth_folder);
+            format!("Against frame by frame at **{reference_samples} samples** ({truth_seconds:.1} s), a better reference than either:\n\n| {samples} samples | mean PSNR | mean SSIM | worst frame |\n|---|---|---|---|\n\
+                | frame by frame | {:.1} dB | {:.4} | {:.1} dB |\n| Fast dives | {:.1} dB | {:.4} | {:.1} dB |\n\n", one_by_one.0, one_by_one.1, one_by_one.2, fast.0, fast.1, fast.2)
+        });
         let report = format!(
             "# Fast dives against frame by frame (#271)\n\nFlight `{path}`, {} frames at {width} x {height}, {samples} samples a pixel{}.\n\n\
              | | time | frames per second |\n|---|---|---|\n| frame by frame | {reference_seconds:.1} s | {:.1} |\n| Fast dives | {fast_seconds:.1} s | {:.1} |\n\n\
              Speed-up: **{:.2}x**.\n\nAgainst frame by frame (PSNR over RGB; SSIM of the luma in 8 x 8 windows; identical frames count as 100 dB in the mean):\n\n\
              | | PSNR | SSIM |\n|---|---|---|\n| mean | {mean_psnr:.1} dB | {mean_ssim:.4} |\n| median frame | {:.1} dB | {:.4} |\n| 5th percentile | {:.1} dB | {:.4} |\n| worst frame | {:.1} dB | {:.4} |\n\n\
-             {identical} frames are identical. Worst: {}.\n\n{}Images: `worst-*.png` and `median-*.png` (frame by frame | Fast dives | difference ×8), with 400% crops where they differ most.\n",
+             {identical} frames are identical. Worst: {}.\n\n{}{}Images: `worst-*.png` and `median-*.png` (frame by frame | Fast dives | difference ×8), with 400% crops where they differ most.\n",
             fast.len(), settings.as_ref().map_or_else(String::new, |settings| format!(", settings `{settings}`")),
             reference.len() as f64 / reference_seconds, fast.len() as f64 / fast_seconds, reference_seconds / fast_seconds,
             finite(median.1), median.2, finite(fifth.1), fifth.2, finite(worst.1), worst.2, worst_list.join(", "),
-            noise.map_or_else(String::new, |(value, same)| format!("Run-to-run noise of frame by frame itself (rendered twice): {value:.1} dB mean over the frames that differ ({same} identical).\n\n")));
+            noise.map_or_else(String::new, |(value, same)| format!("Run-to-run noise of frame by frame itself (rendered twice): {value:.1} dB mean over the frames that differ ({same} identical).\n\n")),
+            better.unwrap_or_default());
         std::fs::write(out.join("report.md"), &report).unwrap();
         println!("{report}");
         let _ = (std::fs::remove_dir_all(reference_folder), std::fs::remove_dir_all(fast_folder));
