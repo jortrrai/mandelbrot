@@ -419,7 +419,7 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
     //The view of sample `sample` (see `Render::sample_planes`)
     let plane_of = |sample: u8| planes.and_then(|planes| planes.get(usize::from(sample))).unwrap_or(c);
     let sums = Mutex::new(&mut state.sums);
-    let (outcomes_sender, outcomes) = std::sync::mpsc::sync_channel::<(StreamedBatch, Option<GpuOutcomes>)>(2);
+    let (outcomes_sender, outcomes) = std::sync::mpsc::sync_channel::<(StreamedBatch, Option<GpuOutcomes>)>(GPU_COLORING_THREADS);
     let outcomes = Mutex::new(outcomes);
     thread::scope(|scope| {
         for _ in 0..GPU_COLORING_THREADS {
@@ -883,8 +883,9 @@ impl Drop for SetOnDrop<'_> {
     }
 }
 
-/// The threads that color the outcomes of a render on the GPU alone (see `Render::on_the_gpu_only`)
-const GPU_COLORING_THREADS: usize = 2;
+/// The threads that color the outcomes of a render on the GPU alone (see `Render::on_the_gpu_only`): with two the GPU waited for them (measured: a 4K 32x
+/// still of Frost on the Shoreline on the GPU alone in 1.33 s with two, 1.02 s with four, 1.00 s with eight; an RTX 5070 Ti and 16 CPU threads)
+const GPU_COLORING_THREADS: usize = 4;
 
 /// The plain f32 loop (see `Render::f32_gpu`) is only used where neighboring pixels are at least this many steps of a 64-bit number apart: 64 steps of an f32,
 /// which has 29 bits less (a scale of about 0.01 at 3840 pixels wide)
