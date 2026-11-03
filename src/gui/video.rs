@@ -322,6 +322,9 @@ pub(super) fn estimate(duration: Duration, fps: u32, speed: f64, (width, height)
     (frames, Duration::from_secs_f64(frames as f64 / f64::from(fps)), bytes)
 }
 
+/// The renderers of a video that render whole frames on the GPU alone (see `start_video_of`): two keep it busy while each waits for the end of its passes
+const GPU_RENDERERS: usize = 2;
+
 /// The smallest video the GPU's HEVC encoder takes (NVENC needs at least about 129 x 33 pixels); a smaller one is encoded on the CPU
 const NVENC_SMALLEST: (usize, usize) = (160, 64);
 
@@ -975,10 +978,12 @@ impl MandelbrotApp {
                         scheduler.set_allowed(climber.measured(rate));
                     }
                 });
-                //The renderers that the scheduler lets start frames (with all the CPU threads, handing rows to the GPU), and with a GPU one more that renders whole
-                //frames on the GPU alone: the CPU threads take most rows of a frame they share with the GPU, so the GPU would otherwise be idle much of the time
-                for renderer in 0..most_at_once + usize::from(gpu_renderer) {
-                    let on_the_gpu = renderer == most_at_once;
+                //The renderers that the scheduler lets start frames, with all the CPU threads, and with a GPU `GPU_RENDERERS` more that render whole frames on
+                //the GPU alone. The CPU's frames do not hand rows to the GPU: two renderers of the GPU's own keep it busier than rows handed to it (where they and
+                //the GPU-only frames contended for it), and the CPU's frames keep exact samples only (#253: a 4K 32x flight 25.4-26.7 s → 23.9 s, as close to
+                //the exact render as before with the fast GPU math; with the exact math every frame is the same)
+                for renderer in 0..most_at_once + if gpu_renderer { GPU_RENDERERS } else { 0 } {
+                    let on_the_gpu = renderer >= most_at_once;
                     let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu, clock, written) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu, &clock, &written);
                     scope.spawn(move || {
                         let (mut plane, mut m) = (ComplexPlane::new(width, height), m);
@@ -1037,7 +1042,7 @@ impl MandelbrotApp {
                             };
                             let mut colors = Vec::new();
                             let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
-                                .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
+                                .gpu(gpu.as_deref().filter(|_| on_the_gpu || !gpu_renderer).map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
                             let render = if planes.is_empty() { render } else { render.sample_planes(&planes) };
                             //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
                             let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
