@@ -199,8 +199,9 @@ impl<'a> Render<'a> {
         self
     }
 
-    /// Runs the CPU threads of the passes at a lower priority (Linux; elsewhere as before): for the frames of a video, so the threads that feed the GPU and
-    /// color its outcomes, and the window, get a core first (#212: with the CPU fully used, a feeder waited behind the workers and the GPU idled)
+    /// Runs the CPU threads of the passes at a lower priority (Linux; elsewhere as before), so the threads that feed the GPU and color its outcomes, and the
+    /// window, get a core first (#212: with the CPU fully used, a feeder waited behind the workers and the GPU idled). Every render with the GPU does this; this
+    /// asks for it without one too
     #[must_use]
     pub const fn in_the_background(mut self) -> Self {
         self.background = true;
@@ -250,6 +251,9 @@ impl<'a> Render<'a> {
     #[allow(clippy::too_many_lines)] // The setup of a render (its state, previews, recolor) and its loop over the layers
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
         let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset, first_row, sample_planes, background } = self;
+        //With the GPU the CPU threads always run at the lower priority: the thread that feeds the GPU then gets a core first (a 4K still at the place Wow, where
+        //the GPU computes exactly: 0.86 s → 0.72 s, the GPU doing half the samples instead of 30%), and so does the window
+        let background = background || gpu.is_some();
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
         //(The samples remember whether the fast math was asked for, see `SampleKey`)
         let fast_key = fast_gpu && gpu.is_some();
