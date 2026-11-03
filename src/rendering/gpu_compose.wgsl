@@ -1,6 +1,7 @@
 // A frame of a dive composed from keyframe images (see `gui::dive_keyframes`), bit for bit as the CPU composes it: for every pixel and every moment of its
 // motion blur, four bilinear taps of the moment's keyframe in f32 (every operation rounds as on the CPU: NoContraction), their average rounded to a color,
-// and the sum of those colors over the moments. The CPU divides the sums by the number of moments, as it does for its own.
+// and the average of those colors over the moments, rounded (the number of moments is a power of two, so multiplying by its inverse divides exactly, as the CPU
+// does).
 
 struct Params {
     width: u32,
@@ -8,6 +9,8 @@ struct Params {
     // The width of a keyframe
     big_width: u32,
     moments: u32,
+    // 1 / moments
+    inverse: f32,
 }
 
 // A moment: where its keyframe starts in `images`, and where its taps start in `taps`: two rows of `width` column taps (tap x 0.25, then 0.75), then two of
@@ -29,8 +32,8 @@ struct Tap {
 @group(0) @binding(1) var<storage, read> moments: array<Moment>;
 @group(0) @binding(2) var<storage, read> taps: array<Tap>;
 @group(0) @binding(3) var<storage, read> images: array<u32>;
-// Two words per pixel: red | green << 16, and blue
-@group(0) @binding(4) var<storage, read_write> sums: array<u32>;
+// The color of every pixel: red | green << 8 | blue << 16
+@group(0) @binding(4) var<storage, read_write> colors: array<u32>;
 
 fn texel(index: u32) -> vec3<f32> {
     let packed = images[index];
@@ -71,8 +74,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) g
             // (value / 4).round() of the CPU: a quarter is exact, and floor(x + 0.5) rounds half away from zero for these sums
             total = total + floor(sum * 0.25 + vec3<f32>(0.5, 0.5, 0.5));
         }
-        let sums_of_pixel = vec3<u32>(total);
-        sums[pixel * 2u] = sums_of_pixel.x | (sums_of_pixel.y << 16u);
-        sums[pixel * 2u + 1u] = sums_of_pixel.z;
+        // ((sum / moments).round() of the CPU)
+        let color = vec3<u32>(floor(total * params.inverse + vec3<f32>(0.5, 0.5, 0.5)));
+        colors[pixel] = color.x | (color.y << 8u) | (color.z << 16u);
     }
 }
