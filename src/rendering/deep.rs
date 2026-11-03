@@ -766,34 +766,61 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
     };
     let gpu = gpu.filter(|gpu| scaled <= SCALED_BELOW && gpu.deep_works());
     let table = gpu.map(|_| reference.gpu_table());
+    let pixels = width * height;
+    let chunks = pixels.div_ceil(SHARE_CHUNK);
     for sample in 0..samples.max(1) {
-        //On the GPU: the outcomes of every pixel of the layer, from the offsets unscaled (as `position_scaled` unscales them at this depth)
-        let on_the_gpu = gpu.zip(table.as_ref()).and_then(|(gpu, table)| {
-            let offsets: Vec<(f64, f64)> = (0..width * height).map(|index| {
-                let (cx, cy) = offset_of(index % width, index / width, sample);
-                (times_two_to(cx, -scaled), times_two_to(cy, -scaled))
-            }).collect();
-            let outcomes = gpu.deep_outcomes(m, &table.input(reference.points()), &offsets).ok()?;
-            Some((offsets, outcomes))
-        });
+        //The positions of the layer: the CPU threads and the GPU (where it can) take the next chunk of pixels as soon as they are free, so each computes as
+        //much as its speed on this view allows, without a setting or a measurement (issue #263); both give the same positions, bit for bit
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let (sender, receiver) = std::sync::mpsc::channel::<(usize, Vec<f64>)>();
+        let cpu_positions = |range: std::ops::Range<usize>| -> Vec<f64> { range.map(|index| position_scaled(m, &reference, center, offset_of(index % width, index / width, sample), scaled)).collect() };
         std::thread::scope(|scope| {
-            for (chunk, (rows, out)) in sums.chunks_mut(rows_per_thread * width).zip(colors.chunks_mut(rows_per_thread * width)).enumerate() {
-                let (reference, on_the_gpu, offset_of) = (&reference, &on_the_gpu, &offset_of);
+            for _ in 0..threads {
+                let (sender, next, cpu_positions) = (sender.clone(), &next, &cpu_positions);
+                scope.spawn(move || loop {
+                    let chunk = next.fetch_add(1, Ordering::Relaxed);
+                    if chunk >= chunks || cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let range = chunk * SHARE_CHUNK..((chunk + 1) * SHARE_CHUNK).min(pixels);
+                    let _ = sender.send((range.start, cpu_positions(range)));
+                });
+            }
+            if let Some((gpu, table)) = gpu.zip(table.as_ref()) {
+                let (sender, next, cpu_positions, offset_of, reference) = (sender.clone(), &next, &cpu_positions, &offset_of, &reference);
+                scope.spawn(move || loop {
+                    let chunk = next.fetch_add(GPU_CHUNKS, Ordering::Relaxed);
+                    if chunk >= chunks || cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let range = chunk * SHARE_CHUNK..((chunk + GPU_CHUNKS) * SHARE_CHUNK).min(pixels);
+                    //The offsets unscaled (as `position_scaled` unscales them at this depth); the smooth position of an escaped orbit as `position_from` ends
+                    let offsets: Vec<(f64, f64)> = range.clone().map(|index| {
+                        let (cx, cy) = offset_of(index % width, index / width, sample);
+                        (times_two_to(cx, -scaled), times_two_to(cy, -scaled))
+                    }).collect();
+                    //(The GPU failed: these on the CPU)
+                    let positions = gpu.deep_outcomes(m, &table.input(reference.points()), &offsets).map_or_else(|_| cpu_positions(range.clone()), |outcomes| offsets.iter().zip(&outcomes).map(|(&(dcx, dcy), outcome)| {
+                        if outcome.escaped != 0 { m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)) } else { f64::from(m.max_iterations) }
+                    }).collect());
+                    let _ = sender.send((range.start, positions));
+                });
+            }
+        });
+        drop(sender);
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut positions = vec![0.0; pixels];
+        for (start, part) in receiver {
+            positions[start..start + part.len()].copy_from_slice(&part);
+        }
+        //The colors, added to the samples so far
+        std::thread::scope(|scope| {
+            for ((rows, out), positions) in sums.chunks_mut(rows_per_thread * width).zip(colors.chunks_mut(rows_per_thread * width)).zip(positions.chunks(rows_per_thread * width)) {
                 scope.spawn(move || {
-                    for (index, (sum, color)) in rows.iter_mut().zip(out.iter_mut()).enumerate() {
-                        if index % width == 0 && cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let (x, y) = (index % width, chunk * rows_per_thread + index / width);
-                        let position = match on_the_gpu {
-                            Some((offsets, outcomes)) => {
-                                let (outcome, (dcx, dcy)) = (outcomes[y * width + x], offsets[y * width + x]);
-                                //(As `position_from` ends: the smooth position of the escaped orbit, or the limit)
-                                if outcome.escaped != 0 { m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)) } else { f64::from(m.max_iterations) }
-                            }
-                            None => position_scaled(m, reference, center, offset_of(x, y, sample), scaled),
-                        };
-                        let new = color_of(position);
+                    for ((sum, color), position) in rows.iter_mut().zip(out.iter_mut()).zip(positions) {
+                        let new = color_of(*position);
                         for (total, channel) in sum.iter_mut().zip([new.red, new.green, new.blue]) {
                             *total += u32::from(channel);
                         }
@@ -848,6 +875,10 @@ pub(crate) fn gpu_agrees(gpu: &super::gpu::GpuIterator) -> bool {
     }
     true
 }
+
+/// The pixels a CPU thread takes at a time from a layer of a deep view (see `render_layers_on`), and the chunks of them the GPU takes at a time
+const SHARE_CHUNK: usize = 2048;
+const GPU_CHUNKS: usize = 64;
 
 /// The largest distance of a pixel of a `width` x `height` view with pixels of size `pixel` from its center (with a pixel to spare for the jitter)
 fn max_offset(pixel: f64, width: usize, height: usize) -> f64 {
@@ -1349,6 +1380,36 @@ mod depth_timing {
             }
         }
         println!("{} of {} pixels differ from exact arithmetic", total.0, total.1);
+    }
+
+    /// Times deep frames on the CPU alone against the CPU and the GPU together (`render_layers_on`, issue #263), with and without BLA, at 1920 x 1080 next to
+    /// c = i and in the seahorse valley, and checks the images are the same. Run by hand on an otherwise idle GPU with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand on an idle GPU"]
+    fn time_deep_frames_on_the_cpu_and_with_the_gpu() {
+        let Ok(gpu) = crate::rendering::gpu::GpuIterator::new() else { return };
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let color_of = |position: f64| crate::coloring::TrueColor::new((position * 7.0) as u8, (position * 3.0) as u8, position as u8);
+        let (width, height) = (1920, 1080);
+        for (name, power, real, imaginary, iterations) in [("i", -100_i64, String::from("3e-101"), format!("1.{}2", "0".repeat(100)), 20_000_u32), ("i", -250, String::from("3e-251"), format!("1.{}2", "0".repeat(250)), 20_000),
+            ("seahorse", -30, String::from("-0.743643887037158704752191506114774"), String::from("0.131825904205311970493132056385139"), 50_000)] {
+            let m = MandelbrotSet::new(iterations, 2.0);
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let bits = bits_for_depth(depth, width);
+            let orbit = SharedOrbit::new(&Fixed::parse(&real, bits).unwrap(), &Fixed::parse(&imaginary, bits).unwrap());
+            orbit.orbit(iterations); //(The orbit once, before the timings)
+            for approximate in [false, true] {
+                let mut timed = Vec::new();
+                for on_the_gpu in [false, true] {
+                    let started = std::time::Instant::now();
+                    let mut colors = Vec::new();
+                    render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, 0.0), (width, height), 1, &color_of, approximate, on_the_gpu.then_some(&gpu), &cancel, |layer, _| colors = layer.to_vec());
+                    timed.push((started.elapsed().as_secs_f64() * 1000.0, colors));
+                }
+                let same = timed[0].1.iter().zip(&timed[1].1).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue));
+                println!("{name} 10^{power}, BLA {approximate}: CPU {:.0} ms, CPU + GPU {:.0} ms ({:.2}x), the same image: {same}", timed[0].0, timed[1].0, timed[0].0 / timed[1].0);
+            }
+        }
     }
 
     /// Times the reference orbit and the BLA table of a view around c = i (whose orbit never escapes) at depths and limits (issue #263, step 3: the share of
