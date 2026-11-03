@@ -264,7 +264,7 @@ impl GpuIterator {
         let exact_pixels = pipeline(&exact_pixels_source(), &pipeline_layout).ok();
         //(Without it the CPU renders every deep view, as before)
         let deep = {
-            let entries = [entry(0, true), entry(1, true), entry(2, true), entry(3, true), entry(4, false)];
+            let entries = [entry(0, true), entry(1, true), entry(2, true), entry(3, true), entry(4, false), entry(5, true)];
             let deep_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("deep"), entries: &entries });
             let deep_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("deep"), bind_group_layouts: &[Some(&deep_layout)], immediate_size: 0 });
             pipeline(include_str!("gpu_deep.wgsl"), &deep_pipeline_layout).ok().map(|pipeline| (pipeline, deep_layout))
@@ -561,12 +561,12 @@ impl GpuIterator {
     }
 
     /// The outcome of the perturbation loop (`gpu_deep.wgsl`, `rendering::deep::position_from`) for every offset `offsets` from the center of the reference
-    /// orbit `orbit`, with the bilinear approximations `table` (five numbers each: A, B and the square of the radius), whose level `l` starts at `starts[l]` and
-    /// has `lengths[l]` of them, in at most `BATCH` offsets a dispatch
+    /// orbit of `input`, in at most `BATCH` offsets a dispatch
     ///
     /// # Errors
     /// The GPU failed, or there is no such shader
-    pub(crate) fn deep_outcomes(&self, m: &MandelbrotSet, orbit: &[(f64, f64)], (table, starts, lengths): (&[f64], &[u32], &[u32]), offsets: &[(f64, f64)]) -> Result<Vec<DeepOutcome>, String> {
+    pub(crate) fn deep_outcomes(&self, m: &MandelbrotSet, input: &DeepInput, offsets: &[(f64, f64)]) -> Result<Vec<DeepOutcome>, String> {
+        let DeepInput { orbit, residuals, table, starts, lengths } = *input;
         let (pipeline, layout) = self.deep.as_ref().ok_or_else(|| String::from("the deep shader did not compile"))?;
         if starts.len() > 32 || starts.len() != lengths.len() {
             return Err(String::from("too many levels"));
@@ -581,7 +581,9 @@ impl GpuIterator {
             buffer
         };
         let flat_orbit: Vec<f64> = orbit.iter().flat_map(|(x, y)| [*x, *y]).collect();
+        let flat_residuals: Vec<f64> = residuals.iter().flat_map(|(x, y)| [*x, *y]).collect();
         let (orbit_buffer, table_buffer) = (buffer_with("deep orbit", bytemuck::cast_slice(&flat_orbit)), buffer_with("deep table", bytemuck::cast_slice(table)));
+        let residual_buffer = buffer_with("deep residuals", bytemuck::cast_slice(&flat_residuals));
         let mut outcomes = Vec::with_capacity(offsets.len());
         for batch in offsets.chunks(BATCH) {
             let mut params: Vec<u8> = Vec::with_capacity(8 + 16 + 256);
@@ -607,6 +609,7 @@ impl GpuIterator {
                 wgpu::BindGroupEntry { binding: 2, resource: table_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: offsets_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: residual_buffer.as_entire_binding() },
             ] });
             let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
             {
@@ -879,6 +882,17 @@ const MASK_WORKGROUPS: u32 = 4096;
 
 /// The workgroups of 64 invocations of a deep dispatch: each invocation iterates pixels a whole dispatch apart (see `gpu_deep.wgsl`)
 const DEEP_WORKGROUPS: u32 = 8192;
+
+/// The input of the deep loop besides the offsets (see `GpuIterator::deep_outcomes`): the reference orbit and the rounding residuals of its points, and the
+/// bilinear approximations (five numbers each: A, B and the square of the radius), whose level `l` starts at `starts[l]` and has `lengths[l]` of them
+#[derive(Clone, Copy)]
+pub(crate) struct DeepInput<'a> {
+    pub(crate) orbit: &'a [(f64, f64)],
+    pub(crate) residuals: &'a [(f64, f64)],
+    pub(crate) table: &'a [f64],
+    pub(crate) starts: &'a [u32],
+    pub(crate) lengths: &'a [u32],
+}
 
 /// The outcome of the deep loop for one pixel (`gpu_deep.wgsl`): the pixel's orbit when it escaped, after `steps` steps
 #[repr(C)]

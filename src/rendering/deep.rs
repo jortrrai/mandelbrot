@@ -9,11 +9,10 @@
 //! when the pixel's orbit comes closer to 0 than its difference from the center's orbit (`|Z + z| < |z|`), the difference becomes the pixel's orbit itself
 //! and the center's orbit starts again from its beginning. One reference orbit then serves the whole view.
 //!
-//! So there are no glitches to detect and fix (issue #263, step 4): next to the boundary points i and -i, at depths from 10⁻⁵⁰ to 10⁻⁵⁰⁰ and with the
+//! So there are no glitches to detect and fix (issue #263, step 4): next to the boundary points i, -i and -2, at depths from 10⁻⁵⁰ to 10⁻⁵⁰⁰ and with the
 //! orbit at the view's center or 37 or 1000 views away from it, every pixel has the escape count of exact arithmetic, with and without BLA (the tests and
-//! `survey_glitches`). The one known difference is not one of perturbation: at the tip c = -2, the only point of the set on the circle of radius 2 where
-//! orbits escape, deep views cross that circle, and 64-bit floats cannot tell on which side of it the first points of an orbit are (`|c|²` rounds to
-//! exactly 4), as in the 64-bit renderer: pixels just outside it, which exact arithmetic sees escape at once, go on like those inside.
+//! `survey_glitches`). At the tip c = -2, the only point of the set on the circle of radius 2 where orbits escape, the orbit runs along that circle, where
+//! 64-bit floats cannot tell its sides: there the escape test is exact (`outside`, with the rounding residuals of the reference orbit).
 //!
 //! The colors use the same smooth iteration count as the 64-bit renderer (see `MandelbrotSet::smooth_position`), so a deep view looks like a shallow one.
 
@@ -66,6 +65,18 @@ impl Fixed {
         let top = (&self.value >> shift).to_f64().unwrap_or(0.0);
         //(One scaling by 2^(shift - bits): with more than ~1,000 bits both powers overflowed to infinity and their quotient was NaN, #263)
         times_two_to(top, i32::try_from(i64::from(u32::try_from(shift).unwrap_or(u32::MAX)) - i64::from(self.bits)).unwrap_or(i32::MIN))
+    }
+
+    /// This number as `mantissa · 2^-power` with the mantissa a 64-bit float in [0.5, 1) (or 0), also where the number is beyond 64-bit floats
+    pub fn to_scaled(&self) -> (f64, i32) {
+        let length = self.value.bits();
+        if length == 0 {
+            return (0.0, 0);
+        }
+        let shift = length.saturating_sub(64);
+        let top = (&self.value >> shift).to_f64().unwrap_or(0.0);
+        let mantissa = times_two_to(top, -i32::try_from(length - shift).unwrap_or(i32::MAX));
+        (mantissa, i32::try_from(i64::from(self.bits) - i64::try_from(length).unwrap_or(i64::MAX)).unwrap_or(i32::MAX))
     }
 
     /// This number plus `offset · 2^power`, exactly (a step of a view deeper than 64-bit floats reach, see `Depth`)
@@ -156,26 +167,55 @@ pub fn bits_for(scale: f64, width: usize) -> u32 {
 /// The orbit of the center `(real, imaginary)` in 64-bit floats, computed exactly in fixed point, up to `max_iterations` steps or until it leaves radius
 /// `2^8` (the orbit of a point outside the set stops there)
 pub fn reference_orbit(real: &Fixed, imaginary: &Fixed, max_iterations: u32) -> Vec<(f64, f64)> {
+    reference_orbit_with_residuals(real, imaginary, max_iterations).0
+}
+
+/// The rounding residual of a point of a reference orbit: the exact point less its 64-bit float.
+///
+/// As mantissas and powers of two (`mantissa · 2^-power` each), since it can be far smaller than 64-bit floats reach (at the tip c = -2 the orbit is within
+/// 10⁻⁵⁰⁰ of 2, say; see `outside`)
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Residual {
+    x: (f64, i32),
+    y: (f64, i32),
+}
+
+impl Residual {
+    /// The residual times `2^scaled` (in the units of a scaled difference, see `position_scaled`; 0 for the plain residual)
+    fn times(self, scaled: i32) -> (f64, f64) {
+        (times_two_to(self.x.0, scaled.saturating_sub(self.x.1)), times_two_to(self.y.0, scaled.saturating_sub(self.y.1)))
+    }
+}
+
+/// `reference_orbit`, and the rounding residual of every point (for the escape test next to the circle, see `outside`)
+pub fn reference_orbit_with_residuals(real: &Fixed, imaginary: &Fixed, max_iterations: u32) -> (Vec<(f64, f64)>, Vec<Residual>) {
     let mut z = (Fixed { value: BigInt::zero(), bits: real.bits }, Fixed { value: BigInt::zero(), bits: real.bits });
-    let mut orbit = Vec::with_capacity(max_iterations as usize + 1);
+    let (mut orbit, mut residuals) = (Vec::with_capacity(max_iterations as usize + 1), Vec::with_capacity(max_iterations as usize + 1));
     orbit.push((0.0, 0.0));
-    continue_orbit((real, imaginary), &mut z, &mut orbit, max_iterations);
-    orbit
+    residuals.push(Residual::default());
+    continue_orbit((real, imaginary), &mut z, (&mut orbit, &mut residuals), max_iterations);
+    (orbit, residuals)
 }
 
 /// Continues the orbit of `c` from `z` (its last point, in fixed point) for up to `steps` steps, adding them to `orbit`; whether it escaped
-fn continue_orbit((real, imaginary): (&Fixed, &Fixed), z: &mut (Fixed, Fixed), orbit: &mut Vec<(f64, f64)>, steps: u32) -> bool {
+fn continue_orbit((real, imaginary): (&Fixed, &Fixed), z: &mut (Fixed, Fixed), (orbit, residuals): (&mut Vec<(f64, f64)>, &mut Vec<Residual>), steps: u32) -> bool {
     let (zx, zy) = z;
     for _ in 0..steps {
         let (xx, yy, xy) = (zx.mul(zx), zy.mul(zy), zx.mul(zy));
         (*zx, *zy) = (xx.sub(&yy).add(real), xy.double().add(imaginary));
-        orbit.push((zx.to_f64(), zy.to_f64()));
+        let (x, y) = (zx.to_f64(), zy.to_f64());
+        orbit.push((x, y));
+        //(The 64-bit float of a point of the orbit has at most 53 bits, which the fixed point holds exactly: the difference is exact before it is rounded)
+        residuals.push(Residual { x: zx.plus(-x).to_scaled(), y: zy.plus(-y).to_scaled() });
         if zx.magnitude_above(8) || zy.magnitude_above(8) {
             return true;
         }
     }
     false
 }
+
+/// The points of a reference orbit and their rounding residuals, shared by the views that use them (see `SharedOrbit::orbit_and_residuals`)
+pub type OrbitAndResiduals = (std::sync::Arc<Vec<(f64, f64)>>, std::sync::Arc<Vec<Residual>>);
 
 /// One reference orbit for all the views around one exact center (issue #263: the frames of a dive).
 ///
@@ -192,6 +232,7 @@ pub struct SharedOrbit {
 struct OrbitSoFar {
     z: (Fixed, Fixed),
     points: std::sync::Arc<Vec<(f64, f64)>>,
+    residuals: std::sync::Arc<Vec<Residual>>,
     escaped: bool,
 }
 
@@ -199,7 +240,7 @@ impl SharedOrbit {
     /// The orbit of `(real, imaginary)`, none of it computed yet
     pub fn new(real: &Fixed, imaginary: &Fixed) -> SharedOrbit {
         let zero = Fixed { value: BigInt::zero(), bits: real.bits };
-        SharedOrbit { real: real.clone(), imaginary: imaginary.clone(), state: std::sync::Mutex::new(OrbitSoFar { z: (zero.clone(), zero), points: std::sync::Arc::new(vec![(0.0, 0.0)]), escaped: false }) }
+        SharedOrbit { real: real.clone(), imaginary: imaginary.clone(), state: std::sync::Mutex::new(OrbitSoFar { z: (zero.clone(), zero), points: std::sync::Arc::new(vec![(0.0, 0.0)]), residuals: std::sync::Arc::new(vec![Residual::default()]), escaped: false }) }
     }
 
     /// The center
@@ -209,15 +250,23 @@ impl SharedOrbit {
 
     /// The orbit up to at least `max_iterations` steps, or until it escaped (it may be longer)
     pub fn orbit(&self, max_iterations: u32) -> std::sync::Arc<Vec<(f64, f64)>> {
+        self.orbit_and_residuals(max_iterations).0
+    }
+
+    /// `orbit`, and the rounding residuals of its points (see `reference_orbit_with_residuals`)
+    pub fn orbit_and_residuals(&self, max_iterations: u32) -> OrbitAndResiduals {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let have = u32::try_from(state.points.len() - 1).unwrap_or(u32::MAX);
         if !state.escaped && have < max_iterations {
-            let mut longer = Vec::with_capacity(max_iterations as usize + 1);
+            let (mut longer, mut residuals) = (Vec::with_capacity(max_iterations as usize + 1), Vec::with_capacity(max_iterations as usize + 1));
             longer.extend_from_slice(&state.points);
-            state.escaped = continue_orbit((&self.real, &self.imaginary), &mut state.z, &mut longer, max_iterations - have);
-            state.points = std::sync::Arc::new(longer);
+            residuals.extend_from_slice(&state.residuals);
+            let OrbitSoFar { z, .. } = &mut *state;
+            let mut z = z.clone();
+            let escaped = continue_orbit((&self.real, &self.imaginary), &mut z, (&mut longer, &mut residuals), max_iterations - have);
+            (state.z, state.escaped, state.points, state.residuals) = (z, escaped, std::sync::Arc::new(longer), std::sync::Arc::new(residuals));
         }
-        let points = std::sync::Arc::clone(&state.points);
+        let points = (std::sync::Arc::clone(&state.points), std::sync::Arc::clone(&state.residuals));
         drop(state);
         points
     }
@@ -234,6 +283,22 @@ fn bla_tolerance() -> f64 {
         return tolerance;
     }
     BLA_TOLERANCE
+}
+
+/// What the GPU's deep loop needs besides the orbit (see `Reference::gpu_table`, `GpuIterator::deep_outcomes`): the approximations, five numbers each (A, B,
+/// the square of the radius), level after level, where every level starts and how many it has, and the residuals of the orbit as plain numbers
+struct GpuTable {
+    table: Vec<f64>,
+    starts: Vec<u32>,
+    lengths: Vec<u32>,
+    residuals: Vec<(f64, f64)>,
+}
+
+impl GpuTable {
+    /// The input of a dispatch for the orbit `orbit`
+    fn input<'a>(&'a self, orbit: &'a [(f64, f64)]) -> super::gpu::DeepInput<'a> {
+        super::gpu::DeepInput { orbit, residuals: &self.residuals, table: &self.table, starts: &self.starts, lengths: &self.lengths }
+    }
 }
 
 /// A bilinear approximation of some steps of the perturbation from one step of the reference orbit on: `z ← A·z + B·c`, valid while `|z| < radius`
@@ -270,6 +335,8 @@ fn times((x, y): (f64, f64), (u, v): (f64, f64)) -> (f64, f64) {
 pub struct Reference {
     /// The orbit; only its first `length` points are this view's (a shared orbit can be longer, see `SharedOrbit`)
     orbit: std::sync::Arc<Vec<(f64, f64)>>,
+    /// The rounding residual of every point of the orbit (see `outside`)
+    residuals: std::sync::Arc<Vec<Residual>>,
     length: usize,
     /// `levels[l][k]`: the approximation of the `2^(l + 1)` steps from step `1 + k · 2^(l + 1)` of the orbit
     levels: Vec<Vec<Bla>>,
@@ -279,14 +346,15 @@ impl Reference {
     /// The reference orbit of the center `(real, imaginary)`, for a view whose pixels are at most `max_offset` from it; with `approximate` also its table
     /// of bilinear approximations (without it, every step is iterated, as in `position` before BLA)
     pub fn new(m: &MandelbrotSet, (real, imaginary): (&Fixed, &Fixed), max_offset: f64, approximate: bool) -> Reference {
-        Reference::of(m, std::sync::Arc::new(reference_orbit(real, imaginary, m.max_iterations)), max_offset, approximate)
+        let (orbit, residuals) = reference_orbit_with_residuals(real, imaginary, m.max_iterations);
+        Reference::of(m, (std::sync::Arc::new(orbit), std::sync::Arc::new(residuals)), max_offset, approximate)
     }
 
     /// `new` with the orbit `orbit` (of at least `m.max_iterations` steps, or until it escaped), see `SharedOrbit`
-    pub fn of(m: &MandelbrotSet, orbit: std::sync::Arc<Vec<(f64, f64)>>, max_offset: f64, approximate: bool) -> Reference {
+    pub fn of(m: &MandelbrotSet, (orbit, residuals): OrbitAndResiduals, max_offset: f64, approximate: bool) -> Reference {
         let length = orbit.len().min(m.max_iterations as usize + 1);
         let levels = if approximate { Self::table(&orbit[..length], max_offset, m.orbit_radius) } else { Vec::new() };
-        Reference { orbit, length, levels }
+        Reference { orbit, residuals, length, levels }
     }
 
     /// The points of the orbit of this view
@@ -294,16 +362,22 @@ impl Reference {
         &self.orbit[..self.length]
     }
 
-    /// The table of bilinear approximations for the GPU (see `GpuIterator::deep_outcomes`): A, B and the square of the radius of each, level after level, and
-    /// where every level starts and how many it has
-    fn gpu_table(&self) -> (Vec<f64>, Vec<u32>, Vec<u32>) {
+    /// The rounding residuals of the points of the orbit of this view (see `outside`)
+    fn residuals(&self) -> &[Residual] {
+        &self.residuals[..self.length]
+    }
+
+    /// The table of bilinear approximations for the GPU (see `GpuIterator::deep_outcomes`): A, B and the square of the radius of each, level after level,
+    /// where every level starts and how many it has, and the residuals of the orbit's points
+    fn gpu_table(&self) -> GpuTable {
         let (mut table, mut starts, mut lengths) = (Vec::new(), Vec::new(), Vec::new());
         for level in self.levels.iter().take(32) {
             starts.push(u32::try_from(table.len() / 5).unwrap_or(u32::MAX));
             lengths.push(u32::try_from(level.len()).unwrap_or(u32::MAX));
             table.extend(level.iter().flat_map(|bla| [bla.a.0, bla.a.1, bla.b.0, bla.b.1, bla.radius_squared]));
         }
-        (table, starts, lengths)
+        //(And the residuals as plain numbers, for `outside` with a plain difference)
+        GpuTable { table, starts, lengths, residuals: self.residuals().iter().map(|residual| residual.times(0)).collect() }
     }
 
     fn table(orbit: &[(f64, f64)], max_offset: f64, orbit_radius: f64) -> Vec<Vec<Bla>> {
@@ -347,6 +421,51 @@ impl Reference {
     }
 }
 
+/// `a · b` as a sum of two 64-bit floats, exactly (Dekker's product, with Veltkamp's split: no fused multiply-add, so the GPU gives the same, see
+/// `gpu_deep.wgsl`)
+fn two_product(a: f64, b: f64) -> (f64, f64) {
+    let split = |x: f64| {
+        let t = 134_217_729.0 * x;
+        let high = t - (t - x);
+        (high, x - high)
+    };
+    let product = a * b;
+    let ((a_high, a_low), (b_high, b_low)) = (split(a), split(b));
+    (product, ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + a_low * b_low)
+}
+
+/// `a + b` as a sum of two 64-bit floats, exactly (Knuth's sum)
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let sum = a + b;
+    let b_virtual = sum - a;
+    (sum, (a - (sum - b_virtual)) + (b - b_virtual))
+}
+
+/// Whether the pixel's orbit, the point `Z + ε + z` of the reference orbit `Z` (its 64-bit float), its rounding residual `ε` and the pixel's difference `z`
+/// (scaled by `2^scaled`, see `position_scaled`; 0 for a plain one), is outside the circle of `radius_squared`, where `full` is `|Z + z|²` in 64-bit floats.
+///
+/// `full` decides, except within 10⁻¹² of the circle: there 64-bit floats cannot tell the side, and at the tip c = -2 of the set, the one point of it on
+/// the circle of radius 2, the orbit runs along the circle (2 → 2 → ...), so deep views there crossed it in bands of the wrong count (issue #263). Then the
+/// side is that of `|Z + ε + z|² - R² = (|Z|² - R²) + 2·Z·(ε + z) + |ε + z|²`, with `|Z|² - R²` computed exactly (`two_product`, `two_sum`) and all of it
+/// in units of `2^-scaled`, where the residual and the difference, however small, are numbers
+fn outside(full: f64, radius_squared: f64, (ox, oy): (f64, f64), residual: Residual, (zx, zy): (f64, f64), scaled: i32) -> bool {
+    //(One comparison for the many points well inside, as before)
+    if full < radius_squared * (1.0 - 1e-12) {
+        return false;
+    }
+    if full > radius_squared * (1.0 + 1e-12) {
+        return true;
+    }
+    let (ex, ey) = residual.times(scaled);
+    let (dx, dy) = (ex + zx, ey + zy);
+    let ((xx, xx_low), (yy, yy_low)) = (two_product(ox, ox), two_product(oy, oy));
+    let (sum, sum_low) = two_sum(xx, yy);
+    let (beyond, beyond_low) = two_sum(sum, -radius_squared);
+    //(|Z|² - R² in units of the difference: infinite when the point is far from the circle at that scale, where the difference no longer counts)
+    let away = times_two_to(beyond, scaled) + times_two_to((sum_low + beyond_low) + (xx_low + yy_low), scaled);
+    away + (2.0 * (ox * dx + oy * dy) + times_two_to(dx * dx + dy * dy, -scaled)) > 0.0
+}
+
 /// The smooth position (see `MandelbrotSet::position`) of the point at offset `(dcx, dcy)` from the center of `reference`, by perturbation with rebasing.
 ///
 /// `center` is the center in 64-bit floats, for the steps after the point escaped; see the module, and `Reference` for the steps it skips
@@ -356,7 +475,7 @@ pub fn position(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (d
 
 /// `position` from the difference `z` at step `at` of the reference orbit, after `step` steps of the pixel (`position` starts at 0, 0, 0; see `position_scaled`)
 fn position_from(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (dcx, dcy): (f64, f64), ((zx, zy), at, step): ((f64, f64), usize, u32)) -> f64 {
-    let orbit = reference.points();
+    let (orbit, residuals) = (reference.points(), reference.residuals());
     let radius_squared = m.orbit_radius * m.orbit_radius;
     let (mut zx, mut zy) = (zx, zy); //The difference from the reference orbit
     let mut at = at; //The step of the reference orbit that the difference is from
@@ -376,7 +495,7 @@ fn position_from(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (
         }
         let (fx, fy) = (orbit[at].0 + zx, orbit[at].1 + zy); //The pixel's orbit
         let full = fx * fx + fy * fy;
-        if full > radius_squared {
+        if outside(full, radius_squared, orbit[at], residuals[at], (zx, zy), 0) {
             return m.smooth_position_of(step, (fx, fy), (center.0 + dcx, center.1 + dcy));
         }
         //Rebasing: the pixel's orbit is closer to 0 than its difference, or the reference orbit ends
@@ -528,9 +647,9 @@ pub fn position_scaled(m: &MandelbrotSet, reference: &Reference, center: (f64, f
             at += 1;
             step += 1;
         }
-        //The pixel's orbit is the center's to the last bit here: it escapes with it
+        //The pixel's orbit is the center's to the last bit here: it escapes with it (on the circle, by the side `z` is on, see `outside_scaled`)
         let (fx, fy) = orbit[at];
-        if fx * fx + fy * fy > radius_squared {
+        if outside(fx * fx + fy * fy, radius_squared, orbit[at], reference.residuals()[at], (zx, zy), scaled) {
             return m.smooth_position_of(step, (fx, fy), center);
         }
         if zx * zx + zy * zy > 1e300 {
@@ -631,7 +750,7 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
     //(The view's center from the orbit's, in the same scaled units)
     let shift = (right * depth.mantissa, up * depth.mantissa);
     let reach = max_offset(pixel, width, height) + shift.0.hypot(shift.1);
-    let reference = Reference::of(m, orbit.orbit(m.max_iterations), times_two_to(reach, depth.exponent), approximate);
+    let reference = Reference::of(m, orbit.orbit_and_residuals(m.max_iterations), times_two_to(reach, depth.exponent), approximate);
     let (center_real, center_imaginary) = orbit.center();
     let center = (center_real.to_f64(), center_imaginary.to_f64());
     let threads = super::render_thread_count().max(1);
@@ -654,7 +773,7 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
                 let (cx, cy) = offset_of(index % width, index / width, sample);
                 (times_two_to(cx, -scaled), times_two_to(cy, -scaled))
             }).collect();
-            let outcomes = gpu.deep_outcomes(m, reference.points(), (&table.0, &table.1, &table.2), &offsets).ok()?;
+            let outcomes = gpu.deep_outcomes(m, &table.input(reference.points()), &offsets).ok()?;
             Some((offsets, outcomes))
         });
         std::thread::scope(|scope| {
@@ -692,18 +811,20 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
     true
 }
 
-/// Whether `gpu`'s deep loop (`gpu_deep.wgsl`) gives every pixel the CPU's position, bit for bit: views of 10⁻³⁰ and 10⁻²⁰⁰ next to c = i and of 10⁻²⁰ in
-/// the seahorse valley, with and without bilinear approximation, smooth and not (the GPU's self-test, see `GpuIterator::deep_works`)
+/// Whether `gpu`'s deep loop (`gpu_deep.wgsl`) gives every pixel the CPU's position, bit for bit: views of 10⁻³⁰ and 10⁻²⁰⁰ next to c = i, of 10⁻²⁰ in
+/// the seahorse valley and of 10⁻⁶⁰ at the tip c = -2 (across the escape circle, see `outside`), with and without bilinear approximation, smooth and not (the GPU's self-test, see `GpuIterator::deep_works`)
 pub(crate) fn gpu_agrees(gpu: &super::gpu::GpuIterator) -> bool {
-    let cases = [(-30_i64, "3e-31", "1.000000000000000000000000000002", 3000, true), (-200, "3e-201", "", 3000, false), (-20, "-0.74364388703715870475", "0.13182590420531197049", 4000, true)];
+    let tip = |power: i64| (format!("-1.{}9", "9".repeat((-power) as usize)), format!("4e{}", power - 1));
+    let cases = [(-30_i64, String::from("3e-31"), String::from("1.000000000000000000000000000002"), 3000, true), (-200, String::from("3e-201"), format!("1.{}2", "0".repeat(200)), 3000, false),
+        (-20, String::from("-0.74364388703715870475"), String::from("0.13182590420531197049"), 4000, true), (-60, tip(-60).0, tip(-60).1, 3000, true)];
     for (power, real, imaginary, iterations, smooth) in cases {
-        let imaginary = if imaginary.is_empty() { format!("1.{}2", "0".repeat((-power) as usize)) } else { imaginary.to_string() };
+        let (real, imaginary) = (real.as_str(), imaginary.as_str());
         let mut m = MandelbrotSet::new(iterations, 2.0);
         m.smooth_coloring = smooth;
         let (width, height) = (40, 30);
         let depth = Depth::parse(&format!("1e{power}")).expect("a depth");
         let bits = bits_for_depth(depth, width);
-        let (Some(cx), Some(cy)) = (Fixed::parse(real, bits), Fixed::parse(&imaginary, bits)) else { return false };
+        let (Some(cx), Some(cy)) = (Fixed::parse(real, bits), Fixed::parse(imaginary, bits)) else { return false };
         let center = (cx.to_f64(), cy.to_f64());
         let pixel = 2.5 * depth.mantissa / width as f64;
         let offsets: Vec<(f64, f64)> = (0..width * height).map(|index| {
@@ -715,7 +836,7 @@ pub(crate) fn gpu_agrees(gpu: &super::gpu::GpuIterator) -> bool {
         for approximate in [false, true] {
             let reference = Reference::new(&m, (&cx, &cy), times_two_to(max_offset(pixel, width, height), depth.exponent), approximate);
             let table = reference.gpu_table();
-            let Ok(outcomes) = gpu.deep_outcomes(&m, reference.points(), (&table.0, &table.1, &table.2), &offsets) else { return false };
+            let Ok(outcomes) = gpu.deep_outcomes(&m, &table.input(reference.points()), &offsets) else { return false };
             let agrees = offsets.iter().zip(&outcomes).all(|(&(dcx, dcy), outcome)| {
                 let on_the_gpu = if outcome.escaped != 0 { m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)) } else { f64::from(m.max_iterations) };
                 on_the_gpu.to_bits() == position(&m, &reference, center, (dcx, dcy)).to_bits()
@@ -861,6 +982,39 @@ mod tests {
             }
             let distinct: std::collections::BTreeSet<u32> = exact.iter().copied().collect();
             assert!(distinct.len() > if power == -400 { 5 } else { 1 }, "10^{power}: a view with structure: {distinct:?}");
+        }
+    }
+
+    #[test]
+    fn deep_views_at_the_tip_cross_the_escape_circle_where_exact_arithmetic_does() {
+        //#263: at the tip c = -2 the orbit runs along the escape circle (2 → 2 → ...), and 64-bit floats cannot tell its sides; before `outside` the pixels just
+        //outside it (escaped at once in exact arithmetic) went on like those inside, in bands across the view. Now every pixel has the exact count, also
+        //beyond 64-bit floats (10⁻⁵⁰⁰, where the rounding residuals of the orbit are numbers only with their powers of two) and off-center
+        let mut m = MandelbrotSet::new(20_000, 2.0);
+        m.smooth_coloring = false;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let color_of = |position: f64| {
+            let count = position as u32;
+            crate::coloring::TrueColor::new((count & 255) as u8, (count >> 8 & 255) as u8, (count >> 16) as u8)
+        };
+        let (width, height) = (12, 8);
+        for power in [-60_i64, -308, -500] {
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let bits = bits_for_depth(depth, width) + 16;
+            let (real, imaginary) = (format!("-1.{}9", "9".repeat((-power) as usize)), format!("4e{}", power - 1));
+            let exact = exact_counts(&real, &imaginary, (1.0, power), (width, height), m.max_iterations);
+            let distinct: std::collections::BTreeSet<u32> = exact.iter().copied().collect();
+            assert!(distinct.contains(&1) && distinct.len() > 5, "10^{power}: the view crosses the circle (count 1) and has structure: {distinct:?}");
+            for (right, up) in [(0.0, 0.0), (37.0, -11.0)] {
+                let orbit = SharedOrbit::new(&Fixed::parse(&real, bits).unwrap().plus_scaled(right * depth.mantissa, depth.exponent), &Fixed::parse(&imaginary, bits).unwrap().plus_scaled(up * depth.mantissa, depth.exponent));
+                for approximate in [false, true] {
+                    let mut counts = Vec::new();
+                    render_layers_around(&m, (&orbit, (-right, -up)), (depth, 0.0), (width, height), 1, &color_of, approximate, &cancel, |colors, _| {
+                        counts = colors.iter().map(|color| u32::from(color.red) | u32::from(color.green) << 8 | u32::from(color.blue) << 16).collect();
+                    });
+                    assert_eq!(counts, exact, "10^{power}, the orbit ({right}, {up}) views off, BLA {approximate}");
+                }
+            }
         }
     }
 

@@ -41,6 +41,47 @@ struct Outcome {
 @group(0) @binding(2) var<storage, read> table: array<Bla>;
 @group(0) @binding(3) var<storage, read> offsets: array<Point>;
 @group(0) @binding(4) var<storage, read_write> outcomes: array<Outcome>;
+// The rounding residual of every point of the orbit (`deep::Residual`, as plain numbers: the GPU's views are not deep enough for it to underflow)
+@group(0) @binding(5) var<storage, read> residuals: array<Point>;
+
+// `deep::two_product`: a·b as a sum of two numbers, exactly (Dekker, Veltkamp's split; NoContraction keeps every step as written)
+fn two_product(a: f64, b: f64) -> vec2<f64> {
+    let ta = 134217729.0lf * a;
+    let a_high = ta - (ta - a);
+    let a_low = a - a_high;
+    let tb = 134217729.0lf * b;
+    let b_high = tb - (tb - b);
+    let b_low = b - b_high;
+    let product = a * b;
+    return vec2<f64>(product, ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + a_low * b_low);
+}
+
+// `deep::two_sum`: a + b as a sum of two numbers, exactly (Knuth)
+fn two_sum(a: f64, b: f64) -> vec2<f64> {
+    let sum = a + b;
+    let b_virtual = sum - a;
+    return vec2<f64>(sum, (a - (sum - b_virtual)) + (b - b_virtual));
+}
+
+// `deep::outside` for a plain difference: whether Z + ε + z is outside the circle, exactly within 10⁻¹² of it (the tip c = -2)
+fn outside(full: f64, at: u32, zx: f64, zy: f64) -> bool {
+    if (full < params.radius_squared * (1.0lf - 1e-12lf)) {
+        return false;
+    }
+    if (full > params.radius_squared * (1.0lf + 1e-12lf)) {
+        return true;
+    }
+    let ox = orbit[at].x;
+    let oy = orbit[at].y;
+    let dx = residuals[at].x + zx;
+    let dy = residuals[at].y + zy;
+    let xx = two_product(ox, ox);
+    let yy = two_product(oy, oy);
+    let sum = two_sum(xx.x, yy.x);
+    let beyond = two_sum(sum.x, -params.radius_squared);
+    let away = beyond.x + ((sum.y + beyond.y) + (xx.y + yy.y));
+    return away + (2.0lf * (ox * dx + oy * dy) + (dx * dx + dy * dy)) > 0.0lf;
+}
 
 // `Reference::skip`: the index in `table` of the longest approximation from step `at` for a difference of `|z|² = size_squared`, of at most `left` steps, and
 // its steps (0: none)
@@ -104,7 +145,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) g
             let fx = orbit[at].x + zx;
             let fy = orbit[at].y + zy;
             let full = fx * fx + fy * fy;
-            if (full > params.radius_squared) {
+            if (outside(full, at, zx, zy)) {
                 outcome = Outcome(fx, fy, step, 1u);
                 break;
             }
