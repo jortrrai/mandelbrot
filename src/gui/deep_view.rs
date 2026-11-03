@@ -142,6 +142,7 @@ impl MandelbrotApp {
             m.max_iterations = if depth.to_f64().is_normal() { self.auto_settings.initial_limit(depth.to_f64()) } else { self.auto_settings.initial_limit_at(-depth.log2()) }; //(The starting limit of auto iterations, which grows with the zoom)
         }
         let (c, coloring_function, fast_deep) = (self.c.clone(), self.coloring_function, self.fast_deep);
+        let gpu = self.gpu.clone().filter(|_| self.use_gpu); //(Iterates the deep view where it can, see `deep::render_layers_on`)
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let (sender, receiver) = mpsc::channel();
@@ -151,7 +152,8 @@ impl MandelbrotApp {
             let started = Instant::now();
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut layer_started = Instant::now();
-            let completed = deep::render_layers(&m, &real, &imaginary, (depth, c.rotation()), (width, height), samples, &color_of, fast_deep, &thread_cancel, |colors, layer| {
+            let orbit = deep::SharedOrbit::new(&real, &imaginary);
+            let completed = deep::render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, c.rotation()), (width, height), samples, &color_of, fast_deep, gpu.as_deref(), &thread_cancel, |colors, layer| {
                 let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass: layer, total: samples, layer_time: layer_started.elapsed(), whole: true });
                 layer_started = Instant::now();
             });
@@ -191,12 +193,14 @@ impl MandelbrotApp {
         let place = crate::points_of_interest::to_json(&self.current_point(file_name.clone(), String::new()));
         let (m, coloring_function, mapping, samples) = (self.m.clone(), self.coloring_function, self.p.color_channel_mapping, self.image_supersampling_amount);
         let (rotation, fast_deep) = (self.c.rotation(), self.fast_deep);
+        let gpu = self.gpu.clone().filter(|_| self.use_gpu);
         let sender = self.notice_sender.clone();
         std::thread::spawn(move || {
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut image = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(width, height));
             image.color_channel_mapping = mapping;
-            deep::render_layers(&m, &real, &imaginary, (depth, rotation), (width, height), samples, &color_of, fast_deep, &AtomicBool::new(false), |colors, layer| {
+            let orbit = deep::SharedOrbit::new(&real, &imaginary);
+            deep::render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, rotation), (width, height), samples, &color_of, fast_deep, gpu.as_deref(), &AtomicBool::new(false), |colors, layer| {
                 if layer == samples.max(1) {
                     image.colors.copy_from_slice(colors);
                 }

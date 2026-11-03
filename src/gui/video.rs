@@ -1021,7 +1021,7 @@ impl MandelbrotApp {
                 } else {
                     let orbit = shared_orbit.as_ref().expect("a deep dive has the orbit of its center");
                     let color_of = |position: f64| set.interpolated_color(position, |count| set.color(coloring_function, count));
-                    crate::rendering::deep::render_layers_around(&set, (orbit, (0.0, 0.0)), (depth, 0.0), (big_width, big_height), samples, &color_of, fast_deep, &thread_cancel, |layer, number| {
+                    crate::rendering::deep::render_layers_on(&set, (orbit, (0.0, 0.0)), (depth, 0.0), (big_width, big_height), samples, &color_of, fast_deep, gpu.as_deref(), &thread_cancel, |layer, number| {
                         if number == samples.max(1) {
                             colors = layer.to_vec();
                         }
@@ -1148,7 +1148,7 @@ impl MandelbrotApp {
                                 let camera = path.deep_at(time);
                                 let depth = crate::rendering::deep::Depth::from_log2(camera.ln_scale / std::f64::consts::LN_2);
                                 let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
-                                crate::rendering::deep::render_layers_around(&m, (orbit, (camera.right, camera.up)), (depth, plane.rotation()), (width, height), samples, &color_of, fast_deep, thread_cancel, |layer, number| {
+                                crate::rendering::deep::render_layers_on(&m, (orbit, (camera.right, camera.up)), (depth, plane.rotation()), (width, height), samples, &color_of, fast_deep, gpu.as_deref(), thread_cancel, |layer, number| {
                                     if number == samples.max(1) {
                                         colors = layer.to_vec();
                                     }
