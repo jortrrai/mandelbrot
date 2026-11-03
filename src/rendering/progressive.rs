@@ -471,6 +471,10 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
                 let submitted = if fast {
                     let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
                     gpu.submit_pixels(m, plane_of(sample), jitter, origin, &packed, math == GpuMath::Single)
+                } else if gpu.exact_pixels_work() && plane_of(sample).rotation() == 0.0 {
+                    //(The exact loop computes the points itself, see `GpuIterator::submit_exact_pixels`)
+                    let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
+                    gpu.submit_exact_pixels(m, plane_of(sample), jitter, origin, &packed)
                 } else {
                     let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(plane_of(sample), *x, *y, jitter, origin)).collect();
                     gpu.submit(m, &points)
@@ -755,7 +759,14 @@ fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8
                         }).collect();
                         //The fast loop gets the pixels and computes their points itself; the exact loop gets the points
                         let count: usize = selected.iter().map(|(_, xs)| xs.len()).sum();
-                        let submitted = (count > 0).then(|| if *math == GpuMath::Exact {
+                        let submitted = (count > 0).then(|| if *math == GpuMath::Exact && gpu.exact_pixels_work() && c.rotation() == 0.0 {
+                            //The exact loop computes the points itself (see `GpuIterator::submit_exact_pixels`); else the CPU computes them
+                            pixels.clear();
+                            for ((y, _), xs) in &selected {
+                                pixels.extend(xs.iter().map(|x| packed_pixel(*x, *y)));
+                            }
+                            gpu.submit_exact_pixels(m, c, jitter, origin, &pixels)
+                        } else if *math == GpuMath::Exact {
                             let rows: Vec<(usize, &[usize])> = selected.iter().map(|((y, _), xs)| (*y, xs.as_ref())).collect();
                             gpu.submit_coordinates(m, &sample_coordinates(c, &rows, count, jitter, origin))
                         } else {
