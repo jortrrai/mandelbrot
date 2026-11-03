@@ -21,11 +21,15 @@ pub const MIN_SIDE: usize = 16;
 pub const MAX_SIDE: usize = 16_384;
 /// The most pixels a video frame can have (100 megapixels): a video job holds whole frames in memory, so the limit keeps a typo from asking for tens of gigabytes
 pub const MAX_PIXELS: usize = 100_000_000;
-/// The largest width or height of a saved image in pixels: a saved image is rendered and written in strips (see `rendering::strips`), so its memory does not
-/// grow with its height
-pub const MAX_IMAGE_SIDE: usize = 32_768;
-/// The most pixels a saved image can have: those of the 32K preset (30720 x 17280, 531 megapixels), the largest for now
-pub const MAX_IMAGE_PIXELS: usize = 30_720 * 17_280;
+/// The largest width or height of a saved image in pixels: as wide as the GPU's fast loops reach.
+///
+/// A saved image is rendered and written in strips (see `rendering::strips`), so its memory does not grow with its height. The fast GPU loops have pixels of
+/// 16 bits (see `rendering::gpu`): a wider image would be slower (issue #225)
+pub const MAX_IMAGE_SIDE: usize = 65_536;
+/// The most pixels a saved image can have: those of the 64K preset (61440 x 34560, 2.1 gigapixels), the largest.
+///
+/// Issue #225: 64K took 1.7 GB of memory and about a minute at 1x with the GPU; 96K and 128K would be beyond the fast GPU loops and 5 to 25 GB on disk
+pub const MAX_IMAGE_PIXELS: usize = 61_440 * 34_560;
 /// Above this many pixels (8K UHD) an image counts as large: the window says that many viewers cannot open it
 pub const LARGE_IMAGE_PIXELS: usize = 7680 * 4320;
 /// The only `format_version` of the custom presets file that is understood
@@ -64,7 +68,7 @@ impl Resolution {
     /// # Errors
     /// The reason, as a sentence for the status log, if the resolution is not allowed
     pub fn validate_image(self) -> Result<Resolution, String> {
-        self.validate_within(MAX_IMAGE_SIDE, MAX_IMAGE_PIXELS, "of the largest image (32K)")
+        self.validate_within(MAX_IMAGE_SIDE, MAX_IMAGE_PIXELS, "of the largest image (64K)")
     }
 
     /// Checks that the sides are from `MIN_SIDE` to `max_side` and that there are at most `max_pixels` pixels (`why` ends the sentence about the pixels)
@@ -109,7 +113,7 @@ impl ResolutionPreset {
 }
 
 /// The presets that are always there, from small to large
-const BUILT_IN: [(&str, Resolution); 14] = [
+const BUILT_IN: [(&str, Resolution); 16] = [
     ("HD 720p", Resolution::new(1280, 720)),
     ("Full HD 1080p", Resolution::new(1920, 1080)),
     ("QHD 1440p", Resolution::new(2560, 1440)),
@@ -117,9 +121,11 @@ const BUILT_IN: [(&str, Resolution); 14] = [
     ("4K UHD", Resolution::new(3840, 2160)),
     ("5K", Resolution::new(5120, 2880)),
     ("8K UHD", Resolution::new(7680, 4320)),
-    //16:9 like 4K and 8K UHD: twice and four times 8K on a side. Images only (videos are at most `MAX_SIDE`)
+    //16:9 like 4K and 8K UHD: two, four, six and eight times 8K on a side. Images only (videos are at most `MAX_SIDE`)
     ("16K", Resolution::new(15_360, 8640)),
     ("32K", Resolution::new(30_720, 17_280)),
+    ("48K", Resolution::new(46_080, 25_920)),
+    ("64K", Resolution::new(61_440, 34_560)),
     ("Square 2048", Resolution::new(2048, 2048)),
     ("Square 4096", Resolution::new(4096, 4096)),
     ("Portrait 1080 x 1920", Resolution::new(1080, 1920)),
@@ -270,12 +276,13 @@ mod tests {
         let size = |name: &str| built_in_presets().into_iter().find(|preset| preset.name == name).unwrap().resolution;
         //16:9 like the UHD presets: 8K, twice 8K and four times 8K on a side
         assert_eq!((size("8K UHD"), size("16K"), size("32K")), (Resolution::new(7680, 4320), Resolution::new(15_360, 8640), Resolution::new(30_720, 17_280)));
-        assert_eq!(size("32K").pixels(), MAX_IMAGE_PIXELS, "32K is the largest image for now");
-        assert!(size("32K").validate_image().is_ok() && size("16K").validate_image().is_ok());
+        assert_eq!((size("48K"), size("64K")), (Resolution::new(46_080, 25_920), Resolution::new(61_440, 34_560)));
+        assert_eq!(size("64K").pixels(), MAX_IMAGE_PIXELS, "64K is the largest image");
+        assert!(size("64K").validate_image().is_ok() && size("32K").validate_image().is_ok() && size("16K").validate_image().is_ok());
         assert!(size("16K").validate().unwrap_err().contains("132 megapixels is more than the 100"), "a video frame of 16K is refused");
         assert!(size("8K UHD").validate().is_ok());
-        assert!(Resolution::new(MAX_IMAGE_SIDE, 16_384).validate_image().unwrap_err().contains("536 megapixels is more than the 530 megapixels of the largest image (32K)"));
-        assert!(Resolution::new(MAX_IMAGE_SIDE + 1, 100).validate_image().unwrap_err().contains("from 16 to 32768"));
+        assert!(Resolution::new(MAX_IMAGE_SIDE, 32_768).validate_image().unwrap_err().contains("2147 megapixels is more than the 2123 megapixels of the largest image (64K)"));
+        assert!(Resolution::new(MAX_IMAGE_SIDE + 1, 100).validate_image().unwrap_err().contains("from 16 to 65536"));
         assert!(Resolution::new(17_280, 30_720).validate_image().is_ok(), "32K upright");
     }
 
@@ -290,14 +297,14 @@ mod tests {
     #[test]
     fn the_built_in_presets_are_all_allowed_and_have_distinct_names() {
         let presets = built_in_presets();
-        assert_eq!(presets.len(), 14);
+        assert_eq!(presets.len(), 16);
         for preset in &presets {
             assert!(preset.resolution.validate_image().is_ok(), "{}", preset.name);
         }
         let mut names: Vec<String> = presets.iter().map(|preset| preset.name.to_lowercase()).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 16);
         assert_eq!(presets[1].label(), "Full HD 1080p (1920 x 1080)");
     }
 
@@ -315,7 +322,7 @@ mod tests {
             { "name": "  ", "width": 800, "height": 600 },
             { "name": "full hd 1080P", "width": 800, "height": 600 },
             { "name": "GOOD", "width": 900, "height": 600 },
-            { "name": "Huge", "width": 32768, "height": 32768 },
+            { "name": "Huge", "width": 65536, "height": 65536 },
             { "name": "Thin", "width": 4, "height": 600 },
             { "name": "Padded ", "width": 640, "height": 480 }
         ] }"#;
@@ -343,7 +350,7 @@ mod tests {
         assert_eq!(presets, vec![preset("Poster", 7000, 5000), preset("Banner", 3000, 500)]);
         assert!(add_custom_preset(&mut presets, "4k uhd", Resolution::new(10, 10)).unwrap_err().contains("built-in"));
         assert!(add_custom_preset(&mut presets, "", Resolution::new(800, 600)).is_err());
-        assert!(add_custom_preset(&mut presets, "Too big", Resolution::new(40_000, 600)).is_err());
+        assert!(add_custom_preset(&mut presets, "Too big", Resolution::new(70_000, 600)).is_err());
         assert_eq!(presets.len(), 2, "a refused preset changes nothing");
     }
 

@@ -52,6 +52,8 @@ pub(super) struct Settings {
     immersion: Option<bool>,
     auto_blur: Option<bool>,
     cycle_rate: Option<f64>,
+    /// The speed of the rotation cycle, in degrees per second
+    rotation_speed: Option<f64>,
     frames_ahead: Option<usize>,
     blend_frames: Option<bool>,
     f32_frames: Option<bool>,
@@ -68,6 +70,9 @@ pub(super) struct Settings {
     music_path: Option<String>,
     follow_music: Option<bool>,
     music_strength: Option<f64>,
+    /// *Pulse on the beat* and how far it zooms (issue #221)
+    beat_pulse: Option<bool>,
+    pulse_strength: Option<f64>,
     video_length: Option<[String; 3]>,
     video_quality: Option<String>,
     video_playback: Option<String>,
@@ -84,6 +89,11 @@ pub(super) struct Settings {
     log_level: Option<String>,
     show_minimap: Option<bool>,
     show_orbit: Option<bool>,
+    center_marker: Option<bool>,
+    /// Whether the image takes the shape of the saved image size (issue #226)
+    lock_aspect: Option<bool>,
+    /// The radius of the center marker, in points
+    center_marker_radius: Option<f32>,
     /// Whether the Julia map is shown (off by default; a new name since review 5, when it was on by default for a while)
     show_julia_map: Option<bool>,
     /// The *Saved image size* (also the size of videos): "default", "view", "custom", or "preset:" and the name of a preset
@@ -164,6 +174,7 @@ impl MandelbrotApp {
             immersion: Some(self.immersion),
             auto_blur: Some(self.auto_blur),
             cycle_rate: Some(self.cycle_rate),
+            rotation_speed: Some(self.rotation_speed),
             frames_ahead: Some(self.frames_ahead),
             blend_frames: Some(self.blend_frames),
             f32_frames: Some(self.f32_frames),
@@ -180,6 +191,8 @@ impl MandelbrotApp {
             music_path: Some(self.music_path.clone()),
             follow_music: Some(self.follow_music),
             music_strength: Some(self.music_strength),
+            beat_pulse: Some(self.beat_pulse),
+            pulse_strength: Some(self.pulse_strength),
             video_length: Some(self.video_length.clone()),
             video_quality: Some(self.video_quality.name().to_string()),
             video_playback: Some(self.video_playback.name().to_string()),
@@ -193,6 +206,9 @@ impl MandelbrotApp {
             log_level: Some(self.log_level.name().to_string()),
             show_minimap: Some(self.show_minimap),
             show_orbit: Some(self.show_orbit),
+            center_marker: Some(self.center_marker),
+            lock_aspect: Some(self.lock_aspect),
+            center_marker_radius: Some(self.center_marker_radius),
             show_julia_map: Some(self.show_julia),
             save_size: Some(match &self.save_size.choice {
                 SaveSizeChoice::Standard => String::from("default"),
@@ -278,6 +294,9 @@ impl MandelbrotApp {
         }
         set(settings.immersion, &mut self.immersion);
         set(settings.auto_blur, &mut self.auto_blur);
+        if let Some(speed) = settings.rotation_speed.filter(|speed| super::cycle::ROTATION_SPEEDS.contains(speed)) {
+            self.rotation_speed = speed;
+        }
         if let Some(rate) = settings.cycle_rate.filter(|rate| super::cycle::CYCLE_RATES.contains(rate)) {
             self.cycle_rate = rate;
         }
@@ -318,6 +337,10 @@ impl MandelbrotApp {
         if let Some(strength) = settings.music_strength.filter(|strength| (0.0..=1.0).contains(strength)) {
             self.music_strength = strength;
         }
+        set(settings.beat_pulse, &mut self.beat_pulse);
+        if let Some(strength) = settings.pulse_strength.filter(|strength| super::music::PULSE_STRENGTHS.contains(strength)) {
+            self.pulse_strength = strength;
+        }
         if let Some(length) = settings.video_length.clone() {
             self.video_length = length;
         }
@@ -335,6 +358,11 @@ impl MandelbrotApp {
         set(settings.video_blend, &mut self.video_blend);
         set(settings.show_minimap, &mut self.show_minimap);
         set(settings.show_orbit, &mut self.show_orbit);
+        set(settings.center_marker, &mut self.center_marker);
+        set(settings.lock_aspect, &mut self.lock_aspect);
+        if let Some(radius) = settings.center_marker_radius.filter(|radius| super::depth::CENTER_MARKER_RADII.contains(radius)) {
+            self.center_marker_radius = radius;
+        }
         set(settings.show_julia_map, &mut self.show_julia);
         set(settings.video_keyframe_dives, &mut self.video_keyframe_dives);
         if let Some(level) = settings.log_level.as_deref().and_then(|name| super::status::LogLevel::ALL.into_iter().find(|level| level.name() == name)) {

@@ -140,6 +140,8 @@ pub struct MandelbrotApp {
     history: ViewHistory,
     /// Whether the render size follows the size of the window, see `fit`
     fit: Fit,
+    /// Whether the image takes the shape of the saved image size (issue #226, off by default), see `fit::locked_area`
+    lock_aspect: bool,
     /// The size of the saved image, see `save_size`
     save_size: SaveSize,
     /// The save of an image that is running, if any (see `export`)
@@ -250,6 +252,9 @@ pub struct MandelbrotApp {
     show_orbit: bool,
     show_julia: bool,
     julia_pinned: Option<(f64, f64)>,
+    /// Whether a circle marks the center of the view, and its radius in points (issue #223, off by default), see `depth::draw_center_marker`
+    center_marker: bool,
+    center_marker_radius: f32,
     /// In a Julia set (`m.julia`, issue #202): the view of the Mandelbrot set to go back to
     mandelbrot_view: Option<crate::complex_plane::View>,
     /// The Julia map shown: what it was rendered for, its texture, and whether all its layers are done; and the render of its next layers (see `julia`)
@@ -277,6 +282,9 @@ pub struct MandelbrotApp {
     music_path: String,
     follow_music: bool,
     music_strength: f64,
+    /// Whether videos with music pulse on its kicks, and how far (see `music::BeatPulse`, issue #221)
+    beat_pulse: bool,
+    pulse_strength: f64,
     music_length: Option<(String, Option<std::time::Duration>)>,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
@@ -320,6 +328,9 @@ pub struct MandelbrotApp {
     divide_cycle: Option<(f64, f64)>,
     /// The time of a whole swing of the divide, in seconds
     divide_period: f64,
+    /// Whether the view turns by itself around the center of the screen, and how fast, in degrees per second (see `cycle`, issue #228)
+    rotation_cycling: bool,
+    rotation_speed: f64,
     cycle_last: Option<std::time::Instant>,
     /// How many frames of a flight the flight job may render ahead of the one on the screen (0: none, it renders one frame at a time as before), see `flight_job`
     frames_ahead: usize,
@@ -417,6 +428,7 @@ impl MandelbrotApp {
             drag_remainder: (0.0, 0.0),
             history: ViewHistory::default(),
             fit: Fit::new(config.fit_window),
+            lock_aspect: false,
             save_size,
             image_save: None,
             points: Vec::new(),
@@ -477,6 +489,8 @@ impl MandelbrotApp {
             show_orbit: false,
             show_julia: false,
             julia_pinned: None,
+            center_marker: false,
+            center_marker_radius: depth::CENTER_MARKER_RADIUS,
             mandelbrot_view: None,
             julia_map: None,
             julia_map_job: None,
@@ -495,6 +509,8 @@ impl MandelbrotApp {
             music_path: String::new(),
             follow_music: false,
             music_strength: 0.5,
+            beat_pulse: false,
+            pulse_strength: music::PULSE_STRENGTH,
             music_length: None,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
@@ -520,6 +536,8 @@ impl MandelbrotApp {
             color_cycling: false,
             cycle_rate: cycle::CYCLE_RATE,
             divide_cycle: None,
+            rotation_cycling: false,
+            rotation_speed: cycle::ROTATION_SPEED,
             divide_period: cycle::DIVIDE_PERIOD,
             cycle_last: None,
             frames_ahead: 2,
@@ -680,12 +698,19 @@ impl MandelbrotApp {
         let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
         let scale = (available.x / width).min(available.y / height);
         let size = egui::vec2(width * scale, height * scale);
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        //In the shape of the saved image size (issue #226) the image is centered, with bars beside it or above and below it
+        let (rect, response) = if self.lock_aspect {
+            let (area, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+            let rect = egui::Rect::from_center_size(area.center(), size);
+            (rect, ui.interact(rect, ui.scope_id().with("main_image"), egui::Sense::click_and_drag()))
+        } else {
+            ui.allocate_exact_size(size, egui::Sense::click_and_drag())
+        };
         //The image of the last render, at its place in the current view (the whole rectangle when they are the same view, or when the view is held, see `drawn_fraction`)
         let target = transform::rect_of(self.drawn_fraction(), rect);
         //The neighborhood first, so it shows where the image does not reach (a drag, a pan, a zoom out), see `neighborhood`
         self.draw_neighborhood(&ui.painter_at(rect), rect);
-        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.color_cycling || self.divide_cycle.is_some() || self.landing_blur)) || self.quality_blur) {
+        match self.blur.as_ref().filter(|_| (self.auto_blur && (self.flight.is_some() || self.cycling() || self.landing_blur)) || self.quality_blur) {
             Some(blur) => {
                 let sigma = self.shown_scaled.map_or_else(|| blur::blur_sigma(self.preview_block, self.shown_samples), |(columns, _)| blur::blur_sigma_of_percent(100.0 * columns as f32 / width));
                 if let Some(callback) = blur.paint(target, rect, texture.id(), self.texture_uv, (self.p.pixel_plane.width, self.p.pixel_plane.height), sigma) {
@@ -700,6 +725,9 @@ impl MandelbrotApp {
             points::draw_markers(&ui.painter_at(rect), &points::marker_positions(&self.points, self.displayed_plane(), rect));
         }
         self.julia_overlays(ui, rect);
+        if self.center_marker {
+            depth::draw_center_marker(&ui.painter_at(rect), rect.center(), self.center_marker_radius);
+        }
         self.handle_image_pointer(ui, &response, size);
         available
     }

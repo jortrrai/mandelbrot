@@ -1022,6 +1022,27 @@ fn a_move_back_keeps_the_supersampling_layers_of_the_pixels_it_brings_back_from_
 }
 
 #[test]
+fn the_log_says_why_the_samples_started_over() {
+    //Issue #238: at the level Debug, a render that does not continue the samples it has says why
+    let config = Config::sized(120, 80, 100, 4);
+    let mut app = manual_app(&config);
+    let reason = |app: &MandelbrotApp| app.log.iter().rev().find(|line| line.starts_with("Samples started over")).cloned();
+    app.c.scale(0.5);
+    app.render("Zoomed");
+    wait_for_job(&mut app);
+    assert!(reason(&app).is_some_and(|line| line.contains("another zoom")), "{:?}", reason(&app));
+    app.max_iterations_input = 150;
+    app.render("Another limit");
+    wait_for_job(&mut app);
+    assert!(reason(&app).is_some_and(|line| line.contains("iteration limit 100 → 150")), "{:?}", reason(&app));
+    let before = app.log.len();
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, 7);
+    app.render_moved("Moved");
+    wait_for_job(&mut app);
+    assert!(app.log[before..].iter().all(|line| !line.starts_with("Samples started over")), "a move continues: {:?}", &app.log[before..]);
+}
+
+#[test]
 fn a_coarse_preview_is_uploaded_with_one_texel_per_block_centered_on_its_pixel() {
     let (width, height, block) = (10, 6, 4);
     let colors: Vec<TrueColor> = (0..width * height).map(|i| TrueColor::new(i as u8, 0, 0)).collect();
@@ -1317,6 +1338,57 @@ fn with_auto_iterations_the_limit_follows_the_zoom_of_a_flight_and_reaches_the_l
 fn every_point_of_interest_shows_its_zoom_in_the_list() {
     let (app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
     assert_eq!(super::points::point_zoom_text(&app.points[0]), "Zoom \u{d7}15,625", "scale 0.000064");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn the_center_marker_is_a_circle_around_the_exact_center_of_the_image() {
+    let ctx = egui::Context::default();
+    let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(801.0, 600.0));
+    let output = ctx.run_ui(egui::RawInput::default(), |ui| super::depth::draw_center_marker(&ui.painter_at(rect), rect.center(), 30.0));
+    let circles: Vec<(egui::Pos2, f32)> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Circle(circle) => Some((circle.center, circle.radius)),
+        _ => None,
+    }).collect();
+    output.drop_without_applying_deltas();
+    assert_eq!(circles, vec![(egui::pos2(410.5, 320.0), 30.0); 2], "a dark edge and a white line, both on the exact center");
+}
+
+#[test]
+fn the_image_can_take_the_shape_of_the_saved_image_size() {
+    //Issue #226: off by default; on, the largest area of that shape in the window, also upright; not for Same as the view
+    use super::save_size::SaveSizeChoice;
+    assert_eq!(super::fit::locked_area(egui::vec2(800.0, 600.0), crate::resolution::Resolution::new(3840, 2160)), egui::vec2(800.0, 450.0));
+    assert_eq!(super::fit::locked_area(egui::vec2(800.0, 600.0), crate::resolution::Resolution::new(2160, 3840)), egui::vec2(337.5, 600.0));
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    app.fit.set_enabled(true);
+    assert!(!app.lock_aspect);
+    let ctx = egui::Context::default();
+    let area = egui::vec2(800.0, 600.0);
+    app.fit_to_window(&ctx, area);
+    wait_for_job(&mut app);
+    assert_eq!(app.view_resolution(), crate::resolution::Resolution::new(800, 600), "off: the window's shape");
+    app.lock_aspect = true;
+    (app.save_size.choice, app.save_size.portrait) = (SaveSizeChoice::Preset(String::from("4K UHD")), true);
+    app.fit.set_enabled(false);
+    app.fit.set_enabled(true); //(The next fit is immediate)
+    app.fit_to_window(&ctx, area);
+    wait_for_job(&mut app);
+    assert_eq!(app.view_resolution(), crate::resolution::Resolution::new(337, 600), "on: 4K upright, as large as fits");
+    app.save_size.choice = SaveSizeChoice::View;
+    assert_eq!(app.locked_shape(), None, "the size of the view has no shape of its own");
+}
+
+#[test]
+fn a_place_in_a_julia_set_says_so_in_the_list() {
+    let (app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    let mut place = app.points[0].clone();
+    place.description = String::from("A spiral");
+    assert_eq!(super::points::place_hover_text(&place), "A spiral", "a place in the Mandelbrot set: only its description");
+    place.location.julia = Some((-0.8, -0.156));
+    assert_eq!(super::points::place_hover_text(&place), "A spiral\n\nJulia set of c = -0.8 - 0.156i");
+    place.description.clear();
+    assert_eq!(super::points::place_hover_text(&place), "Julia set of c = -0.8 - 0.156i");
     let _ = std::fs::remove_dir_all(folder);
 }
 
@@ -1741,9 +1813,12 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     app.video_blend = true;
     (app.video_fit_length, app.video_length) = (true, [String::from("1"), String::new(), String::from("7.5")]);
     (app.music_path, app.follow_music, app.music_strength) = (String::from("/music/track.mp3"), true, 0.8);
+    (app.beat_pulse, app.pulse_strength) = (true, 0.12);
     app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false };
     //The saved image size (asked by Jort in the review of review-4)
     (app.save_size.choice, app.save_size.portrait, app.save_size.custom_width, app.save_size.custom_height) = (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000);
+    assert!(!app.center_marker, "issue #223: the center marker is off by default");
+    (app.center_marker, app.center_marker_radius, app.rotation_speed) = (true, 60.0, -45.5);
     let now = std::time::Instant::now();
     app.keep_settings(now);
     assert!(!path.exists(), "not on every frame of a drag");
@@ -1760,9 +1835,12 @@ fn the_settings_are_kept_in_their_file_and_reset_to_the_defaults() {
     assert!(next.video_blend);
     assert_eq!((next.video_fit_length, next.target_length()), (true, Some(Duration::from_secs_f64(3607.5))));
     assert_eq!((next.music_path.as_str(), next.follow_music, next.music_strength), ("/music/track.mp3", true, 0.8));
+    assert_eq!((next.beat_pulse, next.pulse_strength), (true, 0.12), "issue #221");
+    assert_eq!(next.followed_music().map(|music| music.pulse), Some(0.12), "the pulse goes with the music of a video");
     assert_eq!(next.m.palette, crate::mandelbrot_set::ColorCycle { divide: 2.5, offset: 40.0, stretch: false });
     assert_eq!((next.save_size.choice.clone(), next.save_size.portrait, next.save_size.custom_width, next.save_size.custom_height), (super::save_size::SaveSizeChoice::Preset(String::from("32K")), true, 5000, 3000));
     assert_eq!(next.save_size.resolve(next.default_save_resolution(), next.view_resolution()), Ok(crate::resolution::Resolution::new(17_280, 30_720)), "32K upright, as it was");
+    assert_eq!((next.center_marker, next.center_marker_radius, next.rotation_speed), (true, 60.0, -45.5));
     //A file with unknown and missing values loads what it knows
     std::fs::write(&path, r#"{ "pace": "Normal", "from_the_future": 3, "save_size": "preset:A deleted preset" }"#).unwrap();
     let mut partial = manual_app(&Config::sized(64, 48, 50, 4));
@@ -2131,7 +2209,7 @@ fn wait_for_video(app: &mut MandelbrotApp) -> String {
         app.poll_video(&ctx);
         std::thread::sleep(Duration::from_millis(1));
     }
-    app.log.iter().rev().find(|line| line.starts_with("Video of the flight") || line.starts_with("Could not")).cloned().unwrap()
+    app.log.iter().rev().find(|line| line.starts_with("Video of the flight") || line.starts_with("Could not")).cloned().unwrap_or_else(|| panic!("the video ended without its message: {:?}", app.log.iter().rev().take(6).collect::<Vec<_>>()))
 }
 
 #[test]
@@ -2170,6 +2248,32 @@ fn a_paused_video_resumes_from_its_chunks_to_exactly_the_same_video() {
     assert!(!parts.exists(), "the chunks are joined and removed");
     assert_eq!(decoded_frames(&saved.join(format!("{name}.mkv"))), expected, "exactly the frames of the video that was not paused");
     let _ = (std::fs::remove_dir_all(folder), std::fs::remove_dir_all(whole_folder));
+}
+
+#[test]
+fn a_video_whose_gpu_encoder_does_not_start_is_encoded_on_the_cpu_in_10_bit_hevc() {
+    //The GPU's encoder (NVENC) can be busy, as when another program holds the GPU's memory: the video is then encoded on the CPU, in the 10-bit HEVC of the
+    //GPU's encoder at the same quality, and the log warns. (A test name with "nvenc-fails" makes the encoder busy, see `video::nvenc_state`)
+    if !ffmpeg_available() {
+        return;
+    }
+    for playback in [super::video::Playback::HighQuality, super::video::Playback::Maximum] {
+        let (mut app, folder) = chunked_video_app(false);
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_quality, app.video_playback) = (192, 108, 1, super::video::VideoQuality::VeryHigh, playback);
+        let spec = app.video_spec().unwrap();
+        assert!(app.start_video_of(super::video::VideoSpec { output: Some(String::from("nvenc-fails")), ..spec }));
+        let message = wait_for_video(&mut app);
+        assert!(message.starts_with("Video of the flight"), "{playback:?}: {message}");
+        assert!(app.log.iter().any(|line| line.starts_with("Warning: the GPU's video encoder (NVENC) could not start")), "{playback:?}: the log warns: {:?}", app.log.iter().rev().take(5).collect::<Vec<_>>());
+        let video = folder.join("saved").join("nvenc-fails.mp4");
+        let probe = std::process::Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt", "-of", "csv=p=0"]).arg(&video).output().unwrap();
+        let stream = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+        let format = if playback == super::video::Playback::Maximum { "yuv444p10le" } else { "yuv420p10le" };
+        assert_eq!(stream, format!("hevc,{format}"), "{playback:?}: 10-bit HEVC as the GPU's encoder makes");
+        let total: usize = message.split(" of ").nth(2).and_then(|rest| rest.split(' ').next()).and_then(|total| total.parse().ok()).expect(&message);
+        assert_eq!(decoded_frames(&video).len(), total * 192 * 108 * 3, "{playback:?}: every frame");
+        let _ = std::fs::remove_dir_all(folder);
+    }
 }
 
 #[test]
@@ -2525,6 +2629,44 @@ fn a_video_that_follows_music_lasts_as_long_as_the_track_slows_down_in_its_quiet
 }
 
 #[test]
+fn a_video_that_pulses_on_the_beat_zooms_in_on_every_kick_and_is_at_rest_between_them() {
+    if !ffmpeg_available() {
+        return;
+    }
+    //Issue #221: 2 s of a kick drum (60 Hz, decaying) every half second, at an even speed (strength 0), with a pulse of 20%
+    let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+    std::fs::create_dir_all(&folder).unwrap();
+    let track = folder.join("kicks.wav");
+    let made = std::process::Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "aevalsrc=0.8*exp(-mod(t\\,0.5)/0.1)*sin(2*PI*60*t):d=2:s=8000"]).arg(&track).status().unwrap();
+    assert!(made.success());
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs) = (48, 32, 1, 24, true);
+    app.pace = super::flight::Pace::Fast;
+    app.go_to_point_of_interest(0);
+    app.skip_flight();
+    app.use_music_file(&track);
+    assert_eq!(app.video_length, [String::new(), String::from("0"), String::from("2")], "the length boxes show the song's length");
+    (app.music_strength, app.beat_pulse, app.pulse_strength) = (0.0, true, 0.2);
+    app.start_video();
+    assert!(app.log.iter().any(|line| line.contains("Pulse on the beat: 4 kicks")), "{:?}", app.log.iter().rev().take(3).collect::<Vec<_>>());
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight: 49 of 49 frames"), "{message}");
+    let saved = folder.join("saved");
+    let frames_folder = std::fs::read_dir(&saved).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+    let path = app.last_flight.as_ref().unwrap().path();
+    //How far frame `frame` is zoomed in beyond the flight's own camera at its moment (an even speed: the moment is its share of the 2 s)
+    let zoom = |frame: usize| {
+        let view = crate::image_metadata::view_of_png(&frames_folder.join(format!("frame-{:05}.png", frame + 1))).unwrap();
+        path.camera_at(path.duration().mul_f64(frame as f64 / 48.0)).scale / view.location.scale - 1.0
+    };
+    //The kick at 0.5 s is frame 12; at frame 13 (42 ms later) the pulse is near its top, at frame 11 the one before has settled
+    assert!(zoom(13) > 0.12, "zoomed in on the kick: {}", zoom(13));
+    assert!(zoom(11).abs() < 0.01 && zoom(23).abs() < 0.01, "at rest between the kicks: {} {}", zoom(11), zoom(23));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_sequence_fitted_to_music_lands_its_keyframes_on_the_swells_and_its_video_lasts_as_long_as_the_track() {
     //Issue #185: a 12 s track, quiet with a loud burst from 5 to 7 s, and a sequence of 3 keyframes
     if !ffmpeg_available() {
@@ -2735,6 +2877,39 @@ fn cycling_the_divide_breathes_around_where_it_started_and_ends_with_a_full_rend
     assert!(!app.cycling());
     assert_eq!(app.m.palette.divide, divide, "stopping keeps the divide it reached");
     assert!(app.buffer_is_complete, "and renders the view to its full quality");
+}
+
+#[test]
+fn the_rotation_cycle_turns_the_view_around_its_center_with_the_clock_and_ends_with_a_full_render() {
+    //Issue #228
+    let ctx = egui::Context::default();
+    let mut app = manual_app(&Config::sized(64, 48, 50, 4));
+    let center = app.c.center();
+    app.rotation_speed = -90.0;
+    app.toggle_rotation_cycle();
+    assert!(app.cycling());
+    let start = std::time::Instant::now();
+    app.cycle_colors(&ctx, start); //(The first call starts the clock)
+    //Every step turns by the time since the last one, at most a quarter of a second, and waits until the last step is on the screen
+    for step in 1..=3 {
+        app.cycle_colors(&ctx, start + Duration::from_millis(200 * step));
+        wait_for_job(&mut app);
+    }
+    assert!(!app.buffer_is_complete, "the steps are one-sample frames");
+    assert!((app.c.rotation().to_degrees() + 54.0).abs() < 1e-9, "0.6 s at 90° a second clockwise: {}°", app.c.rotation().to_degrees());
+    assert_eq!(app.rotation_slider, app.c.rotation(), "the slider shows the angle");
+    let turned = app.c.center();
+    assert!((turned.x - center.x).abs() < 1e-12 && (turned.y - center.y).abs() < 1e-12, "around the center: {turned:?} {center:?}");
+    //Without end: past -180° it goes on from 180°
+    for step in 1..=6 {
+        app.cycle_colors(&ctx, start + Duration::from_millis(600 + 250 * step));
+        wait_for_job(&mut app);
+    }
+    assert!((app.c.rotation().to_degrees() + 189.0 - 360.0).abs() < 1e-9, "-54° - 135° = -189° = 171°: {}°", app.c.rotation().to_degrees());
+    app.toggle_rotation_cycle();
+    wait_for_job(&mut app);
+    assert!(!app.cycling() && app.buffer_is_complete, "stopping renders the view to its full quality");
+    assert!((app.c.rotation().to_degrees() - 171.0).abs() < 1e-9, "at the angle it reached");
 }
 
 #[test]
@@ -3816,5 +3991,79 @@ fn a_drag_with_a_settings_file_keeps_the_layers() {
         app.settle_gesture(&egui::Context::default());
         wait_for_job(&mut app);
         println!("{name} after the drag back: {:?}", app.log.last());
+    }
+}
+
+#[test]
+fn the_command_line_waits_for_the_gpu_before_a_video() {
+    //The GPU opens in the background; a video takes it when it starts, so the command line (which starts at once) waits for it: before, its videos ran on the CPU
+    let config = crate::Config { gpu: true, ..Config::sized(64, 48, 50, 1) };
+    let mut app = MandelbrotApp::new(&config);
+    app.wait_for_gpu();
+    assert!(app.gpu_opening.is_none(), "known by now");
+    assert_eq!(app.gpu.is_some(), rendering::gpu::GpuIterator::new().is_ok(), "{:?}", app.log.last());
+}
+
+#[test]
+#[ignore = "a measurement of the GPU alone, the CPU alone and both on one view, run by hand with --release"]
+fn gpu_alone_against_cpu_alone_on_a_view() {
+    //MANDELBROT_VIEW="real imag scale iterations width height samples" (default: Frost on the Shoreline, 1920 x 1080, 8 samples)
+    let setup = std::env::var("MANDELBROT_VIEW").unwrap_or_else(|_| String::from("-0.6604166666666667 0.44375 0.1 3992 1920 1080 8"));
+    let fields: Vec<&str> = setup.split_whitespace().collect();
+    let (x, y, scale, iterations): (f64, f64, f64, u32) = (fields[0].parse().unwrap(), fields[1].parse().unwrap(), fields[2].parse().unwrap(), fields[3].parse().unwrap());
+    let (width, height, samples): (usize, usize, u8) = (fields[4].parse().unwrap(), fields[5].parse().unwrap(), fields[6].parse().unwrap());
+    let gpu = rendering::gpu::GpuIterator::new().unwrap();
+    let mut plane = ComplexPlane::new(width, height);
+    plane.set_view(&crate::complex_plane::View::new(x, y, scale));
+    let m = crate::mandelbrot_set::MandelbrotSet::new(iterations, 2.0);
+    let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+    let feed = || [&rendering::GPU_FEED.submitting, &rendering::GPU_FEED.waiting, &rendering::GPU_FEED.coloring, &rendering::GPU_FEED.dispatches].map(|counter| counter.load(Ordering::Relaxed));
+    for (label, mode) in [("CPU alone", 0), ("GPU alone", 1), ("CPU and GPU", 2), ("CPU and GPU", 2)] {
+        let (points, before) = (rendering::GPU_FEED.points.load(Ordering::Relaxed), feed());
+        let started = std::time::Instant::now();
+        let render = rendering::Render::new(&plane, &m, width, height, coloring).supersampling(samples);
+        let render = match mode {
+            1 => render.gpu(Some((&gpu, Duration::ZERO))).fast_gpu(true).on_the_gpu_only(),
+            2 => render.gpu(Some((&gpu, Duration::ZERO))).fast_gpu(true),
+            _ => render,
+        };
+        assert!(render.run(|_, _| {}));
+        let seconds = started.elapsed().as_secs_f64();
+        let after = feed();
+        println!("{label}: {seconds:.2} s, {:.0} M samples/s, GPU points {}; feeder: submitting {:.0} ms, waiting {:.0} ms, coloring {:.0} ms, {} dispatches", (width * height * usize::from(samples)) as f64 / seconds / 1e6, rendering::GPU_FEED.points.load(Ordering::Relaxed) - points,
+            (after[0] - before[0]) as f64 / 1e6, (after[1] - before[1]) as f64 / 1e6, (after[2] - before[2]) as f64 / 1e6, after[3] - before[3]);
+    }
+}
+
+#[test]
+#[ignore = "a measurement of Fast dives on a saved flight (#236), run by hand with --release"]
+fn fast_dives_against_frame_by_frame_on_a_saved_flight() {
+    //MANDELBROT_FLIGHT: the flight file; MANDELBROT_SIZE="width height samples" (default 1280 720 8); MANDELBROT_SETTINGS: a copy of a settings file
+    let Ok(path) = std::env::var("MANDELBROT_FLIGHT") else { return };
+    let size = std::env::var("MANDELBROT_SIZE").unwrap_or_else(|_| String::from("1280 720 8"));
+    let numbers: Vec<usize> = size.split_whitespace().map(|number| number.parse().unwrap()).collect();
+    let saved = super::flight_files::parse(&std::fs::read_to_string(&path).unwrap(), "flight.json").unwrap();
+    for keyframe_dives in [false, true] {
+        let (mut app, folder) = app_with_points(&[("test-place.json", HSV_BGR_PLACE)]);
+        if let Ok(settings) = std::env::var("MANDELBROT_SETTINGS") {
+            app.use_settings_file(Some(std::path::PathBuf::from(settings)));
+        }
+        app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
+        app.video_folder = folder.join("saved");
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount) = (numbers[0], numbers[1], u8::try_from(numbers[2]).unwrap());
+        app.video_keyframe_dives = keyframe_dives;
+        app.saved_flights = vec![saved.clone()];
+        app.use_saved_flight(0);
+        let feed = || rendering::GPU_FEED.points.load(Ordering::Relaxed);
+        let (points, started) = (feed(), std::time::Instant::now());
+        app.start_video();
+        let ctx = egui::Context::default();
+        while app.video_job.is_some() {
+            app.poll_video(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        println!("Fast dives {keyframe_dives}: {:.2} s, {} GPU points; {}", started.elapsed().as_secs_f64(), feed() - points, app.log.iter().rev().take(4).cloned().collect::<Vec<_>>().join(" | "));
+        let _ = std::fs::remove_dir_all(folder);
     }
 }

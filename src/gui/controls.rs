@@ -320,6 +320,9 @@ impl MandelbrotApp {
             }
             ui.label(format!("({})", self.view_resolution()));
         });
+        ui.add_enabled(self.fit.enabled, egui::Checkbox::new(&mut self.lock_aspect, "Same shape as the saved image"))
+            .on_hover_text("The image on the screen takes the shape of the Saved image size (and video size), as large as fits, so what you compose is exactly what you save. Only the shape: the screen keeps its own resolution, and the zoom and center stay. Not with Same as the view")
+            .on_disabled_hover_text("Needs Match the window size");
         ui.horizontal(|ui| {
             ui.label("Max. iterations:");
             let response = ui.add_enabled(!self.auto_iterations, egui::DragValue::new(&mut self.max_iterations_input).range(1..=1_000_000).speed(10.0));
@@ -516,7 +519,9 @@ impl MandelbrotApp {
         });
         match self.save_size.resolve(default_size, view) {
             Ok(resolution) => {
-                ui.label(format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6));
+                //(A PNG of a detailed view can take up to its 3 bytes a pixel: say so for the images that need gigabytes, issue #225)
+                let gigabytes = resolution.pixels() as f64 * 3.0 / 1e9;
+                ui.label(if gigabytes >= 1.0 { format!("{:.1} megapixels, up to {gigabytes:.1} GB on disk", resolution.pixels() as f64 / 1e6) } else { format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6) });
                 if resolution.pixels() > resolution::LARGE_IMAGE_PIXELS {
                     ui.weak("A large image: rendered in strips, so it needs little memory, but slow at high quality. Many phone galleries and image viewers cannot open \
                         images this large: use a viewer for large images, or print it");

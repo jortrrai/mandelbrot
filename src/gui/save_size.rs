@@ -70,7 +70,7 @@ impl SaveSize {
         })
     }
 
-    /// The size of a saved image that the choice stands for (see `size`). A preset that has disappeared, or a size beyond the limits of an image (32K, see
+    /// The size of a saved image that the choice stands for (see `size`). A preset that has disappeared, or a size beyond the limits of an image (64K, see
     /// `Resolution::validate_image`), is an error.
     /// # Errors
     /// The reason, as a sentence for the status log
@@ -191,10 +191,10 @@ mod tests {
         size.choice = SaveSizeChoice::View;
         assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(VIEW));
         size.choice = SaveSizeChoice::Custom;
-        (size.custom_width, size.custom_height) = (30_720, 17_280);
-        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(30_720, 17_280)));
-        size.custom_height = 17_281;
-        assert!(size.resolve(DEFAULT_SIZE, VIEW).unwrap_err().contains("of the largest image (32K)"));
+        (size.custom_width, size.custom_height) = (61_440, 34_560);
+        assert_eq!(size.resolve(DEFAULT_SIZE, VIEW), Ok(Resolution::new(61_440, 34_560)));
+        size.custom_height = 34_561;
+        assert!(size.resolve(DEFAULT_SIZE, VIEW).unwrap_err().contains("of the largest image (64K)"));
     }
 
     #[test]
@@ -207,7 +207,7 @@ mod tests {
         assert!(message.starts_with("Saved the resolution preset \"Poster\" (6000 x 4000) in "), "{message}");
         assert_eq!(size.choice, SaveSizeChoice::Preset(String::from("Poster")));
         assert!(size.preset_name.is_empty() && size.is_custom_preset("Poster") && !size.is_custom_preset("4K UHD"));
-        assert_eq!(size.all_presets().len(), 15);
+        assert_eq!(size.all_presets().len(), 17);
         let (next_run, warnings) = SaveSize::new(DEFAULT_SIZE, Some(path.clone()));
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(next_run.custom_presets, size.custom_presets);
