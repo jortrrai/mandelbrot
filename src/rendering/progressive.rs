@@ -756,8 +756,8 @@ fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8
                         //The fast loop gets the pixels and computes their points itself; the exact loop gets the points
                         let count: usize = selected.iter().map(|(_, xs)| xs.len()).sum();
                         let submitted = (count > 0).then(|| if *math == GpuMath::Exact {
-                            let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, jitter, origin))).collect();
-                            gpu.submit(m, &points)
+                            let rows: Vec<(usize, &[usize])> = selected.iter().map(|((y, _), xs)| (*y, xs.as_ref())).collect();
+                            gpu.submit_coordinates(m, &sample_coordinates(c, &rows, count, jitter, origin))
                         } else {
                             pixels.clear();
                             for ((y, _), xs) in &selected {
@@ -1010,6 +1010,53 @@ pub(super) fn divider(divisor: u32) -> impl Fn(u32) -> u32 {
 fn average(sum: [u32; 3], count: u8) -> TrueColor {
     let count = u32::from(count);
     TrueColor::new((sum[0] / count) as u8, (sum[1] / count) as u8, (sum[2] / count) as u8)
+}
+
+/// Rows of a batch: the row and the columns of its pixels
+type BatchRows<'a> = [(usize, &'a [usize])];
+
+/// The threads that compute the points of a large batch for the exact loop of the GPU (see `sample_coordinates`)
+const POINT_THREADS: usize = 4;
+
+/// The coordinates (real and imaginary part after each other) of sample `sample` of the pixels `xs` of every row `y` in `rows` (`count` in all), as
+/// `sample_point` gives them, for the exact loop of the GPU: in one go, on `POINT_THREADS` threads for a large batch. A shared render's GPU waited for one
+/// thread to compute them (a 4K still at the place Wow: 635 ms of its 720 ms in submitting, see #249)
+pub(super) fn sample_coordinates(anchor: &ComplexPlane, rows: &BatchRows, count: usize, sample: u8, origin: (isize, isize)) -> Vec<f64> {
+    let mut coordinates = vec![0.0; 2 * count];
+    let fill = |rows: &BatchRows, out: &mut [f64]| {
+        let mut at = 0;
+        for (y, xs) in rows {
+            for x in *xs {
+                let point = sample_point(anchor, *x, *y, sample, origin);
+                (out[at], out[at + 1]) = (point.x, point.y);
+                at += 2;
+            }
+        }
+    };
+    if count < GPU_MIN_POINTS {
+        fill(rows, &mut coordinates);
+        return coordinates;
+    }
+    //Groups of whole rows of about the same number of points, each written by its own thread into its part
+    let per_group = count.div_ceil(POINT_THREADS);
+    let mut groups: Vec<(&BatchRows, usize)> = Vec::new();
+    let (mut start, mut points) = (0, 0);
+    for (index, (_, xs)) in rows.iter().enumerate() {
+        points += xs.len();
+        if points >= per_group || index + 1 == rows.len() {
+            groups.push((&rows[start..=index], points));
+            (start, points) = (index + 1, 0);
+        }
+    }
+    thread::scope(|scope| {
+        let mut rest = coordinates.as_mut_slice();
+        for (group, points) in groups {
+            let (part, after) = rest.split_at_mut(2 * points);
+            rest = after;
+            scope.spawn(move || fill(group, part));
+        }
+    });
+    coordinates
 }
 
 /// Computes the position (smooth iteration count) of sample `sample` of the pixels `xs` of row `y` and gives each to `sink`, see `MandelbrotSet::positions`.

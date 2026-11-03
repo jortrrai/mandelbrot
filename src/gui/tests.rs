@@ -4005,7 +4005,7 @@ fn the_command_line_waits_for_the_gpu_before_a_video() {
 }
 
 #[test]
-#[ignore = "a measurement of the GPU alone against the CPU alone on one view, run by hand with --release"]
+#[ignore = "a measurement of the GPU alone, the CPU alone and both on one view, run by hand with --release"]
 fn gpu_alone_against_cpu_alone_on_a_view() {
     //MANDELBROT_VIEW="real imag scale iterations width height samples" (default: Frost on the Shoreline, 1920 x 1080, 8 samples)
     let setup = std::env::var("MANDELBROT_VIEW").unwrap_or_else(|_| String::from("-0.6604166666666667 0.44375 0.1 3992 1920 1080 8"));
@@ -4017,8 +4017,9 @@ fn gpu_alone_against_cpu_alone_on_a_view() {
     plane.set_view(&crate::complex_plane::View::new(x, y, scale));
     let m = crate::mandelbrot_set::MandelbrotSet::new(iterations, 2.0);
     let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
-    for (label, mode) in [("CPU alone", 0), ("GPU alone (fast math)", 1), ("CPU and GPU (fast math)", 2), ("CPU alone", 0), ("GPU alone (fast math)", 1), ("CPU and GPU (fast math)", 2)] {
-        let points = rendering::GPU_FEED.points.load(Ordering::Relaxed);
+    let feed = || [&rendering::GPU_FEED.submitting, &rendering::GPU_FEED.waiting, &rendering::GPU_FEED.coloring, &rendering::GPU_FEED.dispatches].map(|counter| counter.load(Ordering::Relaxed));
+    for (label, mode) in [("CPU alone", 0), ("GPU alone", 1), ("CPU and GPU", 2), ("CPU and GPU", 2)] {
+        let (points, before) = (rendering::GPU_FEED.points.load(Ordering::Relaxed), feed());
         let started = std::time::Instant::now();
         let render = rendering::Render::new(&plane, &m, width, height, coloring).supersampling(samples);
         let render = match mode {
@@ -4028,6 +4029,8 @@ fn gpu_alone_against_cpu_alone_on_a_view() {
         };
         assert!(render.run(|_, _| {}));
         let seconds = started.elapsed().as_secs_f64();
-        println!("{label}: {seconds:.2} s, {:.0} M samples/s, GPU points {}", (width * height * usize::from(samples)) as f64 / seconds / 1e6, rendering::GPU_FEED.points.load(Ordering::Relaxed) - points);
+        let after = feed();
+        println!("{label}: {seconds:.2} s, {:.0} M samples/s, GPU points {}; feeder: submitting {:.0} ms, waiting {:.0} ms, coloring {:.0} ms, {} dispatches", (width * height * usize::from(samples)) as f64 / seconds / 1e6, rendering::GPU_FEED.points.load(Ordering::Relaxed) - points,
+            (after[0] - before[0]) as f64 / 1e6, (after[1] - before[1]) as f64 / 1e6, (after[2] - before[2]) as f64 / 1e6, after[3] - before[3]);
     }
 }
