@@ -58,7 +58,8 @@ impl Fixed {
         //The top 64 bits as an integer, scaled by the rest: exact enough for a 64-bit result
         let shift = self.value.bits().saturating_sub(64);
         let top = (&self.value >> shift).to_f64().unwrap_or(0.0);
-        top * 2f64.powi(i32::try_from(shift).unwrap_or(i32::MAX)) / 2f64.powi(i32::try_from(self.bits).unwrap_or(i32::MAX))
+        //(One scaling by 2^(shift - bits): with more than ~1,000 bits both powers overflowed to infinity and their quotient was NaN, #263)
+        times_two_to(top, i32::try_from(i64::from(u32::try_from(shift).unwrap_or(u32::MAX)) - i64::from(self.bits)).unwrap_or(i32::MIN))
     }
 
     /// This number plus the 64-bit float `offset` (a step of the view: panning, zooming around a point), exactly
@@ -250,11 +251,16 @@ impl Reference {
 ///
 /// `center` is the center in 64-bit floats, for the steps after the point escaped; see the module, and `Reference` for the steps it skips
 pub fn position(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (dcx, dcy): (f64, f64)) -> f64 {
+    position_from(m, reference, center, (dcx, dcy), ((0.0, 0.0), 0, 0))
+}
+
+/// `position` from the difference `z` at step `at` of the reference orbit, after `step` steps of the pixel (`position` starts at 0, 0, 0; see `position_scaled`)
+fn position_from(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (dcx, dcy): (f64, f64), ((zx, zy), at, step): ((f64, f64), usize, u32)) -> f64 {
     let orbit = &reference.orbit;
     let radius_squared = m.orbit_radius * m.orbit_radius;
-    let (mut zx, mut zy) = (0.0_f64, 0.0_f64); //The difference from the reference orbit
-    let mut at = 0; //The step of the reference orbit that the difference is from
-    let mut step = 0;
+    let (mut zx, mut zy) = (zx, zy); //The difference from the reference orbit
+    let mut at = at; //The step of the reference orbit that the difference is from
+    let mut step = step;
     while step < m.max_iterations {
         if let Some((bla, steps)) = reference.skip(at, zx * zx + zy * zy, m.max_iterations - step) {
             //z ← A·z + B·c, for `steps` steps at once
@@ -280,6 +286,132 @@ pub fn position(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (d
         }
     }
     f64::from(m.max_iterations)
+}
+
+/// A positive number beyond the range of 64-bit floats, `mantissa · 2^exponent`: the scale of a view deeper than 10⁻³⁰⁰ (issue #263)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Depth {
+    /// In `[1, 2)`
+    pub mantissa: f64,
+    /// The power of two
+    pub exponent: i32,
+}
+
+impl Depth {
+    /// The depth of the decimal text `text` (`2.5e-1000`), or `None` if it is not a positive number
+    pub fn parse(text: &str) -> Option<Depth> {
+        let text = text.trim();
+        let (mantissa, power) = match text.find(['e', 'E']) {
+            Some(at) => (text[..at].parse::<f64>().ok()?, text[at + 1..].parse::<i64>().ok()?),
+            None => (text.parse::<f64>().ok()?, 0),
+        };
+        if !(mantissa.is_finite() && mantissa > 0.0) {
+            return None;
+        }
+        //10^power = 2^(power · log2 10): the whole part goes to the exponent, the rest into the mantissa
+        let log2 = mantissa.log2() + power as f64 * std::f64::consts::LOG2_10;
+        let exponent = log2.floor();
+        Some(Depth { mantissa: (log2 - exponent).exp2(), exponent: i32::try_from(exponent as i64).ok()? })
+    }
+
+    /// The base-2 logarithm of the depth
+    pub fn log2(self) -> f64 {
+        self.mantissa.log2() + f64::from(self.exponent)
+    }
+}
+
+/// `bits_for` for a depth beyond 64-bit floats
+pub fn bits_for_depth(depth: Depth, width: usize) -> u32 {
+    let pixel_log2 = depth.log2() + (2.5 / width.max(1) as f64).log2();
+    (-pixel_log2).ceil().max(0.0) as u32 + 64
+}
+
+/// `x · 2^power`, exactly as long as the result is a normal number (in steps that stay within the exponents of a 64-bit float)
+fn times_two_to(x: f64, power: i32) -> f64 {
+    let (mut x, mut power) = (x, power);
+    while power != 0 {
+        let step = power.clamp(-1000, 1000);
+        x *= f64::from_bits(((1023 + step) as u64) << 52);
+        power -= step;
+    }
+    x
+}
+
+/// Below `2^-SCALED_BELOW` a pixel's difference from the reference orbit is kept scaled by a power of two, see `position_scaled`
+const SCALED_BELOW: i32 = 1000;
+
+/// The position of the pixel at the offset `c · 2^-scaled` from the center (an `f64` offset that would underflow, scaled up by `2^scaled`), for views deeper
+/// than 64-bit floats reach (issue #263).
+///
+/// While the difference `z` from the reference orbit is that small, its square is negligible against `2·Z·z` (below 2⁻⁵⁰⁰ of it), so a step is linear,
+/// `z ← 2·Z·z + c`, and so are the bilinear approximations: `z` and `c` keep one scale, and are scaled down by exact powers of two before `z` could overflow.
+/// Once `z` is above `2^-SCALED_BELOW` (where its square starts to count long before it underflows) they are unscaled and `position_from` goes on as usual.
+/// A pixel whose scale is already within reach goes to `position` directly, bit for bit as before
+pub fn position_scaled(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (cx, cy): (f64, f64), scaled: i32) -> f64 {
+    if scaled <= SCALED_BELOW {
+        return position(m, reference, center, (times_two_to(cx, -scaled), times_two_to(cy, -scaled)));
+    }
+    let orbit = &reference.orbit;
+    let radius_squared = m.orbit_radius * m.orbit_radius;
+    let (mut zx, mut zy, mut cx, mut cy, mut scaled) = (0.0_f64, 0.0_f64, cx, cy, scaled);
+    let (mut at, mut step) = (0_usize, 0_u32);
+    while step < m.max_iterations {
+        //(Any approximation whose radius is not 0 holds for so small a z)
+        if let Some((bla, steps)) = reference.skip(at, 0.0, m.max_iterations - step) {
+            (zx, zy) = (bla.a.0 * zx - bla.a.1 * zy + (bla.b.0 * cx - bla.b.1 * cy), bla.a.0 * zy + bla.a.1 * zx + (bla.b.0 * cy + bla.b.1 * cx));
+            at += steps as usize;
+            step += steps;
+        } else {
+            let (ox, oy) = orbit[at];
+            (zx, zy) = (2.0 * (ox * zx - oy * zy) + cx, 2.0 * (ox * zy + oy * zx) + cy);
+            at += 1;
+            step += 1;
+        }
+        //The pixel's orbit is the center's to the last bit here: it escapes with it
+        let (fx, fy) = orbit[at];
+        if fx * fx + fy * fy > radius_squared {
+            return m.smooth_position_of(step, (fx, fy), center);
+        }
+        if zx * zx + zy * zy > 1e300 {
+            (zx, zy, cx, cy, scaled) = (times_two_to(zx, -500), times_two_to(zy, -500), times_two_to(cx, -500), times_two_to(cy, -500), scaled - 500);
+        }
+        if scaled <= SCALED_BELOW {
+            let unscale = |value: f64| times_two_to(value, -scaled);
+            return position_from(m, reference, center, (unscale(cx), unscale(cy)), ((unscale(zx), unscale(zy)), at, step));
+        }
+    }
+    f64::from(m.max_iterations)
+}
+
+/// `render_fixed` for a view of `depth` (`2.5 · depth` wide), which may be far deeper than 64-bit floats reach; the center needs `bits_for_depth` bits
+#[allow(clippy::too_many_arguments)] // The view, its size, how and when to stop
+pub fn render_depth(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &Fixed, (depth, rotation): (Depth, f64), width: usize, height: usize, approximate: bool,
+    cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<f64>> {
+    use std::sync::atomic::Ordering;
+    //A pixel is `pixel · 2^depth.exponent`: the offsets are kept scaled by `2^-depth.exponent` (their largest |c| is far below what the table's radii notice)
+    let pixel = 2.5 * depth.mantissa / width as f64;
+    let scaled = -depth.exponent;
+    let reference = Reference::new(m, (center_real, center_imaginary), 0.0, approximate);
+    let center = (center_real.to_f64(), center_imaginary.to_f64());
+    let mut positions = vec![0.0; width * height];
+    let threads = super::render_thread_count().max(1);
+    let rows_per_thread = height.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (chunk, rows) in positions.chunks_mut(rows_per_thread * width).enumerate() {
+            let reference = &reference;
+            scope.spawn(move || {
+                for (index, out) in rows.iter_mut().enumerate() {
+                    if index % width == 0 && cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let (x, y) = (index % width, chunk * rows_per_thread + index / width);
+                    let offset = turned(((x as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - 0.5) * pixel), rotation);
+                    *out = position_scaled(m, reference, center, offset, scaled);
+                }
+            });
+        }
+    });
+    (!cancel.load(Ordering::Relaxed)).then_some(positions)
 }
 
 /// The offset from the center of the point at the offset `(right, up)` on the screen, in a view turned counterclockwise by `rotation` radians.
@@ -388,6 +520,57 @@ pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &F
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The escape counts of the pixels of a `width` x `height` view of `depth` around `(real, imaginary)` in exact fixed-point arithmetic (the reference that
+    /// perturbation is checked against): every pixel's own orbit, step by step, until it leaves radius 2
+    fn exact_counts(real: &str, imaginary: &str, (mantissa, power): (f64, i64), (width, height): (usize, usize), limit: u32) -> Vec<u32> {
+        let bits = bits_for_depth(Depth::parse(&format!("{mantissa}e{power}")).unwrap(), width) + 32;
+        let (center_x, center_y) = (Fixed::parse(real, bits).unwrap(), Fixed::parse(imaginary, bits).unwrap());
+        let four = Fixed::parse("4", bits).unwrap();
+        (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| {
+            let pixel = 2.5 * mantissa / width as f64;
+            let (right, up) = ((x as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - 0.5) * pixel);
+            let cx = center_x.add(&Fixed::parse(&format!("{right}e{power}"), bits).unwrap());
+            let cy = center_y.add(&Fixed::parse(&format!("{up}e{power}"), bits).unwrap());
+            let (mut zx, mut zy) = (Fixed::parse("0", bits).unwrap(), Fixed::parse("0", bits).unwrap());
+            let mut n = 0;
+            while n < limit {
+                let (xx, yy, xy) = (zx.mul(&zx), zy.mul(&zy), zx.mul(&zy));
+                if xx.add(&yy).sub(&four).value.is_positive() {
+                    break;
+                }
+                (zx, zy) = (xx.sub(&yy).add(&cx), xy.double().add(&cy));
+                n += 1;
+            }
+            n
+        }).collect()
+    }
+
+    #[test]
+    fn views_beyond_64_bit_floats_have_the_escape_counts_of_exact_arithmetic() {
+        //#263: around c = i (a point of the boundary with structure at every depth), at 10⁻³⁰⁰, where the 64-bit differences underflowed (every pixel came out
+        //"inside"), and at 10⁻¹⁰⁰⁰: perturbation with scaled differences gives every pixel the count of its own orbit in exact arithmetic, with and without BLA
+        let mut m = MandelbrotSet::new(20_000, 2.0);
+        m.smooth_coloring = false;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        for power in [-300_i64, -308, -1000] {
+            //A center a few views from c = i, so the view shows the structure around it
+            let (real, imaginary) = (format!("3e{}", power - 1), format!("1.{}2", "0".repeat((-power) as usize)));
+            let (real, imaginary) = (real.as_str(), imaginary.as_str());
+            let (width, height) = (12, 8);
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let bits = bits_for_depth(depth, width);
+            let (cx, cy) = (Fixed::parse(real, bits).unwrap(), Fixed::parse(imaginary, bits).unwrap());
+            let exact = exact_counts(real, imaginary, (1.0, power), (width, height), m.max_iterations);
+            for approximate in [false, true] {
+                let counts = render_depth(&m, &cx, &cy, (depth, 0.0), width, height, approximate, &cancel).unwrap();
+                let differ = counts.iter().zip(&exact).filter(|(a, b)| **a as u32 != **b).count();
+                assert_eq!(differ, 0, "10^{power}, BLA {approximate}: {:?} against {exact:?}", counts.iter().map(|count| *count as u32).collect::<Vec<_>>());
+                let distinct: std::collections::BTreeSet<u32> = exact.iter().copied().collect();
+                assert!(distinct.len() > 5, "10^{power}: a view with structure: {distinct:?}");
+            }
+        }
+    }
 
     #[test]
     fn decimal_text_reads_exactly_into_fixed_point() {
@@ -552,5 +735,33 @@ mod tests {
         let positions = render_positions(&m, "0.0000000000000000000000000000000000000000003", "1.0000000000000000000000000000000000000000002", 1e-40, 48, 32).unwrap();
         let distinct: std::collections::BTreeSet<u64> = positions.iter().map(|position| (position * 1000.0) as u64).collect();
         assert!(distinct.len() > 20, "the pixels differ: {} different positions", distinct.len());
+    }
+}
+
+#[cfg(test)]
+mod depth_timing {
+    use super::*;
+
+    /// Times views around c = i at depths from 10⁻¹⁰⁰ to 10⁻¹⁰⁰⁰ (issue #263), step by step and with BLA. Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn time_views_at_depths() {
+        let m = MandelbrotSet::new(50_000, 2.0);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (width, height) = (480, 270);
+        for power in [-100_i64, -200, -300, -308, -500, -1000] {
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let bits = bits_for_depth(depth, width);
+            let (cx, cy) = (Fixed::parse(&format!("3e{}", power - 1), bits).unwrap(), Fixed::parse(&format!("1.{}2", "0".repeat((-power) as usize)), bits).unwrap());
+            let started = std::time::Instant::now();
+            let step_by_step = render_depth(&m, &cx, &cy, (depth, 0.0), width, height, false, &cancel).unwrap();
+            let step_time = started.elapsed();
+            let started = std::time::Instant::now();
+            let with_bla = render_depth(&m, &cx, &cy, (depth, 0.0), width, height, true, &cancel).unwrap();
+            let bla_time = started.elapsed();
+            let mean = step_by_step.iter().sum::<f64>() / step_by_step.len() as f64;
+            let moved = step_by_step.iter().zip(&with_bla).filter(|(a, b)| (*a - *b).abs() > 0.01).count();
+            println!("10^{power}: {bits} bits, mean position {mean:.0}; step by step {:.0} ms, BLA {:.0} ms ({:.1}x), {moved} pixels moved by over 0.01", step_time.as_secs_f64() * 1000.0, bla_time.as_secs_f64() * 1000.0, step_time.as_secs_f64() / bla_time.as_secs_f64());
+        }
     }
 }
