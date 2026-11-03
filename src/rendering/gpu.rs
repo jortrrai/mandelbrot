@@ -152,6 +152,9 @@ pub struct GpuIterator {
     fast: wgpu::ComputePipeline,
     /// The plain f32 loop (`gpu_f32.wgsl`), for moving frames at shallow zoom, see `Render::f32_gpu`
     single: wgpu::ComputePipeline,
+    /// The exact loop fed pixels instead of points (`exact_pixels_source`), used only when the self-test found its outcomes the exact loop's bit for bit
+    exact_pixels: Option<wgpu::ComputePipeline>,
+    exact_pixels_works: std::sync::atomic::AtomicBool,
     layout: wgpu::BindGroupLayout,
     name: String,
     /// The buffers of finished dispatches, for the next ones (several renders feed the GPU at once)
@@ -208,8 +211,10 @@ impl GpuIterator {
             Ok(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("mandelbrot"), layout: Some(&pipeline_layout), module: &shader, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions::default(), cache: None }))
         };
         let (exact, fast, single) = (pipeline(include_str!("gpu.wgsl"))?, pipeline(include_str!("gpu_fast.wgsl"))?, pipeline(include_str!("gpu_f32.wgsl"))?);
+        //(Without it the CPU computes the points of the exact loop, as before)
+        let exact_pixels = pipeline(&exact_pixels_source()).ok();
         let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
-        Ok(GpuIterator { device, queue, exact, fast, single, layout, name, spare: std::sync::Mutex::new(Vec::new()) })
+        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), layout, name, spare: std::sync::Mutex::new(Vec::new()) })
     }
 
     /// The name and the backend of the GPU
@@ -275,21 +280,22 @@ impl GpuIterator {
     /// Starts one dispatch of the fast loop over sample `sample` of `pixels` (about `BATCH` at most, see `fast_positions`) and returns at once, see `finish`, which
     /// gives a `FastOutcome` for every pixel. The GPU computes the points itself (see `gpu_fast.wgsl`)
     pub(crate) fn submit_pixels(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32], single: bool) -> Result<Submitted, String> {
-        let to_i32 = |value: isize| i32::try_from(value).map_err(|_| String::from("the origin is too far away"));
-        let mut params = Vec::with_capacity(72);
-        for value in [anchor.min_x, anchor.min_y, anchor.increment_x, anchor.increment_y, m.orbit_radius * m.orbit_radius] {
-            params.extend(value.to_le_bytes());
-        }
-        for value in [m.max_iterations, u32::try_from(pixels.len()).map_err(|_| String::from("too many points"))?, u32::from(m.orbit_radius >= 2.0), u32::from(m.smooth_coloring)] {
-            params.extend(value.to_le_bytes());
-        }
-        for value in [to_i32(origin.0)?, to_i32(origin.1)?] {
-            params.extend(value.to_le_bytes());
-        }
-        for value in [u32::from(sample), 0] {
-            params.extend(value.to_le_bytes());
-        }
+        let params = pixel_params(m, anchor, sample, origin, pixels.len())?;
         self.dispatch(if single { &self.single } else { &self.fast }, &params, bytemuck::cast_slice(pixels), pixels.len(), std::mem::size_of::<FastOutcome>())
+    }
+
+    /// Whether the exact loop computes the points of pixels itself (`submit_exact_pixels`): when the self-test found its outcomes those of the exact loop
+    /// with the CPU's points, bit for bit
+    pub(crate) fn exact_pixels_work(&self) -> bool {
+        self.exact_pixels_works.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `submit` for sample `sample` of `pixels` of the unturned `anchor` (as `submit_pixels`): the GPU computes their points with the arithmetic of
+    /// `progressive::sample_point`, so 4 bytes go to it per point instead of 16 and the CPU computes no points for it. Its outcomes are `Outcome`s, see `finish`
+    pub(crate) fn submit_exact_pixels(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32]) -> Result<Submitted, String> {
+        let params = pixel_params(m, anchor, sample, origin, pixels.len())?;
+        let pipeline = self.exact_pixels.as_ref().ok_or_else(|| String::from("the exact loop for pixels did not compile"))?;
+        self.dispatch(pipeline, &params, bytemuck::cast_slice(pixels), pixels.len(), std::mem::size_of::<Outcome>())
     }
 
     /// Buffers for a dispatch whose input has `input` bytes and whose outcomes have `outcomes` bytes: spare ones that are large enough, or new ones (the sizes
@@ -366,6 +372,15 @@ impl GpuIterator {
         Ok(outcomes)
     }
 
+    /// Whether the exact loop fed pixels (`submit_exact_pixels`) gives the outcomes of the exact loop with the CPU's points (`submit`) for sample 3 of the
+    /// 64 x 48 pixels of `plane`, placed at origin (5, -2), bit for bit
+    fn check_exact_pixels(&self, plane: &ComplexPlane, m: &MandelbrotSet) -> Result<bool, String> {
+        let (pixels, _) = fast_test_case(plane, m, 64, 48);
+        let points: Vec<Complex> = (0..48).flat_map(|y| (0..64).map(move |x| (x, y))).map(|(x, y)| super::progressive::sample_point(plane, x, y, 3, (5, -2))).collect();
+        let (with_points, with_pixels): (Vec<Outcome>, Vec<Outcome>) = (self.finish(self.submit(m, &points)?)?, self.finish(self.submit_exact_pixels(m, plane, 3, (5, -2), &pixels)?)?);
+        Ok(with_points.len() == with_pixels.len() && bytemuck::cast_slice::<Outcome, u8>(&with_points) == bytemuck::cast_slice::<Outcome, u8>(&with_pixels))
+    }
+
     /// Checks the GPU against the CPU on points of a shallow, a medium and a deep view, with smooth and integer coloring and a small orbit radius; and that the fast
     /// loop gives the iteration count of the CPU on almost every point of the shallow view (all but 1%: measured 0.02% on a whole view)
     fn self_test(&self) -> Result<(), String> {
@@ -379,6 +394,10 @@ impl GpuIterator {
             if let Some((point, (gpu, cpu))) = points.iter().zip(gpu.iter().zip(points.iter().map(|c| m.position(c)))).find(|(_, (gpu, cpu))| gpu.to_bits() != cpu.to_bits()) {
                 return Err(format!("{} differs from the CPU at ({}, {}): {gpu} instead of {cpu}", self.name, point.x, point.y));
             }
+            //The exact loop that computes its points: its outcomes must be those of the exact loop with the CPU's points, bit for bit, in every case
+            if index == 0 || self.exact_pixels_work() {
+                self.exact_pixels_works.store(self.check_exact_pixels(&plane, &m).unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
+            }
             if index == 0 {
                 //The fast loop computes the points of the pixels itself: sample 3 of the pixels, placed 5 pixels right and 2 up in the plane
                 let (pixels, cpu) = fast_test_case(&plane, &m, 64, 48);
@@ -391,6 +410,44 @@ impl GpuIterator {
         }
         Ok(())
     }
+}
+
+/// The parameters of a dispatch over pixels (`gpu_fast.wgsl` and `exact_pixels_source`): where the pixels are in `anchor` and the loop's settings
+fn pixel_params(m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), count: usize) -> Result<Vec<u8>, String> {
+    let to_i32 = |value: isize| i32::try_from(value).map_err(|_| String::from("the origin is too far away"));
+    let mut params = Vec::with_capacity(72);
+    for value in [anchor.min_x, anchor.min_y, anchor.increment_x, anchor.increment_y, m.orbit_radius * m.orbit_radius] {
+        params.extend(value.to_le_bytes());
+    }
+    for value in [m.max_iterations, u32::try_from(count).map_err(|_| String::from("too many points"))?, u32::from(m.orbit_radius >= 2.0), u32::from(m.smooth_coloring)] {
+        params.extend(value.to_le_bytes());
+    }
+    for value in [to_i32(origin.0)?, to_i32(origin.1)?] {
+        params.extend(value.to_le_bytes());
+    }
+    for value in [u32::from(sample), 0] {
+        params.extend(value.to_le_bytes());
+    }
+    Ok(params)
+}
+
+/// The exact loop (`gpu.wgsl`) fed pixels instead of points: it takes the parameters and the pixels of the fast loop, and computes the point of each with
+/// `sample_point` of `gpu_fast.wgsl` (the CPU's jitter and arithmetic, in u64 and f64), so its outcomes are the exact loop's for the CPU's points as long as the
+/// GPU's f64 fused multiply-add rounds once, as the CPU's does (the self-test checks that, see `check_exact_pixels`)
+fn exact_pixels_source() -> String {
+    let (exact, fast) = (include_str!("gpu.wgsl"), include_str!("gpu_fast.wgsl"));
+    let between = |text: &'static str, from: &str, to: &str| -> &'static str {
+        let start = text.find(from).expect("the shader has the part");
+        &text[start..start + text[start..].find(to).expect("the shader has the end of the part")]
+    };
+    let fast_params = between(fast, "struct Params {", "}\n");
+    let point_of_pixel = between(fast, "// `jitter::splitmix64`", "// `MandelbrotSet::is_known_interior`");
+    let (exact_params, exact_point) = (between(exact, "struct Params {", "}\n"), between(exact, "struct Point {", "}\n"));
+    exact.replacen(exact_params, fast_params, 1)
+        .replacen(&format!("{exact_point}}}\n"), "", 1)
+        .replacen("@group(0) @binding(1) var<storage, read> points: array<Point>;", &format!("@group(0) @binding(1) var<storage, read> pixels: array<u32>;\n\n{point_of_pixel}"), 1)
+        .replace("points[index].x", "sample_point(index).x")
+        .replace("points[index].y", "sample_point(index).y")
 }
 
 /// The `width` x `height` pixels of `plane` packed for `fast_positions`, and the positions of the CPU for sample 3 of them, placed at origin (5, -2) (see `progressive::sample_point`)
@@ -450,6 +507,7 @@ mod tests {
         for source in [include_str!("gpu.wgsl"), include_str!("gpu_fast.wgsl"), include_str!("gpu_f32.wgsl")] {
             no_contraction_everywhere(source);
         }
+        no_contraction_everywhere(&exact_pixels_source());
     }
 
     fn no_contraction_everywhere(source: &str) {

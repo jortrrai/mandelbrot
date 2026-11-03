@@ -979,3 +979,27 @@ fn the_points_of_a_batch_for_the_exact_gpu_loop_are_the_points_of_sample_point()
         assert!(coordinates.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()) && coordinates.len() == expected.len());
     }
 }
+
+#[test]
+fn the_exact_gpu_loop_that_computes_its_points_gives_the_cpus_image() {
+    //#251: with the exact math the GPU computes the points of its pixels itself (when its startup check passes); the image is the CPU's, bit for bit
+    let Ok(gpu) = super::gpu::GpuIterator::new() else {
+        eprintln!("no suitable GPU: skipped");
+        return;
+    };
+    eprintln!("the exact loop computes its points on the GPU: {}", gpu.exact_pixels_work());
+    let (width, height) = (320, 180);
+    let mut plane = ComplexPlane::new(width, height);
+    plane.set_view(&crate::complex_plane::View::new(-0.803_102_981_044_643_7, 0.178_500_232_700_653_38, 1.486_058_621_097_152_7e-11));
+    let m = MandelbrotSet::new(5895, 2.0);
+    let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+    let mut cpu = Vec::new();
+    assert!(Render::new(&plane, &m, width, height, coloring).supersampling(4).run(|layer, _| cpu = layer.to_vec()));
+    for gpu_only in [false, true] {
+        let mut both = Vec::new();
+        let render = Render::new(&plane, &m, width, height, coloring).supersampling(4).gpu(Some((&gpu, std::time::Duration::ZERO)));
+        let render = if gpu_only { render.on_the_gpu_only() } else { render };
+        assert!(render.run(|layer, _| both = layer.to_vec()));
+        assert!(cpu.iter().zip(&both).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "GPU only {gpu_only}: the CPU's image");
+    }
+}
