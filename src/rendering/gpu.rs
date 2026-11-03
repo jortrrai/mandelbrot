@@ -561,11 +561,11 @@ impl GpuIterator {
     }
 
     /// The outcome of the perturbation loop (`gpu_deep.wgsl`, `rendering::deep::position_from`) for every offset `offsets` from the center of the reference
-    /// orbit of `input`, in at most `BATCH` offsets a dispatch
+    /// orbit of `input`, scaled by `2^scaled` (0: plain offsets; see `rendering::deep::position_scaled`), in at most `BATCH` offsets a dispatch
     ///
     /// # Errors
     /// The GPU failed, or there is no such shader
-    pub(crate) fn deep_outcomes(&self, m: &MandelbrotSet, input: &DeepInput, offsets: &[(f64, f64)]) -> Result<Vec<DeepOutcome>, String> {
+    pub(crate) fn deep_outcomes(&self, m: &MandelbrotSet, input: &DeepInput, offsets: &[(f64, f64)], scaled: i32) -> Result<Vec<DeepOutcome>, String> {
         let DeepInput { orbit, residuals, table, starts, lengths } = *input;
         let (pipeline, layout) = self.deep.as_ref().ok_or_else(|| String::from("the deep shader did not compile"))?;
         if starts.len() > 32 || starts.len() != lengths.len() {
@@ -581,9 +581,9 @@ impl GpuIterator {
             buffer
         };
         let flat_orbit: Vec<f64> = orbit.iter().flat_map(|(x, y)| [*x, *y]).collect();
-        let flat_residuals: Vec<f64> = residuals.iter().flat_map(|(x, y)| [*x, *y]).collect();
+
         let (orbit_buffer, table_buffer) = (buffer_with("deep orbit", bytemuck::cast_slice(&flat_orbit)), buffer_with("deep table", bytemuck::cast_slice(table)));
-        let residual_buffer = buffer_with("deep residuals", bytemuck::cast_slice(&flat_residuals));
+        let residual_buffer = buffer_with("deep residuals", bytemuck::cast_slice(residuals));
         let mut outcomes = Vec::with_capacity(offsets.len());
         for batch in offsets.chunks(BATCH) {
             let mut params: Vec<u8> = Vec::with_capacity(8 + 16 + 256);
@@ -596,6 +596,8 @@ impl GpuIterator {
                     params.extend(list.get(level).copied().unwrap_or(0).to_le_bytes());
                 }
             }
+            params.extend(scaled.to_le_bytes());
+            params.extend(0_u32.to_le_bytes());
             //(The struct is padded to a multiple of 8 bytes)
             params.resize(params.len().div_ceil(8) * 8, 0);
             let flat: Vec<f64> = batch.iter().flat_map(|(x, y)| [*x, *y]).collect();
@@ -888,13 +890,24 @@ const DEEP_WORKGROUPS: u32 = 8192;
 #[derive(Clone, Copy)]
 pub(crate) struct DeepInput<'a> {
     pub(crate) orbit: &'a [(f64, f64)],
-    pub(crate) residuals: &'a [(f64, f64)],
+    pub(crate) residuals: &'a [DeepResidual],
     pub(crate) table: &'a [f64],
     pub(crate) starts: &'a [u32],
     pub(crate) lengths: &'a [u32],
 }
 
-/// The outcome of the deep loop for one pixel (`gpu_deep.wgsl`): the pixel's orbit when it escaped, after `steps` steps
+/// The rounding residual of a point of the reference orbit (`rendering::deep::Residual`): `mx · 2^-px` and `my · 2^-py`
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct DeepResidual {
+    pub(crate) mx: f64,
+    pub(crate) my: f64,
+    pub(crate) px: i32,
+    pub(crate) py: i32,
+}
+
+/// The outcome of the deep loop for one pixel (`gpu_deep.wgsl`): the pixel's orbit when it escaped (1; 2: in the scaled phase, where it is the center's),
+/// after `steps` steps
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct DeepOutcome {

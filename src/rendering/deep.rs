@@ -286,12 +286,12 @@ fn bla_tolerance() -> f64 {
 }
 
 /// What the GPU's deep loop needs besides the orbit (see `Reference::gpu_table`, `GpuIterator::deep_outcomes`): the approximations, five numbers each (A, B,
-/// the square of the radius), level after level, where every level starts and how many it has, and the residuals of the orbit as plain numbers
+/// the square of the radius), level after level, where every level starts and how many it has, and the residuals of the orbit
 struct GpuTable {
     table: Vec<f64>,
     starts: Vec<u32>,
     lengths: Vec<u32>,
-    residuals: Vec<(f64, f64)>,
+    residuals: Vec<super::gpu::DeepResidual>,
 }
 
 impl GpuTable {
@@ -376,8 +376,8 @@ impl Reference {
             lengths.push(u32::try_from(level.len()).unwrap_or(u32::MAX));
             table.extend(level.iter().flat_map(|bla| [bla.a.0, bla.a.1, bla.b.0, bla.b.1, bla.radius_squared]));
         }
-        //(And the residuals as plain numbers, for `outside` with a plain difference)
-        GpuTable { table, starts, lengths, residuals: self.residuals().iter().map(|residual| residual.times(0)).collect() }
+        let residuals = self.residuals().iter().map(|residual| super::gpu::DeepResidual { mx: residual.x.0, my: residual.y.0, px: residual.x.1, py: residual.y.1 }).collect();
+        GpuTable { table, starts, lengths, residuals }
     }
 
     fn table(orbit: &[(f64, f64)], max_offset: f64, orbit_radius: f64) -> Vec<Vec<Bla>> {
@@ -764,7 +764,7 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
         let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), rotation);
         if shift == (0.0, 0.0) { offset } else { (offset.0 + shift.0, offset.1 + shift.1) }
     };
-    let gpu = gpu.filter(|gpu| scaled <= SCALED_BELOW && gpu.deep_works());
+    let gpu = gpu.filter(|gpu| gpu.deep_works());
     let table = gpu.map(|_| reference.gpu_table());
     let pixels = width * height;
     let chunks = pixels.div_ceil(SHARE_CHUNK);
@@ -794,14 +794,21 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
                         return;
                     }
                     let range = chunk * SHARE_CHUNK..((chunk + GPU_CHUNKS) * SHARE_CHUNK).min(pixels);
-                    //The offsets unscaled (as `position_scaled` unscales them at this depth); the smooth position of an escaped orbit as `position_from` ends
+                    //The offsets as `position_scaled` takes them: unscaled at this depth, else scaled (the GPU does the scaled phase too)
+                    let plain = scaled <= SCALED_BELOW;
                     let offsets: Vec<(f64, f64)> = range.clone().map(|index| {
                         let (cx, cy) = offset_of(index % width, index / width, sample);
-                        (times_two_to(cx, -scaled), times_two_to(cy, -scaled))
+                        if plain { (times_two_to(cx, -scaled), times_two_to(cy, -scaled)) } else { (cx, cy) }
                     }).collect();
-                    //(The GPU failed: these on the CPU)
-                    let positions = gpu.deep_outcomes(m, &table.input(reference.points()), &offsets).map_or_else(|_| cpu_positions(range.clone()), |outcomes| offsets.iter().zip(&outcomes).map(|(&(dcx, dcy), outcome)| {
-                        if outcome.escaped != 0 { m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)) } else { f64::from(m.max_iterations) }
+                    //The smooth position of an escaped orbit as `position_from` and `position_scaled` end (in the scaled phase: of the center); the GPU failed:
+                    //these on the CPU
+                    let positions = gpu.deep_outcomes(m, &table.input(reference.points()), &offsets, if plain { 0 } else { scaled }).map_or_else(|_| cpu_positions(range.clone()), |outcomes| offsets.iter().zip(&outcomes).map(|(&(cx, cy), outcome)| {
+                        let (dcx, dcy) = if plain { (cx, cy) } else { (times_two_to(cx, -scaled), times_two_to(cy, -scaled)) };
+                        match outcome.escaped {
+                            1 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)),
+                            2 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), center),
+                            _ => f64::from(m.max_iterations),
+                        }
                     }).collect());
                     let _ = sender.send((range.start, positions));
                 });
@@ -843,7 +850,9 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
 pub(crate) fn gpu_agrees(gpu: &super::gpu::GpuIterator) -> bool {
     let tip = |power: i64| (format!("-1.{}9", "9".repeat((-power) as usize)), format!("4e{}", power - 1));
     let cases = [(-30_i64, String::from("3e-31"), String::from("1.000000000000000000000000000002"), 3000, true), (-200, String::from("3e-201"), format!("1.{}2", "0".repeat(200)), 3000, false),
-        (-20, String::from("-0.74364388703715870475"), String::from("0.13182590420531197049"), 4000, true), (-60, tip(-60).0, tip(-60).1, 3000, true)];
+        (-20, String::from("-0.74364388703715870475"), String::from("0.13182590420531197049"), 4000, true), (-60, tip(-60).0, tip(-60).1, 3000, true),
+        //(Beyond 10⁻³⁰⁰: the scaled phase of `position_scaled`)
+        (-320, String::from("3e-321"), format!("1.{}2", "0".repeat(320)), 3000, true), (-400, tip(-400).0, tip(-400).1, 3000, false)];
     for (power, real, imaginary, iterations, smooth) in cases {
         let (real, imaginary) = (real.as_str(), imaginary.as_str());
         let mut m = MandelbrotSet::new(iterations, 2.0);
@@ -854,19 +863,27 @@ pub(crate) fn gpu_agrees(gpu: &super::gpu::GpuIterator) -> bool {
         let (Some(cx), Some(cy)) = (Fixed::parse(real, bits), Fixed::parse(imaginary, bits)) else { return false };
         let center = (cx.to_f64(), cy.to_f64());
         let pixel = 2.5 * depth.mantissa / width as f64;
+        //(The offsets as `render_layers_on` gives them: plain to about 10⁻³⁰⁰, scaled by 2^scaled beyond)
+        let (scaled, plain) = (-depth.exponent, -depth.exponent <= SCALED_BELOW);
         let offsets: Vec<(f64, f64)> = (0..width * height).map(|index| {
             let (x, y) = (index % width, index / width);
             let (jx, jy) = super::jitter::sample_jitter(x, y, 3);
             let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), 0.3);
-            (times_two_to(offset.0, depth.exponent), times_two_to(offset.1, depth.exponent))
+            if plain { (times_two_to(offset.0, depth.exponent), times_two_to(offset.1, depth.exponent)) } else { offset }
         }).collect();
         for approximate in [false, true] {
             let reference = Reference::new(&m, (&cx, &cy), times_two_to(max_offset(pixel, width, height), depth.exponent), approximate);
             let table = reference.gpu_table();
-            let Ok(outcomes) = gpu.deep_outcomes(&m, &table.input(reference.points()), &offsets) else { return false };
-            let agrees = offsets.iter().zip(&outcomes).all(|(&(dcx, dcy), outcome)| {
-                let on_the_gpu = if outcome.escaped != 0 { m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)) } else { f64::from(m.max_iterations) };
-                on_the_gpu.to_bits() == position(&m, &reference, center, (dcx, dcy)).to_bits()
+            let Ok(outcomes) = gpu.deep_outcomes(&m, &table.input(reference.points()), &offsets, if plain { 0 } else { scaled }) else { return false };
+            let agrees = offsets.iter().zip(&outcomes).all(|(&(cx, cy), outcome)| {
+                let (dcx, dcy) = if plain { (cx, cy) } else { (times_two_to(cx, -scaled), times_two_to(cy, -scaled)) };
+                let gpu_position = match outcome.escaped {
+                    1 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), (center.0 + dcx, center.1 + dcy)),
+                    2 => m.smooth_position_of(outcome.steps, (outcome.zx, outcome.zy), center),
+                    _ => f64::from(m.max_iterations),
+                };
+                let cpu_position = if plain { position(&m, &reference, center, (cx, cy)) } else { position_scaled(&m, &reference, center, (cx, cy), scaled) };
+                gpu_position.to_bits() == cpu_position.to_bits()
             });
             if !agrees || outcomes.len() != offsets.len() {
                 return false;
@@ -957,16 +974,19 @@ mod tests {
         //A whole render on the GPU: the same colors as on the CPU
         let mut m = MandelbrotSet::new(3000, 2.0);
         m.smooth_coloring = true;
-        let depth = Depth::parse("1e-120").unwrap();
-        let bits = bits_for_depth(depth, 64);
-        let orbit = SharedOrbit::new(&Fixed::parse("3e-121", bits).unwrap(), &Fixed::parse(&format!("1.{}2", "0".repeat(120)), bits).unwrap());
         let color_of = |position: f64| crate::coloring::TrueColor::new((position * 7.0) as u8, (position * 3.0) as u8, position as u8);
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        for approximate in [false, true] {
-            let (mut cpu, mut on_gpu) = (Vec::new(), Vec::new());
-            assert!(render_layers_on(&m, (&orbit, (0.4, -1.5)), (depth, 0.7), (64, 48), 3, &color_of, approximate, None, &cancel, |colors, _| cpu = colors.to_vec()));
-            assert!(render_layers_on(&m, (&orbit, (0.4, -1.5)), (depth, 0.7), (64, 48), 3, &color_of, approximate, Some(&gpu), &cancel, |colors, _| on_gpu = colors.to_vec()));
-            assert!(cpu.iter().zip(&on_gpu).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "BLA {approximate}: the same colors");
+        //(10⁻¹²⁰ with plain differences, 10⁻⁴⁰⁰ with the scaled phase)
+        for power in [120, 400] {
+            let depth = Depth::parse(&format!("1e-{power}")).unwrap();
+            let bits = bits_for_depth(depth, 64);
+            let orbit = SharedOrbit::new(&Fixed::parse(&format!("3e-{}", power + 1), bits).unwrap(), &Fixed::parse(&format!("1.{}2", "0".repeat(power)), bits).unwrap());
+            for approximate in [false, true] {
+                let (mut cpu, mut on_gpu) = (Vec::new(), Vec::new());
+                assert!(render_layers_on(&m, (&orbit, (0.4, -1.5)), (depth, 0.7), (64, 48), 3, &color_of, approximate, None, &cancel, |colors, _| cpu = colors.to_vec()));
+                assert!(render_layers_on(&m, (&orbit, (0.4, -1.5)), (depth, 0.7), (64, 48), 3, &color_of, approximate, Some(&gpu), &cancel, |colors, _| on_gpu = colors.to_vec()));
+                assert!(cpu.iter().zip(&on_gpu).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "10^-{power}, BLA {approximate}: the same colors");
+            }
         }
     }
 

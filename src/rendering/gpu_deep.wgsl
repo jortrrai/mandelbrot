@@ -13,6 +13,9 @@ struct Params {
     // Where every level of the table starts, and how many approximations it has
     level_start: array<u32, 32>,
     level_length: array<u32, 32>,
+    // The offsets are scaled by 2^scaled (0: plain; above 1000 the scaled phase of `deep::position_scaled` comes first)
+    scaled: i32,
+    pad: u32,
 }
 
 struct Point {
@@ -41,8 +44,35 @@ struct Outcome {
 @group(0) @binding(2) var<storage, read> table: array<Bla>;
 @group(0) @binding(3) var<storage, read> offsets: array<Point>;
 @group(0) @binding(4) var<storage, read_write> outcomes: array<Outcome>;
-// The rounding residual of every point of the orbit (`deep::Residual`, as plain numbers: the GPU's views are not deep enough for it to underflow)
-@group(0) @binding(5) var<storage, read> residuals: array<Point>;
+// `deep::Residual`: the rounding residual of every point of the orbit, mantissa · 2^-power for each part
+struct Residual {
+    mx: f64,
+    my: f64,
+    px: i32,
+    py: i32,
+}
+
+@group(0) @binding(5) var<storage, read> residuals: array<Residual>;
+
+// `deep::times_two_to`: x · 2^power in steps of at most 2^±1000, each an exact power of two built from its exponent bits
+fn times_two_to(x: f64, power: i32) -> f64 {
+    var value = x;
+    var left = power;
+    loop {
+        if (left == 0) {
+            break;
+        }
+        let step = clamp(left, -1000, 1000);
+        value = value * bitcast<f64>(u64(u32(1023 + step)) << 52u);
+        left = left - step;
+    }
+    return value;
+}
+
+// `Residual::times`: the residual of point `at` times 2^scaled
+fn residual_times(at: u32, scaled: i32) -> vec2<f64> {
+    return vec2<f64>(times_two_to(residuals[at].mx, scaled - residuals[at].px), times_two_to(residuals[at].my, scaled - residuals[at].py));
+}
 
 // `deep::two_product`: a·b as a sum of two numbers, exactly (Dekker, Veltkamp's split; NoContraction keeps every step as written)
 fn two_product(a: f64, b: f64) -> vec2<f64> {
@@ -63,8 +93,8 @@ fn two_sum(a: f64, b: f64) -> vec2<f64> {
     return vec2<f64>(sum, (a - (sum - b_virtual)) + (b - b_virtual));
 }
 
-// `deep::outside` for a plain difference: whether Z + ε + z is outside the circle, exactly within 10⁻¹² of it (the tip c = -2)
-fn outside(full: f64, at: u32, zx: f64, zy: f64) -> bool {
+// `deep::outside`: whether Z + ε + z (z scaled by 2^scaled) is outside the circle, exactly within 10⁻¹² of it (the tip c = -2)
+fn outside(full: f64, at: u32, zx: f64, zy: f64, scaled: i32) -> bool {
     if (full < params.radius_squared * (1.0lf - 1e-12lf)) {
         return false;
     }
@@ -73,14 +103,15 @@ fn outside(full: f64, at: u32, zx: f64, zy: f64) -> bool {
     }
     let ox = orbit[at].x;
     let oy = orbit[at].y;
-    let dx = residuals[at].x + zx;
-    let dy = residuals[at].y + zy;
+    let residual = residual_times(at, scaled);
+    let dx = residual.x + zx;
+    let dy = residual.y + zy;
     let xx = two_product(ox, ox);
     let yy = two_product(oy, oy);
     let sum = two_sum(xx.x, yy.x);
     let beyond = two_sum(sum.x, -params.radius_squared);
-    let away = beyond.x + ((sum.y + beyond.y) + (xx.y + yy.y));
-    return away + (2.0lf * (ox * dx + oy * dy) + (dx * dx + dy * dy)) > 0.0lf;
+    let away = times_two_to(beyond.x, scaled) + times_two_to((sum.y + beyond.y) + (xx.y + yy.y), scaled);
+    return away + (2.0lf * (ox * dx + oy * dy) + times_two_to(dx * dx + dy * dy, -scaled)) > 0.0lf;
 }
 
 // `Reference::skip`: the index in `table` of the longest approximation from step `at` for a difference of `|z|² = size_squared`, of at most `left` steps, and
@@ -105,57 +136,115 @@ fn skip(at: u32, size_squared: f64, left: u32) -> vec2<u32> {
     return vec2<u32>(0u, 0u);
 }
 
+// `deep::position_from`: the pixel at the plain offset (dcx, dcy) from difference (zx, zy) at step `at` of the orbit, after `step` steps
+fn plain(dcx: f64, dcy: f64, start_x: f64, start_y: f64, start_at: u32, start_step: u32) -> Outcome {
+    var zx = start_x;
+    var zy = start_y;
+    var at = start_at;
+    var step = start_step;
+    loop {
+        if (step >= params.max_iterations) {
+            break;
+        }
+        let skipped = skip(at, zx * zx + zy * zy, params.max_iterations - step);
+        if (skipped.y != 0u) {
+            let bla = table[skipped.x];
+            // z ← A·z + B·c, for `steps` steps at once (the CPU's order of operations)
+            let new_x = bla.ax * zx - bla.ay * zy + (bla.bx * dcx - bla.by * dcy);
+            let new_y = bla.ax * zy + bla.ay * zx + (bla.bx * dcy + bla.by * dcx);
+            zx = new_x;
+            zy = new_y;
+            at += skipped.y;
+            step += skipped.y;
+        } else {
+            let ox = orbit[at].x;
+            let oy = orbit[at].y;
+            // z ← 2·Z·z + z² + c
+            let new_x = 2.0lf * (ox * zx - oy * zy) + (zx * zx - zy * zy) + dcx;
+            let new_y = 2.0lf * (ox * zy + oy * zx) + 2.0lf * zx * zy + dcy;
+            zx = new_x;
+            zy = new_y;
+            at += 1u;
+            step += 1u;
+        }
+        // The pixel's orbit
+        let fx = orbit[at].x + zx;
+        let fy = orbit[at].y + zy;
+        let full = fx * fx + fy * fy;
+        if (outside(full, at, zx, zy, 0)) {
+            return Outcome(fx, fy, step, 1u);
+        }
+        // Rebasing: the pixel's orbit is closer to 0 than its difference, or the reference orbit ends
+        if (full < zx * zx + zy * zy || at + 1u >= params.orbit_length) {
+            zx = fx;
+            zy = fy;
+            at = 0u;
+        }
+    }
+    return Outcome(0.0lf, 0.0lf, params.max_iterations, 0u);
+}
+
+// `deep::position_scaled`: while the difference is below 2^-1000 it is scaled by 2^scaled and a step is linear; once it is larger, `plain` goes on. An
+// orbit that escapes in the scaled phase is the center's to the last bit (escaped = 2: its smooth position is of the center)
+fn scaled_phase(start_cx: f64, start_cy: f64) -> Outcome {
+    var zx = 0.0lf;
+    var zy = 0.0lf;
+    var cx = start_cx;
+    var cy = start_cy;
+    var scaled = params.scaled;
+    var at = 0u;
+    var step = 0u;
+    loop {
+        if (step >= params.max_iterations) {
+            break;
+        }
+        // (Any approximation whose radius is not 0 holds for so small a z)
+        let skipped = skip(at, 0.0lf, params.max_iterations - step);
+        if (skipped.y != 0u) {
+            let bla = table[skipped.x];
+            let new_x = bla.ax * zx - bla.ay * zy + (bla.bx * cx - bla.by * cy);
+            let new_y = bla.ax * zy + bla.ay * zx + (bla.bx * cy + bla.by * cx);
+            zx = new_x;
+            zy = new_y;
+            at += skipped.y;
+            step += skipped.y;
+        } else {
+            let ox = orbit[at].x;
+            let oy = orbit[at].y;
+            let new_x = 2.0lf * (ox * zx - oy * zy) + cx;
+            let new_y = 2.0lf * (ox * zy + oy * zx) + cy;
+            zx = new_x;
+            zy = new_y;
+            at += 1u;
+            step += 1u;
+        }
+        let fx = orbit[at].x;
+        let fy = orbit[at].y;
+        if (outside(fx * fx + fy * fy, at, zx, zy, scaled)) {
+            return Outcome(fx, fy, step, 2u);
+        }
+        if (zx * zx + zy * zy > 1e300lf) {
+            zx = times_two_to(zx, -500);
+            zy = times_two_to(zy, -500);
+            cx = times_two_to(cx, -500);
+            cy = times_two_to(cy, -500);
+            scaled = scaled - 500;
+        }
+        if (scaled <= 1000) {
+            return plain(times_two_to(cx, -scaled), times_two_to(cy, -scaled), times_two_to(zx, -scaled), times_two_to(zy, -scaled), at, step);
+        }
+    }
+    return Outcome(0.0lf, 0.0lf, params.max_iterations, 0u);
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let stride = groups.x * 64u;
     for (var index = id.x; index < params.count; index += stride) {
-        let dcx = offsets[index].x;
-        let dcy = offsets[index].y;
-        var zx = 0.0lf;
-        var zy = 0.0lf;
-        var at = 0u;
-        var step = 0u;
-        var outcome = Outcome(0.0lf, 0.0lf, params.max_iterations, 0u);
-        loop {
-            if (step >= params.max_iterations) {
-                break;
-            }
-            let skipped = skip(at, zx * zx + zy * zy, params.max_iterations - step);
-            if (skipped.y != 0u) {
-                let bla = table[skipped.x];
-                // z ← A·z + B·c, for `steps` steps at once (the CPU's order of operations)
-                let new_x = bla.ax * zx - bla.ay * zy + (bla.bx * dcx - bla.by * dcy);
-                let new_y = bla.ax * zy + bla.ay * zx + (bla.bx * dcy + bla.by * dcx);
-                zx = new_x;
-                zy = new_y;
-                at += skipped.y;
-                step += skipped.y;
-            } else {
-                let ox = orbit[at].x;
-                let oy = orbit[at].y;
-                // z ← 2·Z·z + z² + c
-                let new_x = 2.0lf * (ox * zx - oy * zy) + (zx * zx - zy * zy) + dcx;
-                let new_y = 2.0lf * (ox * zy + oy * zx) + 2.0lf * zx * zy + dcy;
-                zx = new_x;
-                zy = new_y;
-                at += 1u;
-                step += 1u;
-            }
-            // The pixel's orbit
-            let fx = orbit[at].x + zx;
-            let fy = orbit[at].y + zy;
-            let full = fx * fx + fy * fy;
-            if (outside(full, at, zx, zy)) {
-                outcome = Outcome(fx, fy, step, 1u);
-                break;
-            }
-            // Rebasing: the pixel's orbit is closer to 0 than its difference, or the reference orbit ends
-            if (full < zx * zx + zy * zy || at + 1u >= params.orbit_length) {
-                zx = fx;
-                zy = fy;
-                at = 0u;
-            }
+        if (params.scaled > 1000) {
+            outcomes[index] = scaled_phase(offsets[index].x, offsets[index].y);
+        } else {
+            outcomes[index] = plain(offsets[index].x, offsets[index].y, 0.0lf, 0.0lf, 0u, 0u);
         }
-        outcomes[index] = outcome;
     }
 }
