@@ -31,6 +31,36 @@ pub(super) struct SampleKey {
 }
 
 impl SampleKey {
+    /// The settings in which `other` differs from `self`, for the log
+    fn differences(&self, other: &SampleKey) -> String {
+        let mut differences = Vec::new();
+        if self.max_iterations != other.max_iterations {
+            differences.push(format!("iteration limit {} → {}", self.max_iterations, other.max_iterations));
+        }
+        if self.orbit_radius != other.orbit_radius {
+            differences.push(String::from("orbit radius"));
+        }
+        if self.smooth_coloring != other.smooth_coloring {
+            differences.push(String::from("smooth colors"));
+        }
+        if self.palette != other.palette {
+            differences.push(String::from("palette"));
+        }
+        if self.coloring_function != other.coloring_function {
+            differences.push(String::from("coloring"));
+        }
+        if self.fast_gpu != other.fast_gpu {
+            differences.push(format!("fast GPU math {} → {}", self.fast_gpu, other.fast_gpu));
+        }
+        if self.single != other.single {
+            differences.push(format!("f32 frames {} → {}", self.single, other.single));
+        }
+        if self.julia != other.julia {
+            differences.push(String::from("Julia set"));
+        }
+        differences.join(", ")
+    }
+
     /// Whether samples of `self` and of `other` are at the same positions (only their colors can differ)
     fn same_positions(&self, other: &SampleKey) -> bool {
         (self.max_iterations, self.orbit_radius, self.smooth_coloring, self.fast_gpu, self.single, self.julia) == (other.max_iterations, other.orbit_radius, other.smooth_coloring, other.fast_gpu, other.single, other.julia)
@@ -195,6 +225,24 @@ impl SampleState {
         let columns = if columns_right >= 0 { 0..width - columns_right.unsigned_abs() } else { columns_right.unsigned_abs()..width };
         let rows = if rows_up >= 0 { 0..height - rows_up.unsigned_abs() } else { rows_up.unsigned_abs()..height };
         rows.into_iter().any(|y| self.counts.get(y * width + columns.start..y * width + columns.end).is_some_and(|row| row.iter().any(|count| *count > 0 && *count != FOREIGN)))
+    }
+
+    /// Why a render of `plane` with these settings (see `prepare_for`) would not continue the samples of this state, for the log (issue #238); `None` when the
+    /// state has no samples. Only meaningful when that render keeps none: call it before `prepare_for`, and use it when that returns 0
+    #[allow(clippy::too_many_arguments)] // The same as `prepare_for`
+    pub fn why_started_over(&self, plane: &ComplexPlane, width: usize, height: usize, m: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor, fast_gpu: bool, single: bool) -> Option<String> {
+        let old = self.plane.as_ref()?;
+        if !self.counts.iter().any(|count| *count > 0 && *count != FOREIGN) && self.outside.tiles.is_empty() {
+            return None;
+        }
+        let key = SampleKey::new(m, coloring_function, fast_gpu, single);
+        Some(if (self.width, self.height) != (width, height) {
+            format!("another size ({}x{} → {width}x{height})", self.width, self.height)
+        } else if let Some(old_key) = self.key.as_ref().filter(|old_key| **old_key != key) {
+            format!("other settings ({})", old_key.differences(&key))
+        } else {
+            super::region::why_not_a_shift(old, plane, self.reach(width), self.reach(height))
+        })
     }
 
     /// The shift that turns this state into the state of a render of `plane` with `key`, if that render keeps samples of it

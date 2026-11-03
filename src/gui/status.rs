@@ -65,7 +65,7 @@ impl LogLevel {
             LogLevel::Error
         } else if lower.contains("not allowed") || lower.contains("is skipped") || lower.contains("refused") || lower.contains("cannot be read") || message.starts_with("Warning") {
             LogLevel::Warning
-        } else if message.starts_with("Rendering") || message.starts_with("Rendered") || message.starts_with("Cancelled the rendering") || message.starts_with("Moved by dragging")
+        } else if message.starts_with("Rendering") || message.starts_with("Rendered") || message.starts_with("Cancelled the rendering") || message.starts_with("Moved by dragging") || message.starts_with("Samples started over")
             || message.starts_with("Zoomed in with the wheel") || message.starts_with("Zoomed in with a double click") || message.starts_with("Zoomed out with the wheel") || message.starts_with("Set the depth to") || message.starts_with("Clicked pixel") {
             LogLevel::Debug
         } else {

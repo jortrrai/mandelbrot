@@ -1022,6 +1022,27 @@ fn a_move_back_keeps_the_supersampling_layers_of_the_pixels_it_brings_back_from_
 }
 
 #[test]
+fn the_log_says_why_the_samples_started_over() {
+    //Issue #238: at the level Debug, a render that does not continue the samples it has says why
+    let config = Config::sized(120, 80, 100, 4);
+    let mut app = manual_app(&config);
+    let reason = |app: &MandelbrotApp| app.log.iter().rev().find(|line| line.starts_with("Samples started over")).cloned();
+    app.c.scale(0.5);
+    app.render("Zoomed");
+    wait_for_job(&mut app);
+    assert!(reason(&app).is_some_and(|line| line.contains("another zoom")), "{:?}", reason(&app));
+    app.max_iterations_input = 150;
+    app.render("Another limit");
+    wait_for_job(&mut app);
+    assert!(reason(&app).is_some_and(|line| line.contains("iteration limit 100 → 150")), "{:?}", reason(&app));
+    let before = app.log.len();
+    crate::rendering::move_complex_plane_by_pixels(&mut app.c, 0, 7);
+    app.render_moved("Moved");
+    wait_for_job(&mut app);
+    assert!(app.log[before..].iter().all(|line| !line.starts_with("Samples started over")), "a move continues: {:?}", &app.log[before..]);
+}
+
+#[test]
 fn a_coarse_preview_is_uploaded_with_one_texel_per_block_centered_on_its_pixel() {
     let (width, height, block) = (10, 6, 4);
     let colors: Vec<TrueColor> = (0..width * height).map(|i| TrueColor::new(i as u8, 0, 0)).collect();
