@@ -199,8 +199,9 @@ impl<'a> Render<'a> {
         self
     }
 
-    /// Runs the CPU threads of the passes at a lower priority (Linux; elsewhere as before): for the frames of a video, so the threads that feed the GPU and
-    /// color its outcomes, and the window, get a core first (#212: with the CPU fully used, a feeder waited behind the workers and the GPU idled)
+    /// Runs the CPU threads of the passes at a lower priority (Linux; elsewhere as before), so the threads that feed the GPU and color its outcomes, and the
+    /// window, get a core first (#212: with the CPU fully used, a feeder waited behind the workers and the GPU idled). Every render with the GPU does this; this
+    /// asks for it without one too
     #[must_use]
     pub const fn in_the_background(mut self) -> Self {
         self.background = true;
@@ -250,6 +251,9 @@ impl<'a> Render<'a> {
     #[allow(clippy::too_many_lines)] // The setup of a render (its state, previews, recolor) and its loop over the layers
     pub fn run(self, mut on_pass: impl FnMut(&[TrueColor], u8)) -> bool {
         let Render { plane: c, set: m, width, height, coloring_function, supersampling_amount, adaptive, exposed, cancel, pixels_done, preview, preview_blocks, state, gpu, gpu_samples, fast_gpu, f32_gpu, cpu_threads, keep_samples, colors_sample, sample_offset, first_row, sample_planes, background } = self;
+        //With the GPU the CPU threads always run at the lower priority: the thread that feeds the GPU then gets a core first (a 4K still at the place Wow, where
+        //the GPU computes exactly: 0.86 s → 0.72 s, the GPU doing half the samples instead of 30%), and so does the window
+        let background = background || gpu.is_some();
         //(The fast loop gets the pixels in 16 bits each, see `gpu::packed_pixel`)
         //(The samples remember whether the fast math was asked for, see `SampleKey`)
         let fast_key = fast_gpu && gpu.is_some();
@@ -345,7 +349,10 @@ impl<'a> Render<'a> {
             if let Some(adaptive) = adaptive.filter(|_| sample == ADAPTIVE_UNIFORM_SAMPLES) {
                 //Every pixel has its uniform samples now: mark the pixels that need more, from the colors of their first two samples
                 let counts = &state.counts;
-                let new_mask = mask_where(width, height, &|x, y| counts[y * width + x] != FOREIGN, &state.first, &state.second, adaptive.threshold);
+                //(A render on the GPU alone without a region: the GPU computes the mask, bit for bit the CPU's, while the CPU threads are busy with other frames, #257)
+                let on_gpu = gpu.filter(|(gpu, _)| cpu_threads == 0 && !track && region.is_none() && gpu.mask_works())
+                    .and_then(|(gpu, _)| gpu.adaptive_mask(&state.first, &state.second, (width, height), adaptive.threshold).ok());
+                let new_mask = on_gpu.unwrap_or_else(|| mask_where(width, height, &|x, y| counts[y * width + x] != FOREIGN, &state.first, &state.second, adaptive.threshold));
                 if track {
                     for (count, _) in counts.iter().zip(&new_mask).filter(|(_, marked)| **marked) {
                         masked[usize::from(*count).min(65)] += 1;
@@ -361,7 +368,7 @@ impl<'a> Render<'a> {
                 //dispatches, without waiting at the end of every pass (#212: the GPU waited at the end of each of the 62 adaptive passes of a 64x frame)
                 if let (Some((gpu, _)), Some(marked)) = (gpu.filter(|_| cpu_threads == 0 && !track && region.is_none()), marked_rows.as_deref()) {
                     let samples = (sample, supersampling_amount, sample_offset);
-                    let completed = stream_samples(&anchor, sample_planes, m, origin, samples, marked, width, state, &mut colors, &color_of, cancel, pixels_done, (gpu, gpu_samples, math));
+                    let completed = stream_samples(&anchor, sample_planes, m, origin, samples, marked, width, state, &mut colors, &color_of, cancel, pixels_done, (gpu, gpu_samples, math), color_table.as_deref());
                     if completed {
                         on_pass(&colors, supersampling_amount);
                     }
@@ -410,7 +417,7 @@ impl<'a> Render<'a> {
 /// fails, the threads compute the samples that are left. Returns whether it completed.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The parts of `Render::run` that the samples need
 fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &MandelbrotSet, origin: (isize, isize), (first, samples, offset): (u8, u8, u8), marked: &[Vec<usize>], width: usize, state: &mut SampleState, colors: &mut [TrueColor],
-    color_of: &(impl Fn(f64) -> TrueColor + Sync), cancel: &AtomicBool, pixels_done: &AtomicUsize, (gpu, gpu_samples, math): (&GpuIterator, &AtomicUsize, GpuMath)) -> bool {
+    color_of: &(impl Fn(f64) -> TrueColor + Sync), cancel: &AtomicBool, pixels_done: &AtomicUsize, (gpu, gpu_samples, math): (&GpuIterator, &AtomicUsize, GpuMath), table: Option<&[TrueColor]>) -> bool {
     //The marked pixels as (x, y), and the batches of (sample, the range of the pixels)
     let pixels: Vec<(usize, usize)> = marked.iter().enumerate().flat_map(|(y, xs)| xs.iter().map(move |x| (*x, y))).collect();
     let count = pixels.len();
@@ -418,8 +425,12 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
     let fast = math != GpuMath::Exact && width <= MAX_PIXEL && marked.len() <= MAX_PIXEL;
     //The view of sample `sample` (see `Render::sample_planes`)
     let plane_of = |sample: u8| planes.and_then(|planes| planes.get(usize::from(sample))).unwrap_or(c);
+    //With the double-float loop and a table of colors the GPU colors the samples and adds them up itself (`GpuIterator::submit_colored`, #257): their sums come
+    //back once, at the end, and the coloring threads only count them. (The batches it did, in case its sums cannot be read)
+    let target = table.filter(|_| fast && math == GpuMath::DoubleFloat && gpu.colored_work()).and_then(|table| gpu.color_sums(table, state.counts.len()).ok());
+    let colored_done: Mutex<Vec<StreamedBatch>> = Mutex::new(Vec::new());
     let sums = Mutex::new(&mut state.sums);
-    let (outcomes_sender, outcomes) = std::sync::mpsc::sync_channel::<(StreamedBatch, Option<GpuOutcomes>)>(2);
+    let (outcomes_sender, outcomes) = std::sync::mpsc::sync_channel::<(StreamedBatch, Option<GpuOutcomes>)>(GPU_COLORING_THREADS);
     let outcomes = Mutex::new(outcomes);
     thread::scope(|scope| {
         for _ in 0..GPU_COLORING_THREADS {
@@ -430,12 +441,18 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
                     continue;
                 }
                 let jitter = sample.wrapping_add(offset);
+                if matches!(outcomes, Some(GpuOutcomes::Colored)) {
+                    pixels_done.fetch_add(range.len(), Ordering::Relaxed);
+                    colored_done.lock().unwrap().push((sample, range));
+                    continue;
+                }
                 let batch = &pixels[range];
                 //The positions of the batch: from the outcomes of the GPU, or computed here when it failed
                 let positions: Vec<f64> = match &outcomes {
                     Some(GpuOutcomes::Fast(all)) => all.iter().map(|outcome| outcome.position(m)).collect(),
                     Some(GpuOutcomes::Exact(all)) => batch.iter().zip(all).map(|((x, y), outcome)| outcome.position(m, &sample_point(plane_of(sample), *x, *y, jitter, origin))).collect(),
-                    None => {
+                    Some(GpuOutcomes::ExactContinued(all)) => all.iter().map(|outcome| outcome.position_continued(m)).collect(),
+                    Some(GpuOutcomes::Colored) | None => {
                         let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(plane_of(sample), *x, *y, jitter, origin)).collect();
                         let mut out = vec![0.0; points.len()];
                         let done = m.positions(&points, &mut out, Some(cancel));
@@ -456,7 +473,9 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
             });
         }
         //This thread feeds the GPU: a few dispatches on it at a time, the oldest handed to the coloring threads when it is done
-        let mut in_flight: VecDeque<(StreamedBatch, Result<Submitted, String>, usize)> = VecDeque::new();
+        //(A batch, its dispatch, its points, and whether the exact loop continued its orbits or the GPU colored it)
+        #[allow(clippy::type_complexity)]
+        let mut in_flight: VecDeque<(StreamedBatch, Result<Submitted, String>, usize, bool, bool)> = VecDeque::new();
         let mut gpu_works = true;
         let mut batches = batches.into_iter();
         loop {
@@ -464,19 +483,28 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
                 let Some((sample, range)) = batches.next() else { break };
                 let jitter = sample.wrapping_add(offset);
                 let batch = &pixels[range.clone()];
-                let submitted = if fast {
+                let continued = !fast && gpu.exact_pixels_work() && plane_of(sample).rotation() == 0.0;
+                let colored = target.is_some();
+                let submitted = if colored {
+                    let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
+                    gpu.submit_colored(m, plane_of(sample), jitter, origin, &packed, width, target.as_ref().expect("colored with sums"))
+                } else if fast {
                     let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
                     gpu.submit_pixels(m, plane_of(sample), jitter, origin, &packed, math == GpuMath::Single)
+                } else if continued {
+                    //(The exact loop computes the points itself, see `GpuIterator::submit_exact_pixels`)
+                    let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
+                    gpu.submit_exact_pixels(m, plane_of(sample), jitter, origin, &packed)
                 } else {
                     let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(plane_of(sample), *x, *y, jitter, origin)).collect();
                     gpu.submit(m, &points)
                 };
-                in_flight.push_back(((sample, range), submitted, batch.len()));
+                in_flight.push_back(((sample, range), submitted, batch.len(), continued, colored));
             }
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let Some((batch, submitted, count)) = in_flight.pop_front() else {
+            let Some((batch, submitted, count, continued, colored)) = in_flight.pop_front() else {
                 //Nothing on the GPU: the batches that are left (after a failure of the GPU) are computed by the coloring threads
                 match batches.next() {
                     Some(batch) => {
@@ -487,7 +515,7 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
                 }
             };
             let wait_started = Instant::now();
-            let result = submitted.and_then(|submitted| if fast { gpu.finish(submitted).map(GpuOutcomes::Fast) } else { gpu.finish(submitted).map(GpuOutcomes::Exact) });
+            let result = submitted.and_then(|submitted| if colored { gpu.finish::<FastOutcome>(submitted).map(|_| GpuOutcomes::Colored) } else if fast { gpu.finish(submitted).map(GpuOutcomes::Fast) } else if continued { gpu.finish(submitted).map(GpuOutcomes::ExactContinued) } else { gpu.finish(submitted).map(GpuOutcomes::Exact) });
             add_time(&GPU_FEED.waiting, wait_started);
             gpu_works &= result.is_ok();
             if result.is_ok() {
@@ -501,6 +529,34 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
     });
     if cancel.load(Ordering::Relaxed) {
         return false;
+    }
+    //The samples the GPU colored and added up: into the sums (or, if its sums cannot be read, computed here after all)
+    if let Some(target) = &target {
+        match gpu.read_sums(target) {
+            Ok(gpu_sums) => {
+                for (x, y) in &pixels {
+                    let (index, sum) = (y * width + x, &mut state.sums[y * width + x]);
+                    for (channel, added) in sum.iter_mut().zip(&gpu_sums[3 * index..3 * index + 3]) {
+                        *channel += added;
+                    }
+                }
+            }
+            Err(_) => {
+                for (sample, range) in colored_done.into_inner().unwrap() {
+                    let jitter = sample.wrapping_add(offset);
+                    let batch = &pixels[range];
+                    let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(plane_of(sample), *x, *y, jitter, origin)).collect();
+                    let mut out = vec![0.0; points.len()];
+                    m.positions(&points, &mut out, None);
+                    for ((x, y), position) in batch.iter().zip(&out) {
+                        let (color, sum) = (color_of(*position), &mut state.sums[y * width + x]);
+                        sum[0] += u32::from(color.red);
+                        sum[1] += u32::from(color.green);
+                        sum[2] += u32::from(color.blue);
+                    }
+                }
+            }
+        }
     }
     //The averages of all the samples of the marked pixels, like the last pass
     let divide = divider(u32::from(samples));
@@ -652,8 +708,10 @@ fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8
     let finish_gpu_row = |(y, (((((row, counts), first), second), first_positions), color_row)): PassRow, xs: Cow<[usize]>, outcomes: Option<(Arc<GpuOutcomes>, usize)>| {
         let positions = match outcomes.as_ref().map(|(all, offset)| (&**all, *offset)) {
             Some((GpuOutcomes::Exact(all), offset)) => xs.iter().zip(&all[offset..]).map(|(x, outcome)| outcome.position(m, &sample_point(c, *x, y, jitter, origin))).collect(),
+            Some((GpuOutcomes::ExactContinued(all), offset)) => all[offset..offset + xs.len()].iter().map(|outcome| outcome.position_continued(m)).collect(),
             Some((GpuOutcomes::Fast(all), offset)) => all[offset..offset + xs.len()].iter().map(|outcome| outcome.position(m)).collect(),
-            None => on_cpu(y, &xs),
+            //(Rows of a pass are never colored on the GPU)
+            Some((GpuOutcomes::Colored, _)) | None => on_cpu(y, &xs),
         };
         apply(y, row, counts, first, second, first_positions, color_row, &xs, &positions);
     };
@@ -751,9 +809,17 @@ fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8
                         }).collect();
                         //The fast loop gets the pixels and computes their points itself; the exact loop gets the points
                         let count: usize = selected.iter().map(|(_, xs)| xs.len()).sum();
-                        let submitted = (count > 0).then(|| if *math == GpuMath::Exact {
-                            let points: Vec<Complex> = selected.iter().flat_map(|((y, _), xs)| xs.iter().map(move |x| sample_point(c, *x, *y, jitter, origin))).collect();
-                            gpu.submit(m, &points)
+                        let continued = *math == GpuMath::Exact && gpu.exact_pixels_work() && c.rotation() == 0.0;
+                        let submitted = (count > 0).then(|| if continued {
+                            //The exact loop computes the points itself (see `GpuIterator::submit_exact_pixels`); else the CPU computes them
+                            pixels.clear();
+                            for ((y, _), xs) in &selected {
+                                pixels.extend(xs.iter().map(|x| packed_pixel(*x, *y)));
+                            }
+                            gpu.submit_exact_pixels(m, c, jitter, origin, &pixels)
+                        } else if *math == GpuMath::Exact {
+                            let rows: Vec<(usize, &[usize])> = selected.iter().map(|((y, _), xs)| (*y, xs.as_ref())).collect();
+                            gpu.submit_coordinates(m, &sample_coordinates(c, &rows, count, jitter, origin))
                         } else {
                             pixels.clear();
                             for ((y, _), xs) in &selected {
@@ -764,18 +830,18 @@ fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8
                         //The points per row of the pass so far (rows with few or no pixels to sample in a preview level or an adaptive pass make it small)
                         (points_taken, rows_taken) = (points_taken + count, rows_taken + rows_in_batch);
                         points_per_row = points_taken as f64 / rows_taken as f64;
-                        in_flight.push_back((selected, submitted, count));
+                        in_flight.push_back((selected, submitted, count, continued));
                         add_time(&GPU_FEED.submitting, submit_started);
                         GPU_FEED.dispatches.fetch_add(1, Ordering::Relaxed);
                         GPU_FEED.points.fetch_add(count as u64, Ordering::Relaxed);
                     }
-                    let Some((selected, submitted, count)) = in_flight.pop_front() else { break };
+                    let Some((selected, submitted, count, continued)) = in_flight.pop_front() else { break };
                     if cancel.load(Ordering::Relaxed) {
                         return; //Not waiting for the dispatches on the GPU: their rows keep the samples they had, like a row the CPU stops in
                     }
                     let wait_started = Instant::now();
                     let outcomes = submitted.map_or_else(|| Ok(GpuOutcomes::Exact(Vec::new())), |submitted| submitted.and_then(|submitted| if *math == GpuMath::Exact {
-                        gpu.finish(submitted).map(GpuOutcomes::Exact)
+                        gpu.finish(submitted).map(if continued { GpuOutcomes::ExactContinued } else { GpuOutcomes::Exact })
                     } else {
                         gpu.finish(submitted).map(GpuOutcomes::Fast)
                     }));
@@ -883,8 +949,9 @@ impl Drop for SetOnDrop<'_> {
     }
 }
 
-/// The threads that color the outcomes of a render on the GPU alone (see `Render::on_the_gpu_only`)
-const GPU_COLORING_THREADS: usize = 2;
+/// The threads that color the outcomes of a render on the GPU alone (see `Render::on_the_gpu_only`): with two the GPU waited for them (measured: a 4K 32x
+/// still of Frost on the Shoreline on the GPU alone in 1.33 s with two, 1.02 s with four, 1.00 s with eight; an RTX 5070 Ti and 16 CPU threads)
+const GPU_COLORING_THREADS: usize = 4;
 
 /// The plain f32 loop (see `Render::f32_gpu`) is only used where neighboring pixels are at least this many steps of a 64-bit number apart: 64 steps of an f32,
 /// which has 29 bits less (a scale of about 0.01 at 3840 pixels wide)
@@ -919,6 +986,10 @@ type GpuRow<'r> = (PassRow<'r>, Cow<'r, [usize]>, Option<(Arc<GpuOutcomes>, usiz
 /// The outcomes of a dispatch: of the exact loop, which the CPU turns into positions, or of the fast loop, which are positions
 enum GpuOutcomes {
     Exact(Vec<Outcome>),
+    /// Colored and added to the frame's sums on the GPU (see `GpuIterator::submit_colored`): nothing to do here
+    Colored,
+    /// Of the exact loop for pixels, which computes the points and continues the orbits itself (see `GpuIterator::submit_exact_pixels`)
+    ExactContinued(Vec<Outcome>),
     Fast(Vec<FastOutcome>),
 }
 
@@ -1005,6 +1076,53 @@ pub(super) fn divider(divisor: u32) -> impl Fn(u32) -> u32 {
 fn average(sum: [u32; 3], count: u8) -> TrueColor {
     let count = u32::from(count);
     TrueColor::new((sum[0] / count) as u8, (sum[1] / count) as u8, (sum[2] / count) as u8)
+}
+
+/// Rows of a batch: the row and the columns of its pixels
+type BatchRows<'a> = [(usize, &'a [usize])];
+
+/// The threads that compute the points of a large batch for the exact loop of the GPU (see `sample_coordinates`)
+const POINT_THREADS: usize = 4;
+
+/// The coordinates (real and imaginary part after each other) of sample `sample` of the pixels `xs` of every row `y` in `rows` (`count` in all), as
+/// `sample_point` gives them, for the exact loop of the GPU: in one go, on `POINT_THREADS` threads for a large batch. A shared render's GPU waited for one
+/// thread to compute them (a 4K still at the place Wow: 635 ms of its 720 ms in submitting, see #249)
+pub(super) fn sample_coordinates(anchor: &ComplexPlane, rows: &BatchRows, count: usize, sample: u8, origin: (isize, isize)) -> Vec<f64> {
+    let mut coordinates = vec![0.0; 2 * count];
+    let fill = |rows: &BatchRows, out: &mut [f64]| {
+        let mut at = 0;
+        for (y, xs) in rows {
+            for x in *xs {
+                let point = sample_point(anchor, *x, *y, sample, origin);
+                (out[at], out[at + 1]) = (point.x, point.y);
+                at += 2;
+            }
+        }
+    };
+    if count < GPU_MIN_POINTS {
+        fill(rows, &mut coordinates);
+        return coordinates;
+    }
+    //Groups of whole rows of about the same number of points, each written by its own thread into its part
+    let per_group = count.div_ceil(POINT_THREADS);
+    let mut groups: Vec<(&BatchRows, usize)> = Vec::new();
+    let (mut start, mut points) = (0, 0);
+    for (index, (_, xs)) in rows.iter().enumerate() {
+        points += xs.len();
+        if points >= per_group || index + 1 == rows.len() {
+            groups.push((&rows[start..=index], points));
+            (start, points) = (index + 1, 0);
+        }
+    }
+    thread::scope(|scope| {
+        let mut rest = coordinates.as_mut_slice();
+        for (group, points) in groups {
+            let (part, after) = rest.split_at_mut(2 * points);
+            rest = after;
+            scope.spawn(move || fill(group, part));
+        }
+    });
+    coordinates
 }
 
 /// Computes the position (smooth iteration count) of sample `sample` of the pixels `xs` of row `y` and gives each to `sink`, see `MandelbrotSet::positions`.
