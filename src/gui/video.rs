@@ -322,8 +322,9 @@ pub(super) fn estimate(duration: Duration, fps: u32, speed: f64, (width, height)
     (frames, Duration::from_secs_f64(frames as f64 / f64::from(fps)), bytes)
 }
 
-/// The renderers of a video that render whole frames on the GPU alone (see `start_video_of`): two keep it busy while each waits for the end of its passes
-const GPU_RENDERERS: usize = 2;
+/// The renderers of a video that render whole frames on the GPU alone (see `start_video_of`): three keep it busier while each waits for the end of its passes (a
+/// documented experiment, #259: about 3% faster on a 4K 32x flight with the fast GPU math, 0.2 dB further from the exact render than two)
+const GPU_RENDERERS: usize = 3;
 
 /// The smallest video the GPU's HEVC encoder takes (NVENC needs at least about 129 x 33 pixels); a smaller one is encoded on the CPU
 const NVENC_SMALLEST: (usize, usize) = (160, 64);
