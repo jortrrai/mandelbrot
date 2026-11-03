@@ -964,3 +964,94 @@ fn reconstruction_filter_experiment() {
         println!("{name:12} error {error:.2}, shimmer {shimmer:.2}, sharpness {sharpness:.2}");
     }
 }
+
+#[test]
+fn the_points_of_a_batch_for_the_exact_gpu_loop_are_the_points_of_sample_point() {
+    //#249: the points of a large batch are computed on several threads, in one go; every one is the point of `sample_point`, bit for bit
+    let mut plane = ComplexPlane::new(3840, 2160);
+    plane.set_view(&crate::complex_plane::View::new(-0.803_102_981_044_643_7, 0.178_500_232_700_653_38, 1.486_058_621_097_152_7e-11));
+    let rows: Vec<(usize, Vec<usize>)> = (0..40).map(|y| (y * 37, (0..3840).filter(|x| (x + y) % 3 != 0).collect())).collect();
+    let rows: Vec<(usize, &[usize])> = rows.iter().map(|(y, xs)| (*y, xs.as_slice())).collect();
+    for (rows, origin) in [(&rows[..], (5, -2)), (&rows[..2], (0, 0))] {
+        let count = rows.iter().map(|(_, xs)| xs.len()).sum();
+        let coordinates = super::progressive::sample_coordinates(&plane, rows, count, 3, origin);
+        let expected: Vec<f64> = rows.iter().flat_map(|(y, xs)| xs.iter().flat_map(|x| { let point = super::progressive::sample_point(&plane, *x, *y, 3, origin); [point.x, point.y] })).collect();
+        assert!(coordinates.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()) && coordinates.len() == expected.len());
+    }
+}
+
+#[test]
+fn the_exact_gpu_loop_that_computes_its_points_gives_the_cpus_image() {
+    //#251: with the exact math the GPU computes the points of its pixels itself (when its startup check passes); the image is the CPU's, bit for bit
+    let Ok(gpu) = super::gpu::GpuIterator::new() else {
+        eprintln!("no suitable GPU: skipped");
+        return;
+    };
+    eprintln!("the exact loop computes its points on the GPU: {}", gpu.exact_pixels_work());
+    let (width, height) = (320, 180);
+    let mut plane = ComplexPlane::new(width, height);
+    plane.set_view(&crate::complex_plane::View::new(-0.803_102_981_044_643_7, 0.178_500_232_700_653_38, 1.486_058_621_097_152_7e-11));
+    let m = MandelbrotSet::new(5895, 2.0);
+    let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+    let mut cpu = Vec::new();
+    assert!(Render::new(&plane, &m, width, height, coloring).supersampling(4).run(|layer, _| cpu = layer.to_vec()));
+    for gpu_only in [false, true] {
+        let mut both = Vec::new();
+        let render = Render::new(&plane, &m, width, height, coloring).supersampling(4).gpu(Some((&gpu, std::time::Duration::ZERO)));
+        let render = if gpu_only { render.on_the_gpu_only() } else { render };
+        assert!(render.run(|layer, _| both = layer.to_vec()));
+        assert!(cpu.iter().zip(&both).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "GPU only {gpu_only}: the CPU's image");
+    }
+}
+
+#[test]
+fn the_gpu_colors_and_sums_its_samples_as_the_cpu_does() {
+    //#257: the fast loop that colors its samples and adds them up on the GPU passes its self-test (its sums are the CPU's coloring of its positions)
+    let Ok(gpu) = super::gpu::GpuIterator::new() else {
+        eprintln!("no suitable GPU: skipped");
+        return;
+    };
+    eprintln!("the GPU colors and sums its samples: {}", gpu.colored_work());
+    assert!(gpu.colored_work(), "the self-test of the coloring fast loop passes");
+    //A frame on the GPU alone with the fast math (a frame of a video): the same, bit for bit, whether the GPU or the CPU colors its adaptive samples
+    let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+    for (view, iterations) in [(crate::complex_plane::View::new(-0.660_416_666_666_666_7, 0.443_75, 0.1), 3992), (crate::complex_plane::View::new(-0.7498, 0.0203, 0.0005), 2000)] {
+        let (width, height) = (640, 360);
+        let mut plane = ComplexPlane::new(width, height);
+        plane.set_view(&view);
+        let m = MandelbrotSet::new(iterations, 2.0);
+        let frame = || {
+            let mut colors = Vec::new();
+            assert!(Render::new(&plane, &m, width, height, coloring).supersampling(16).adaptive(Some(super::AdaptiveSampling::default())).gpu(Some((&gpu, std::time::Duration::ZERO))).fast_gpu(true).on_the_gpu_only()
+                .run(|layer, pass| if pass >= 16 { colors = layer.to_vec(); }));
+            colors
+        };
+        let gpu_colored = frame();
+        gpu.use_colored(false);
+        let cpu_colored = frame();
+        gpu.use_colored(true);
+        let differ = gpu_colored.iter().zip(&cpu_colored).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+        assert_eq!(differ, 0, "{view:?}");
+    }
+}
+
+#[test]
+fn the_gpus_adaptive_mask_is_the_cpus() {
+    //#257: the GPU's adaptive mask passes its self-test, and a GPU-only frame with it (exact math) is the CPU's frame, bit for bit
+    let Ok(gpu) = super::gpu::GpuIterator::new() else {
+        eprintln!("no suitable GPU: skipped");
+        return;
+    };
+    assert!(gpu.mask_works(), "the self-test of the GPU's mask passes");
+    let (width, height) = (333, 187);
+    let mut plane = ComplexPlane::new(width, height);
+    plane.set_view(&crate::complex_plane::View::new(-0.7498, 0.0203, 0.0005));
+    let m = MandelbrotSet::new(2000, 2.0);
+    let coloring = crate::coloring::TrueColor::new_from_bernstein_polynomials;
+    let adaptive = Some(super::AdaptiveSampling::default());
+    let mut cpu = Vec::new();
+    assert!(Render::new(&plane, &m, width, height, coloring).supersampling(16).adaptive(adaptive).run(|layer, _| cpu = layer.to_vec()));
+    let mut on_gpu = Vec::new();
+    assert!(Render::new(&plane, &m, width, height, coloring).supersampling(16).adaptive(adaptive).gpu(Some((&gpu, std::time::Duration::ZERO))).on_the_gpu_only().run(|layer, pass| if pass >= 16 { on_gpu = layer.to_vec(); }));
+    assert!(cpu.iter().zip(&on_gpu).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)));
+}

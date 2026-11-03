@@ -35,12 +35,26 @@ pub(super) struct Manifest {
     pub(super) total: usize,
     pub(super) chunk_frames: usize,
     pub(super) nvenc: bool,
+    /// Whether the GPU's encoder was to encode the video but could not start, so the CPU encodes it as the GPU would (see `video::Encoder`)
+    #[serde(default)]
+    pub(super) cpu_instead_of_gpu: bool,
     pub(super) chunks_done: usize,
 }
 
 impl Manifest {
     pub(super) fn new(spec: VideoSpec, total: usize, chunk_frames: usize, nvenc: bool) -> Manifest {
-        Manifest { format_version: FORMAT_VERSION, spec, total, chunk_frames: chunk_frames.max(1), nvenc, chunks_done: 0 }
+        Manifest { format_version: FORMAT_VERSION, spec, total, chunk_frames: chunk_frames.max(1), nvenc, cpu_instead_of_gpu: false, chunks_done: 0 }
+    }
+
+    /// The encoder of the chunks
+    pub(super) const fn encoder(&self) -> super::video::Encoder {
+        if self.nvenc {
+            super::video::Encoder::Gpu
+        } else if self.cpu_instead_of_gpu {
+            super::video::Encoder::CpuInsteadOfGpu
+        } else {
+            super::video::Encoder::Cpu
+        }
     }
 
     /// The chunks of the whole video

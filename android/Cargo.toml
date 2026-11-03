@@ -1,6 +1,6 @@
 [package]
 name = "mandelbrot-android"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "The Mandelbrot app on Android (issue #219): the same app as the desktop window, built as a native activity"
 license = "MIT"
