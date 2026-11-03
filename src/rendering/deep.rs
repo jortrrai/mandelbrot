@@ -477,6 +477,7 @@ pub fn position(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (d
 fn position_from(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (dcx, dcy): (f64, f64), ((zx, zy), at, step): ((f64, f64), usize, u32)) -> f64 {
     let (orbit, residuals) = (reference.points(), reference.residuals());
     let radius_squared = m.orbit_radius * m.orbit_radius;
+    let near_circle = radius_squared * (1.0 - 1e-12);
     let (mut zx, mut zy) = (zx, zy); //The difference from the reference orbit
     let mut at = at; //The step of the reference orbit that the difference is from
     let mut step = step;
@@ -495,7 +496,8 @@ fn position_from(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (
         }
         let (fx, fy) = (orbit[at].0 + zx, orbit[at].1 + zy); //The pixel's orbit
         let full = fx * fx + fy * fy;
-        if outside(full, radius_squared, orbit[at], residuals[at], (zx, zy), 0) {
+        //(The residual only next to the circle: elsewhere one comparison, as fast as before, see `outside`)
+        if full >= near_circle && outside(full, radius_squared, orbit[at], residuals[at], (zx, zy), 0) {
             return m.smooth_position_of(step, (fx, fy), (center.0 + dcx, center.1 + dcy));
         }
         //Rebasing: the pixel's orbit is closer to 0 than its difference, or the reference orbit ends
@@ -649,7 +651,8 @@ pub fn position_scaled(m: &MandelbrotSet, reference: &Reference, center: (f64, f
         }
         //The pixel's orbit is the center's to the last bit here: it escapes with it (on the circle, by the side `z` is on, see `outside_scaled`)
         let (fx, fy) = orbit[at];
-        if outside(fx * fx + fy * fy, radius_squared, orbit[at], reference.residuals()[at], (zx, zy), scaled) {
+        let full = fx * fx + fy * fy;
+        if full >= radius_squared * (1.0 - 1e-12) && outside(full, radius_squared, orbit[at], reference.residuals()[at], (zx, zy), scaled) {
             return m.smooth_position_of(step, (fx, fy), center);
         }
         if zx * zx + zy * zy > 1e300 {
