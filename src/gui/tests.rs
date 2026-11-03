@@ -2251,6 +2251,32 @@ fn a_paused_video_resumes_from_its_chunks_to_exactly_the_same_video() {
 }
 
 #[test]
+fn a_video_whose_gpu_encoder_does_not_start_is_encoded_on_the_cpu_in_10_bit_hevc() {
+    //The GPU's encoder (NVENC) can be busy, as when another program holds the GPU's memory: the video is then encoded on the CPU, in the 10-bit HEVC of the
+    //GPU's encoder at the same quality, and the log warns. (A test name with "nvenc-fails" makes the encoder busy, see `video::nvenc_state`)
+    if !ffmpeg_available() {
+        return;
+    }
+    for playback in [super::video::Playback::HighQuality, super::video::Playback::Maximum] {
+        let (mut app, folder) = chunked_video_app(false);
+        (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_quality, app.video_playback) = (192, 108, 1, super::video::VideoQuality::VeryHigh, playback);
+        let spec = app.video_spec().unwrap();
+        assert!(app.start_video_of(super::video::VideoSpec { output: Some(String::from("nvenc-fails")), ..spec }));
+        let message = wait_for_video(&mut app);
+        assert!(message.starts_with("Video of the flight"), "{playback:?}: {message}");
+        assert!(app.log.iter().any(|line| line.starts_with("Warning: the GPU's video encoder (NVENC) could not start")), "{playback:?}: the log warns: {:?}", app.log.iter().rev().take(5).collect::<Vec<_>>());
+        let video = folder.join("saved").join("nvenc-fails.mp4");
+        let probe = std::process::Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt", "-of", "csv=p=0"]).arg(&video).output().unwrap();
+        let stream = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+        let format = if playback == super::video::Playback::Maximum { "yuv444p10le" } else { "yuv420p10le" };
+        assert_eq!(stream, format!("hevc,{format}"), "{playback:?}: 10-bit HEVC as the GPU's encoder makes");
+        let total: usize = message.split(" of ").nth(2).and_then(|rest| rest.split(' ').next()).and_then(|total| total.parse().ok()).expect(&message);
+        assert_eq!(decoded_frames(&video).len(), total * 192 * 108 * 3, "{playback:?}: every frame");
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+#[test]
 fn a_chunked_mp4_joins_into_one_video_with_every_frame() {
     if !ffmpeg_available() {
         return;
