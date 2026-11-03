@@ -47,6 +47,16 @@ pub(crate) struct Outcome {
 }
 
 impl Outcome {
+    /// The position of the point of an outcome of the exact loop for pixels (`submit_exact_pixels`), which continues an escaped orbit for smooth coloring
+    /// itself and keeps the steps it added in the bits above the lowest of `escaped`: exactly `m.position(c)`, without `c`
+    pub(crate) fn position_continued(&self, m: &MandelbrotSet) -> f64 {
+        if self.escaped & 1 != 0 && m.smooth_coloring {
+            m.smooth_position_at(m.block_end(self.iterations + 1) + (self.escaped >> 1), (self.zx, self.zy))
+        } else {
+            f64::from(self.iterations)
+        }
+    }
+
     /// The position of the point `c` with this outcome: exactly `m.position(c)` (see the module)
     pub(crate) fn position(&self, m: &MandelbrotSet, c: &Complex) -> f64 {
         m.position_after_loop(self.iterations, self.escaped != 0, (self.zx, self.zy), c)
@@ -291,7 +301,8 @@ impl GpuIterator {
     }
 
     /// `submit` for sample `sample` of `pixels` of the unturned `anchor` (as `submit_pixels`): the GPU computes their points with the arithmetic of
-    /// `progressive::sample_point`, so 4 bytes go to it per point instead of 16 and the CPU computes no points for it. Its outcomes are `Outcome`s, see `finish`
+    /// `progressive::sample_point`, so 4 bytes go to it per point instead of 16 and the CPU computes no points for it. Its outcomes are `Outcome`s (see `finish`)
+    /// whose position is `Outcome::position_continued`
     pub(crate) fn submit_exact_pixels(&self, m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), pixels: &[u32]) -> Result<Submitted, String> {
         let params = pixel_params(m, anchor, sample, origin, pixels.len())?;
         let pipeline = self.exact_pixels.as_ref().ok_or_else(|| String::from("the exact loop for pixels did not compile"))?;
@@ -372,13 +383,13 @@ impl GpuIterator {
         Ok(outcomes)
     }
 
-    /// Whether the exact loop fed pixels (`submit_exact_pixels`) gives the outcomes of the exact loop with the CPU's points (`submit`) for sample 3 of the
+    /// Whether the exact loop fed pixels (`submit_exact_pixels`) gives the CPU's positions (`MandelbrotSet::position` of `sample_point`) for sample 3 of the
     /// 64 x 48 pixels of `plane`, placed at origin (5, -2), bit for bit
     fn check_exact_pixels(&self, plane: &ComplexPlane, m: &MandelbrotSet) -> Result<bool, String> {
         let (pixels, _) = fast_test_case(plane, m, 64, 48);
         let points: Vec<Complex> = (0..48).flat_map(|y| (0..64).map(move |x| (x, y))).map(|(x, y)| super::progressive::sample_point(plane, x, y, 3, (5, -2))).collect();
-        let (with_points, with_pixels): (Vec<Outcome>, Vec<Outcome>) = (self.finish(self.submit(m, &points)?)?, self.finish(self.submit_exact_pixels(m, plane, 3, (5, -2), &pixels)?)?);
-        Ok(with_points.len() == with_pixels.len() && bytemuck::cast_slice::<Outcome, u8>(&with_points) == bytemuck::cast_slice::<Outcome, u8>(&with_pixels))
+        let outcomes: Vec<Outcome> = self.finish(self.submit_exact_pixels(m, plane, 3, (5, -2), &pixels)?)?;
+        Ok(outcomes.len() == points.len() && points.iter().zip(&outcomes).all(|(c, outcome)| outcome.position_continued(m).to_bits() == m.position(c).to_bits()))
     }
 
     /// Checks the GPU against the CPU on points of a shallow, a medium and a deep view, with smooth and integer coloring and a small orbit radius; and that the fast
@@ -411,6 +422,23 @@ impl GpuIterator {
         Ok(())
     }
 }
+
+/// The line of `gpu.wgsl` that writes an outcome, and what the exact loop for pixels writes instead (see `exact_pixels_source`)
+const EXACT_OUTCOME: &str = "            outcomes[index] = Outcome(select(0.0lf, zx, escaped), select(0.0lf, zy, escaped), iterations, select(0u, 1u, escaped && iterations < max_iterations));";
+const EXACT_OUTCOME_CONTINUED: &str = "            var extra = 0u;
+            if (escaped && iterations < max_iterations && params.smooth_coloring != 0u) {
+                for (var more = 0u; more < 32u; more++) {
+                    if (zx * zx + zy * zy >= 65536.0lf) {
+                        break;
+                    }
+                    let continued_x = zx * zx - zy * zy + cx;
+                    let continued_y = 2.0lf * zx * zy + cy;
+                    zx = continued_x;
+                    zy = continued_y;
+                    extra += 1u;
+                }
+            }
+            outcomes[index] = Outcome(select(0.0lf, zx, escaped), select(0.0lf, zy, escaped), iterations, select(0u, 1u | (extra << 1u), escaped && iterations < max_iterations));";
 
 /// The parameters of a dispatch over pixels (`gpu_fast.wgsl` and `exact_pixels_source`): where the pixels are in `anchor` and the loop's settings
 fn pixel_params(m: &MandelbrotSet, anchor: &ComplexPlane, sample: u8, origin: (isize, isize), count: usize) -> Result<Vec<u8>, String> {
@@ -448,6 +476,9 @@ fn exact_pixels_source() -> String {
         .replacen("@group(0) @binding(1) var<storage, read> points: array<Point>;", &format!("@group(0) @binding(1) var<storage, read> pixels: array<u32>;\n\n{point_of_pixel}"), 1)
         .replace("points[index].x", "sample_point(index).x")
         .replace("points[index].y", "sample_point(index).y")
+        //An escaped orbit is continued here for smooth coloring, as `MandelbrotSet::smooth_position` does (to |z|² ≥ 65536, at most 32 steps), and the steps it
+        //added go into `escaped` above its lowest bit, so the CPU only takes the logarithms (see `Outcome::position_continued`)
+        .replacen(EXACT_OUTCOME, EXACT_OUTCOME_CONTINUED, 1)
 }
 
 /// The `width` x `height` pixels of `plane` packed for `fast_positions`, and the positions of the CPU for sample 3 of them, placed at origin (5, -2) (see `progressive::sample_point`)
