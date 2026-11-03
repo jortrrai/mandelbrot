@@ -181,7 +181,7 @@ impl MandelbrotSet {
     }
 
     /// The number of steps at the end of the block of `CHECK_INTERVAL` steps of the lockstep loop that contains step `step` (1-based), or `max_iterations` for the last block
-    fn block_end(&self, step: u32) -> u32 {
+    pub(crate) fn block_end(&self, step: u32) -> u32 {
         (step.div_ceil(CHECK_INTERVAL) * CHECK_INTERVAL).min(self.max_iterations)
     }
 
@@ -197,6 +197,12 @@ impl MandelbrotSet {
             (zx, zy) = (zx * zx - zy * zy + c.x, 2.0 * zx * zy + c.y);
             steps += 1;
         }
+        self.smooth_position_at(steps, (zx, zy))
+    }
+
+    /// The end of `smooth_position` once the orbit is continued: `z` the value after `steps` steps (the GPU's exact loop for pixels continues the orbit itself,
+    /// see `gpu::Outcome::position_continued`)
+    pub(crate) fn smooth_position_at(&self, steps: u32, (zx, zy): (f64, f64)) -> f64 {
         let modulus_squared = zx * zx + zy * zy;
         if modulus_squared <= 1.0 {
             return f64::from(steps - 1).min(f64::from(self.max_iterations.saturating_sub(1))); //The formula needs |z| > 1; only possible with an orbit radius below 1.5 that was left again

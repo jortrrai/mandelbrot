@@ -439,6 +439,7 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
                 let positions: Vec<f64> = match &outcomes {
                     Some(GpuOutcomes::Fast(all)) => all.iter().map(|outcome| outcome.position(m)).collect(),
                     Some(GpuOutcomes::Exact(all)) => batch.iter().zip(all).map(|((x, y), outcome)| outcome.position(m, &sample_point(plane_of(sample), *x, *y, jitter, origin))).collect(),
+                    Some(GpuOutcomes::ExactContinued(all)) => all.iter().map(|outcome| outcome.position_continued(m)).collect(),
                     None => {
                         let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(plane_of(sample), *x, *y, jitter, origin)).collect();
                         let mut out = vec![0.0; points.len()];
@@ -460,7 +461,7 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
             });
         }
         //This thread feeds the GPU: a few dispatches on it at a time, the oldest handed to the coloring threads when it is done
-        let mut in_flight: VecDeque<(StreamedBatch, Result<Submitted, String>, usize)> = VecDeque::new();
+        let mut in_flight: VecDeque<(StreamedBatch, Result<Submitted, String>, usize, bool)> = VecDeque::new();
         let mut gpu_works = true;
         let mut batches = batches.into_iter();
         loop {
@@ -468,10 +469,11 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
                 let Some((sample, range)) = batches.next() else { break };
                 let jitter = sample.wrapping_add(offset);
                 let batch = &pixels[range.clone()];
+                let continued = !fast && gpu.exact_pixels_work() && plane_of(sample).rotation() == 0.0;
                 let submitted = if fast {
                     let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
                     gpu.submit_pixels(m, plane_of(sample), jitter, origin, &packed, math == GpuMath::Single)
-                } else if gpu.exact_pixels_work() && plane_of(sample).rotation() == 0.0 {
+                } else if continued {
                     //(The exact loop computes the points itself, see `GpuIterator::submit_exact_pixels`)
                     let packed: Vec<u32> = batch.iter().map(|(x, y)| packed_pixel(*x, *y)).collect();
                     gpu.submit_exact_pixels(m, plane_of(sample), jitter, origin, &packed)
@@ -479,12 +481,12 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
                     let points: Vec<Complex> = batch.iter().map(|(x, y)| sample_point(plane_of(sample), *x, *y, jitter, origin)).collect();
                     gpu.submit(m, &points)
                 };
-                in_flight.push_back(((sample, range), submitted, batch.len()));
+                in_flight.push_back(((sample, range), submitted, batch.len(), continued));
             }
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let Some((batch, submitted, count)) = in_flight.pop_front() else {
+            let Some((batch, submitted, count, continued)) = in_flight.pop_front() else {
                 //Nothing on the GPU: the batches that are left (after a failure of the GPU) are computed by the coloring threads
                 match batches.next() {
                     Some(batch) => {
@@ -495,7 +497,7 @@ fn stream_samples(c: &ComplexPlane, planes: Option<&[ComplexPlane]>, m: &Mandelb
                 }
             };
             let wait_started = Instant::now();
-            let result = submitted.and_then(|submitted| if fast { gpu.finish(submitted).map(GpuOutcomes::Fast) } else { gpu.finish(submitted).map(GpuOutcomes::Exact) });
+            let result = submitted.and_then(|submitted| if fast { gpu.finish(submitted).map(GpuOutcomes::Fast) } else if continued { gpu.finish(submitted).map(GpuOutcomes::ExactContinued) } else { gpu.finish(submitted).map(GpuOutcomes::Exact) });
             add_time(&GPU_FEED.waiting, wait_started);
             gpu_works &= result.is_ok();
             if result.is_ok() {
@@ -660,6 +662,7 @@ fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8
     let finish_gpu_row = |(y, (((((row, counts), first), second), first_positions), color_row)): PassRow, xs: Cow<[usize]>, outcomes: Option<(Arc<GpuOutcomes>, usize)>| {
         let positions = match outcomes.as_ref().map(|(all, offset)| (&**all, *offset)) {
             Some((GpuOutcomes::Exact(all), offset)) => xs.iter().zip(&all[offset..]).map(|(x, outcome)| outcome.position(m, &sample_point(c, *x, y, jitter, origin))).collect(),
+            Some((GpuOutcomes::ExactContinued(all), offset)) => all[offset..offset + xs.len()].iter().map(|outcome| outcome.position_continued(m)).collect(),
             Some((GpuOutcomes::Fast(all), offset)) => all[offset..offset + xs.len()].iter().map(|outcome| outcome.position(m)).collect(),
             None => on_cpu(y, &xs),
         };
@@ -759,7 +762,8 @@ fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8
                         }).collect();
                         //The fast loop gets the pixels and computes their points itself; the exact loop gets the points
                         let count: usize = selected.iter().map(|(_, xs)| xs.len()).sum();
-                        let submitted = (count > 0).then(|| if *math == GpuMath::Exact && gpu.exact_pixels_work() && c.rotation() == 0.0 {
+                        let continued = *math == GpuMath::Exact && gpu.exact_pixels_work() && c.rotation() == 0.0;
+                        let submitted = (count > 0).then(|| if continued {
                             //The exact loop computes the points itself (see `GpuIterator::submit_exact_pixels`); else the CPU computes them
                             pixels.clear();
                             for ((y, _), xs) in &selected {
@@ -779,18 +783,18 @@ fn sample_pass(background: bool, c: &ComplexPlane, m: &MandelbrotSet, sample: u8
                         //The points per row of the pass so far (rows with few or no pixels to sample in a preview level or an adaptive pass make it small)
                         (points_taken, rows_taken) = (points_taken + count, rows_taken + rows_in_batch);
                         points_per_row = points_taken as f64 / rows_taken as f64;
-                        in_flight.push_back((selected, submitted, count));
+                        in_flight.push_back((selected, submitted, count, continued));
                         add_time(&GPU_FEED.submitting, submit_started);
                         GPU_FEED.dispatches.fetch_add(1, Ordering::Relaxed);
                         GPU_FEED.points.fetch_add(count as u64, Ordering::Relaxed);
                     }
-                    let Some((selected, submitted, count)) = in_flight.pop_front() else { break };
+                    let Some((selected, submitted, count, continued)) = in_flight.pop_front() else { break };
                     if cancel.load(Ordering::Relaxed) {
                         return; //Not waiting for the dispatches on the GPU: their rows keep the samples they had, like a row the CPU stops in
                     }
                     let wait_started = Instant::now();
                     let outcomes = submitted.map_or_else(|| Ok(GpuOutcomes::Exact(Vec::new())), |submitted| submitted.and_then(|submitted| if *math == GpuMath::Exact {
-                        gpu.finish(submitted).map(GpuOutcomes::Exact)
+                        gpu.finish(submitted).map(if continued { GpuOutcomes::ExactContinued } else { GpuOutcomes::Exact })
                     } else {
                         gpu.finish(submitted).map(GpuOutcomes::Fast)
                     }));
@@ -934,6 +938,8 @@ type GpuRow<'r> = (PassRow<'r>, Cow<'r, [usize]>, Option<(Arc<GpuOutcomes>, usiz
 /// The outcomes of a dispatch: of the exact loop, which the CPU turns into positions, or of the fast loop, which are positions
 enum GpuOutcomes {
     Exact(Vec<Outcome>),
+    /// Of the exact loop for pixels, which computes the points and continues the orbits itself (see `GpuIterator::submit_exact_pixels`)
+    ExactContinued(Vec<Outcome>),
     Fast(Vec<FastOutcome>),
 }
 
