@@ -257,13 +257,19 @@ impl GpuIterator {
     /// Starts one dispatch of the exact loop over `points` (about `BATCH` at most) and returns at once: the GPU runs it while the caller prepares the next one, see
     /// `finish`, which gives an `Outcome` for every point
     pub(crate) fn submit(&self, m: &MandelbrotSet, points: &[Complex]) -> Result<Submitted, String> {
+        let coordinates: Vec<f64> = points.iter().flat_map(|c| [c.x, c.y]).collect();
+        self.submit_coordinates(m, &coordinates)
+    }
+
+    /// `submit` for points given as their coordinates, real and imaginary part after each other (so a caller that makes many points writes them only once)
+    pub(crate) fn submit_coordinates(&self, m: &MandelbrotSet, coordinates: &[f64]) -> Result<Submitted, String> {
+        let count = coordinates.len() / 2;
         let mut params = Vec::with_capacity(24);
         params.extend((m.orbit_radius * m.orbit_radius).to_le_bytes());
-        for value in [m.max_iterations, u32::try_from(points.len()).map_err(|_| String::from("too many points"))?, u32::from(m.orbit_radius >= 2.0), 0] {
+        for value in [m.max_iterations, u32::try_from(count).map_err(|_| String::from("too many points"))?, u32::from(m.orbit_radius >= 2.0), 0] {
             params.extend(value.to_le_bytes());
         }
-        let coordinates: Vec<f64> = points.iter().flat_map(|c| [c.x, c.y]).collect();
-        self.dispatch(&self.exact, &params, bytemuck::cast_slice(&coordinates), points.len(), std::mem::size_of::<Outcome>())
+        self.dispatch(&self.exact, &params, bytemuck::cast_slice(coordinates), count, std::mem::size_of::<Outcome>())
     }
 
     /// Starts one dispatch of the fast loop over sample `sample` of `pixels` (about `BATCH` at most, see `fast_positions`) and returns at once, see `finish`, which

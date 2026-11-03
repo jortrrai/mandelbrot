@@ -964,3 +964,18 @@ fn reconstruction_filter_experiment() {
         println!("{name:12} error {error:.2}, shimmer {shimmer:.2}, sharpness {sharpness:.2}");
     }
 }
+
+#[test]
+fn the_points_of_a_batch_for_the_exact_gpu_loop_are_the_points_of_sample_point() {
+    //#249: the points of a large batch are computed on several threads, in one go; every one is the point of `sample_point`, bit for bit
+    let mut plane = ComplexPlane::new(3840, 2160);
+    plane.set_view(&crate::complex_plane::View::new(-0.803_102_981_044_643_7, 0.178_500_232_700_653_38, 1.486_058_621_097_152_7e-11));
+    let rows: Vec<(usize, Vec<usize>)> = (0..40).map(|y| (y * 37, (0..3840).filter(|x| (x + y) % 3 != 0).collect())).collect();
+    let rows: Vec<(usize, &[usize])> = rows.iter().map(|(y, xs)| (*y, xs.as_slice())).collect();
+    for (rows, origin) in [(&rows[..], (5, -2)), (&rows[..2], (0, 0))] {
+        let count = rows.iter().map(|(_, xs)| xs.len()).sum();
+        let coordinates = super::progressive::sample_coordinates(&plane, rows, count, 3, origin);
+        let expected: Vec<f64> = rows.iter().flat_map(|(y, xs)| xs.iter().flat_map(|x| { let point = super::progressive::sample_point(&plane, *x, *y, 3, origin); [point.x, point.y] })).collect();
+        assert!(coordinates.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()) && coordinates.len() == expected.len());
+    }
+}
