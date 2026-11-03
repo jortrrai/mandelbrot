@@ -36,6 +36,28 @@ impl LogLevel {
         }
     }
 
+    /// The short tag of the level in front of each message of the log (issue #204 feedback): DEBUG, INFO, WARN or ERROR
+    pub const fn tag(self) -> &'static str {
+        match self {
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Info => "INFO",
+            LogLevel::Warning => "WARN",
+            LogLevel::Error => "ERROR",
+        }
+    }
+
+    /// The color of the tag, and of the message of a warning or an error, given the color of normal text: Debug gray, Info normal, Warning yellow, Error red
+    pub fn color(self, text: egui::Color32, dark: bool) -> egui::Color32 {
+        match (self, dark) {
+            (LogLevel::Debug, _) => egui::Color32::GRAY,
+            (LogLevel::Info, _) => text,
+            (LogLevel::Warning, true) => egui::Color32::from_rgb(240, 200, 60),
+            (LogLevel::Warning, false) => egui::Color32::from_rgb(160, 110, 0),
+            (LogLevel::Error, true) => egui::Color32::from_rgb(255, 100, 90),
+            (LogLevel::Error, false) => egui::Color32::from_rgb(190, 30, 30),
+        }
+    }
+
     /// The level of `message`, by what it says (the messages are sentences, see `MandelbrotApp::log`)
     pub fn of(message: &str) -> LogLevel {
         let lower = message.to_lowercase();
@@ -43,7 +65,7 @@ impl LogLevel {
             LogLevel::Error
         } else if lower.contains("not allowed") || lower.contains("is skipped") || lower.contains("refused") || lower.contains("cannot be read") || message.starts_with("Warning") {
             LogLevel::Warning
-        } else if message.starts_with("Rendering") || message.starts_with("Rendered") || message.starts_with("Cancelled the rendering") || message.starts_with("Moved by dragging")
+        } else if message.starts_with("Rendering") || message.starts_with("Rendered") || message.starts_with("Cancelled the rendering") || message.starts_with("Moved by dragging") || message.starts_with("Samples started over")
             || message.starts_with("Zoomed in with the wheel") || message.starts_with("Zoomed in with a double click") || message.starts_with("Zoomed out with the wheel") || message.starts_with("Set the depth to") || message.starts_with("Clicked pixel") {
             LogLevel::Debug
         } else {
@@ -52,12 +74,22 @@ impl LogLevel {
     }
 }
 
-/// The colors the mini-map was rendered with: the coloring, the divide and offset (as bits), stretched, and the channels
-pub type MinimapColors = (usize, u64, u64, bool, String);
+/// What the mini-map was rendered for: the coloring, the divide and offset (as bits), stretched, the channels, and the Julia set (its parameter as bits)
+pub type MinimapColors = (usize, u64, u64, bool, String, Option<(u64, u64)>);
 
 /// The size of the mini-map in pixels, and the iteration limit of its render (the whole set needs few)
-const MINIMAP_SIZE: (usize, usize) = (240, 160);
+pub(super) const MINIMAP_SIZE: (usize, usize) = (240, 160);
 const MINIMAP_ITERATIONS: u32 = 500;
+
+/// The view of the mini-map: the whole Mandelbrot set, or the whole Julia set of `julia`. A Julia set lies around 0 within the radius
+/// `(1 + sqrt(1 + 4 |c|)) / 2` (beyond it every orbit escapes), so the map's height spans that radius to both sides, with a little room
+pub(super) fn minimap_view(julia: Option<(f64, f64)>, (width, height): (usize, usize)) -> crate::complex_plane::View {
+    let Some((x, y)) = julia else { return crate::complex_plane::View::new(-0.75, 0.0, 1.2) };
+    let radius = f64::midpoint(1.0, 4.0f64.mul_add(x.hypot(y), 1.0).sqrt());
+    //(At scale 1 the map is 2.5 wide)
+    let height_at_scale_1 = 2.5 * height as f64 / width as f64;
+    crate::complex_plane::View::new(0.0, 0.0, 2.1 * radius / height_at_scale_1)
+}
 
 /// The texts of the current view: the center and the zoom, formatted for reading, without losing the precision of the numbers
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,10 +225,11 @@ impl MandelbrotApp {
         }
         let (width, height) = MINIMAP_SIZE;
         //The whole set in the colors of the view, rendered again when they change (a few milliseconds)
-        let key = (self.coloring_index, self.m.palette.divide.to_bits(), self.m.palette.offset.to_bits(), self.m.palette.stretch, format!("{:?}", self.p.color_channel_mapping));
+        //(and when the view goes into another Julia set, whose map it is then)
+        let key = (self.coloring_index, self.m.palette.divide.to_bits(), self.m.palette.offset.to_bits(), self.m.palette.stretch, format!("{:?}", self.p.color_channel_mapping), self.m.julia.map(|(x, y)| (x.to_bits(), y.to_bits())));
         if self.minimap.as_ref().is_none_or(|(old, _, _)| *old != key) {
             let mut plane = ComplexPlane::new(width, height);
-            plane.set_view(&crate::complex_plane::View::new(-0.75, 0.0, 1.2));
+            plane.set_view(&minimap_view(self.m.julia, MINIMAP_SIZE));
             let mut set = self.m.clone();
             set.max_iterations = MINIMAP_ITERATIONS;
             let mut buffer = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(width, height));
@@ -297,9 +330,22 @@ impl MandelbrotApp {
             ui.add_space(4.0);
         }
         egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-            for (index, message) in self.log.iter().enumerate().filter(|(_, message)| LogLevel::of(message) >= self.log_level) {
-                let time = self.log_times.get(index).map_or_else(String::new, |time| time.format("%H:%M:%S ").to_string());
-                ui.add(egui::Label::new(format!("{time}{message}")).wrap());
+            //Every line: its time, its level as a colored tag, and the message (in the level's color for warnings and errors)
+            let (text, dark, weak) = (ui.visuals().text_color(), ui.visuals().dark_mode, ui.visuals().weak_text_color());
+            let (body, mono) = (egui::TextStyle::Body.resolve(ui.style()), egui::TextStyle::Monospace.resolve(ui.style()));
+            for (index, message) in self.log.iter().enumerate() {
+                let level = LogLevel::of(message);
+                if level < self.log_level {
+                    continue;
+                }
+                let mut job = egui::text::LayoutJob::default();
+                if let Some(time) = self.log_times.get(index) {
+                    job.append(&time.format("%H:%M:%S ").to_string(), 0.0, egui::TextFormat::simple(body.clone(), weak));
+                }
+                job.append(level.tag(), 0.0, egui::TextFormat::simple(mono.clone(), level.color(text, dark)));
+                let color = if level >= LogLevel::Warning { level.color(text, dark) } else { text };
+                job.append(&format!(" {message}"), 0.0, egui::TextFormat::simple(body.clone(), color));
+                ui.add(egui::Label::new(job).wrap());
             }
         });
     }
