@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.18481461635435198,
+      "real": -0.7957429802807079
+    },
+    "max_iterations": 1847,
+    "scale": 3.0477664432991445e-9
+  },
+  "name": "Trippy"
+}

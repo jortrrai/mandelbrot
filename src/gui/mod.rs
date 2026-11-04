@@ -18,7 +18,6 @@ mod chunks;
 mod music;
 mod controls;
 mod cli;
-#[cfg(not(target_os = "android"))]
 mod youtube;
 pub use cli::command_line;
 mod cycle;
@@ -638,7 +637,6 @@ impl MandelbrotApp {
     /// Gives the memory the program freed back to the system now, after a video, an image save or a finished render: the allocator (mimalloc, see `ALLOCATOR`)
     /// would otherwise wait for its next allocations, which an idle window hardly makes
     pub(super) fn release_free_memory() {
-        #[cfg(not(target_os = "android"))]
         // SAFETY: mi_collect only returns free memory of the allocator to the system; it touches no memory in use
         unsafe {
             libmimalloc_sys::mi_collect(true);

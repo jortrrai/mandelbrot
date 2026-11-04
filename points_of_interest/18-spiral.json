@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 185.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.3,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.570499602820129,
+      "real": -0.4474274667517132
+    },
+    "max_iterations": 3116,
+    "scale": 2.360692265817369e-9
+  },
+  "name": "Spiral"
+}

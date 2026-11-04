@@ -1,0 +1,23 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 420.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.17,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.0021799343631958568,
+      "real": -0.256701740164619
+    },
+    "julia": {
+      "imaginary": -0.254680017414018,
+      "real": 0.37755768393556843
+    },
+    "max_iterations": 250,
+    "scale": 1.307326785411908
+  },
+  "name": "Weird Julia"
+}

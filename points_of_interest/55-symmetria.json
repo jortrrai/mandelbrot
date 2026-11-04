@@ -1,0 +1,24 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": -0.0020692815623803984,
+      "real": -0.0003746640157955561
+    },
+    "julia": {
+      "imaginary": 0.6093605036447984,
+      "real": -0.42422133863485767
+    },
+    "max_iterations": 1000,
+    "rotation": 39.0,
+    "scale": 1.243593424862935
+  },
+  "name": "Symmetria"
+}

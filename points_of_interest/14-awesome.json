@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 175.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.1,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": -0.4601827619163721,
+      "real": -0.665270919218954
+    },
+    "max_iterations": 4632,
+    "scale": 0.00022684570121895767
+  },
+  "name": "Awesome"
+}

@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.17116481757228796,
+      "real": -0.7962387033568182
+    },
+    "max_iterations": 2449,
+    "scale": 2.928747593220103e-12
+  },
+  "name": "The Other Eye"
+}

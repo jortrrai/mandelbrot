@@ -1,0 +1,24 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 420.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.17,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": -0.012994573960214195,
+      "real": -0.017914128250424266
+    },
+    "julia": {
+      "imaginary": 0.4839544491358536,
+      "real": 0.30720805405013096
+    },
+    "max_iterations": 250,
+    "rotation": 75.0,
+    "scale": 1.266104782779897
+  },
+  "name": "Awesome Julia Set"
+}

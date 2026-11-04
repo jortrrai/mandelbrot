@@ -390,10 +390,14 @@ fn the_application_lists_the_points_of_interest_of_the_folder_at_startup() {
     let config = Config::sized(64, 48, 50, 32);
     let mut app = MandelbrotApp::new(&config);
     wait_for_job(&mut app);
-    assert_eq!(app.points.len(), 11, "the reset view and the ten former views are found without a list of file names in the code");
-    assert_eq!((app.points[0].name.as_str(), app.points[1].name.as_str(), app.points[10].name.as_str()), ("Reset View", "Frost on the Shoreline", "Sunlit Reef"), "the reset view first, the deepest place (Sunlit Reef) last");
+    //Every file of the folder, without a list of file names in the code (the shipped places and Jort's own, added 2026-11-04)
+    let files = std::fs::read_dir("points_of_interest").unwrap().filter(|entry| entry.as_ref().unwrap().path().extension().is_some_and(|extension| extension == "json")).count();
+    assert_eq!(app.points.len(), files);
+    for name in ["Reset View", "Frost on the Shoreline", "Sunlit Reef"] {
+        assert!(app.points.iter().any(|point| point.name == name), "{name} is found");
+    }
     assert!(app.points.windows(2).all(|pair| pair[0].location.scale >= pair[1].location.scale), "listed by zoom, the shallowest first");
-    assert!(app.log.iter().any(|message| message.starts_with("Points of interest: 11 loaded from")));
+    assert!(app.log.iter().any(|message| message.starts_with(&format!("Points of interest: {files} loaded from"))));
     assert!(!app.restore_appearance);
 }
 
@@ -1403,10 +1407,13 @@ fn the_depth_color_runs_from_cool_for_the_shallowest_place_to_hot_for_the_deepes
     //The list is sorted by zoom: the reset view first (blue), the deepest place last (red)
     assert_eq!(colors[0], egui::Color32::from_rgb(80, 150, 255));
     assert_eq!(*colors.last().unwrap(), egui::Color32::from_rgb(255, 85, 75));
-    //Places of a different zoom get different colors, places of the same zoom the same color
+    //Places of the same zoom get the same color; the shallowest and the deepest place differ (nearby zooms can round to the same color)
     for (a, b) in app.points.iter().zip(&colors).zip(app.points.iter().zip(&colors).skip(1)) {
-        assert_eq!(a.0.location.scale.to_bits() == b.0.location.scale.to_bits(), a.1 == b.1, "{} and {}", a.0.name, b.0.name);
+        if a.0.location.scale.to_bits() == b.0.location.scale.to_bits() {
+            assert_eq!(a.1, b.1, "{} and {}", a.0.name, b.0.name);
+        }
     }
+    assert_ne!(colors[0], *colors.last().unwrap());
     //A single place, or places that are all equally deep, are the shallowest color
     let single = super::points::DepthScale::of(&app.points[..1]);
     assert_eq!(single.color(&app.points[0]), egui::Color32::from_rgb(80, 150, 255));
@@ -3885,7 +3892,7 @@ fn two_fingers_zoom_turn_and_move_the_view() {
 
 #[test]
 fn without_a_folder_of_places_the_built_in_ones_load_and_a_narrow_screen_hides_the_controls_behind_a_button() {
-    //Issue #219 (the Android app has no folder of places, and a phone's screen is narrow)
+    //Issue #219 (a program started without its folder of places, and a narrow screen)
     let shipped = crate::points_of_interest::shipped();
     assert_eq!(shipped.len(), 11);
     assert_eq!(shipped[0].name, "Reset View", "the shallowest first");

@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 0.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.1,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.4839544491358535,
+      "real": 0.30720805405013096
+    },
+    "max_iterations": 3102,
+    "scale": 0.00776493910168701
+  },
+  "name": "Spiral Rainbow Minibrot Entry"
+}

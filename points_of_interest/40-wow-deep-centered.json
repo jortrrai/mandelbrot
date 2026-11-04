@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.17850023270083393,
+      "real": -0.8031029810446696
+    },
+    "max_iterations": 4078,
+    "scale": 2.9861245012244434e-12
+  },
+  "name": "Wow Deep Centered"
+}

@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 185.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.3,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.5658202930704715,
+      "real": -0.4380513303572767
+    },
+    "max_iterations": 6234,
+    "scale": 2.3383394999858096e-9
+  },
+  "name": "Spirality"
+}

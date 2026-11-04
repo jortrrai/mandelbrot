@@ -1,0 +1,69 @@
+{
+  "format_version": 1,
+  "name": "Spiral",
+  "start": {
+    "center": {
+      "real": 0.30720805405014606,
+      "imaginary": 0.4839544491358836
+    },
+    "scale": 2.104323256761771e-11,
+    "max_iterations": 3797,
+    "iteration_divide": 0.45,
+    "color_offset": 499.0,
+    "rotation": 5.0
+  },
+  "destination": {
+    "center": {
+      "real": 0.30720805405014606,
+      "imaginary": 0.4839544491358836
+    },
+    "scale": 2.104323256761771e-11,
+    "max_iterations": 3797,
+    "iteration_divide": 0.45,
+    "color_offset": 499.0,
+    "rotation": 5.0
+  },
+  "route": "Shortest",
+  "pace": "Constant",
+  "constant_speed": 2.8,
+  "speed": 1.0,
+  "dive_zoom": 3.05,
+  "sequence": {
+    "keyframes": [
+      {
+        "real": 0.30720805405014606,
+        "imaginary": 0.4839544491358836,
+        "scale": 2.104323256761771e-11,
+        "max_iterations": 3797,
+        "divide": 0.45,
+        "offset": 499.0,
+        "stretch": false,
+        "rotation": 0.08726646259971647
+      },
+      {
+        "real": 0.30720805405013096,
+        "imaginary": 0.4839544491358536,
+        "scale": 2.5359097570561314e-11,
+        "max_iterations": 3770,
+        "divide": 0.17,
+        "offset": 420.0,
+        "stretch": false,
+        "rotation": -3.0543261909900767
+      },
+      {
+        "real": 0.30720805405014606,
+        "imaginary": 0.4839544491358836,
+        "scale": 2.104323256761771e-11,
+        "max_iterations": 3797,
+        "divide": 0.45,
+        "offset": 499.0,
+        "stretch": false,
+        "rotation": 0.08726646259971647
+      }
+    ],
+    "seconds": [
+      5.0,
+      5.0
+    ]
+  }
+}

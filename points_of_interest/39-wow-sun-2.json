@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.17850023270066395,
+      "real": -0.803102981044552
+    },
+    "max_iterations": 3838,
+    "scale": 1.5866573862564664e-11
+  },
+  "name": "Wow Sun 2"
+}
