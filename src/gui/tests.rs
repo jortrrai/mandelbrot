@@ -2765,6 +2765,37 @@ fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
 }
 
 #[test]
+fn a_flight_in_the_window_to_a_deep_place_shows_deep_frames_on_the_way() {
+    //Issue #263: frames of a flight deeper than 64-bit floats were their 64-bit stand-ins (where every pixel has the same coordinates: one color); now
+    //the deep renderer draws them, from the destination's orbit, with the camera in logarithms (see `flight_job`)
+    let power: u32 = 60;
+    let (real, imaginary) = (format!("3e-{}", power + 1), format!("1.{}2", "0".repeat(power as usize)));
+    let place = format!(r#"{{ "format_version": 1, "name": "Deep", "location": {{ "center": {{ "real": 0.0, "imaginary": 1.0, "real_text": "{real}", "imaginary_text": "{imaginary}" }}, "scale": 1e-{power}, "max_iterations": 3000 }} }}"#);
+    let (mut app, folder) = app_with_points(&[("deep.json", &place)]);
+    (app.pace, app.route, app.constant_speed, app.flight_rendering) = (super::flight::Pace::Constant, super::flight::Route::Dive, 20.0, super::flight::FlightRendering::BestEffort);
+    (app.max_iterations_input, app.m.max_iterations) = (3000, 3000); //(Manual iterations: a limit for orbits that long, near i at 10^-48 about 400 steps)
+    app.go_to_point_of_interest(0);
+    //(Its frames come from its own job, frame after frame: until one deeper than 64-bit floats is on the screen)
+    let started = std::time::Instant::now();
+    let mut deep_frames = 0;
+    while app.flight.is_some() && deep_frames < 3 {
+        assert!(started.elapsed() < Duration::from_secs(60), "deep frames within a minute");
+        app.fly_at(std::time::Instant::now());
+        app.poll_job();
+        if app.c.precision() == crate::complex_plane::Precision::Exhausted && app.layer_shown {
+            let distinct: std::collections::BTreeSet<(u8, u8, u8)> = app.p.colors.iter().map(|color| (color.red, color.green, color.blue)).collect();
+            assert!(distinct.len() > 5, "a frame at scale {} has the structure of the deep view: {} colors", app.c.get_scale(), distinct.len());
+            deep_frames += 1;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(deep_frames >= 1, "deep frames were shown: {deep_frames}");
+    finish_flight(&mut app);
+    assert!(app.deep_view().is_some(), "arrived in the deep view");
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn places_deeper_than_10_to_the_minus_308_open_render_and_save_in_the_deep_view() {
     //Issue #263: beyond the range of 64-bit floats the scale is a `Depth`, carried through places, navigation and the depth control
     for power in [308_i32, 400] {

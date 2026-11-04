@@ -48,6 +48,9 @@ impl MandelbrotApp {
         self.flight_job_options = Some(self.flight_job_options());
         let Some(flight) = &mut self.flight else { return };
         let (path, mut elapsed, limits, palettes, rotations) = (flight.flight.clone(), flight.elapsed, flight.limits.clone(), flight.palettes, flight.rotations);
+        //A flight to an exact center: its frames deeper than 64-bit floats rendered there by the deep renderer, from the destination's orbit (see `deep_view`)
+        let exact = flight.point.location.exact.clone().zip(Some(flight.point.location.deep_scale.unwrap_or_else(|| crate::rendering::deep::Depth::from_f64(flight.point.location.scale))));
+        let (fast_deep, deep_f32) = (self.fast_deep, self.deep_f32);
         self.cancel_thumbnail_job();
         self.cancel_neighborhood_job();
         self.interrupt_progressive_render();
@@ -88,6 +91,10 @@ impl MandelbrotApp {
         std::thread::spawn(move || {
             let started = Instant::now();
             let mut samples = previous_samples.and_then(|receiver| receiver.recv().ok()).unwrap_or_default();
+            let orbit = exact.and_then(|((real, imaginary), depth)| {
+                let bits = crate::rendering::deep::bits_for_depth(depth, width);
+                Some(crate::rendering::deep::SharedOrbit::new(&crate::rendering::deep::Fixed::parse(&real, bits)?, &crate::rendering::deep::Fixed::parse(&imaginary, bits)?))
+            });
             let mut plane = ComplexPlane::new(width, height);
             let mut frame_started = Instant::now();
             //The join delay of the GPU for the next frame: none once a frame has taken longer than a few delays
@@ -134,6 +141,32 @@ impl MandelbrotApp {
                             thread_cancel.store(true, Ordering::SeqCst);
                         });
                     if !next_frame(shown, &mut scale, auto, &mut join_after, &mut elapsed, &mut frame_started, &clock) {
+                        break;
+                    }
+                    continue;
+                }
+                //Deeper than 64-bit floats: the frame from the deep renderer, with the camera in logarithms (one sample, or all of them when frames wait for
+                //every layer), shown once it is done
+                if let Some(orbit) = orbit.as_ref().filter(|_| m.julia.is_none() && plane.precision() == crate::complex_plane::Precision::Exhausted) {
+                    let camera = path.deep_at(elapsed);
+                    let depth = crate::rendering::deep::Depth::from_log2(camera.ln_scale / std::f64::consts::LN_2);
+                    let layers = if required == Readiness::SuperSampled { supersampling_amount.max(1) } else { 1 };
+                    let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
+                    let mut frame = None;
+                    let completed = crate::rendering::deep::render_layers_on(&m, (orbit, (camera.right, camera.up)), (depth, plane.rotation()), (width, height), layers, &color_of, fast_deep,
+                        gpu.as_deref().map(|gpu| (gpu, deep_f32)), &thread_stop, |colors, layer| {
+                            if layer == layers {
+                                frame = Some(colors.to_vec());
+                            }
+                        });
+                    history = None;
+                    let shown = completed && frame.is_some();
+                    if let Some(colors) = frame {
+                        let _ = sender.send(JobMessage::FlightFrame { elapsed, plane: plane.clone(), max_iterations: m.max_iterations, palette: m.palette, preview: 0, levels: Vec::new(), scaled: None });
+                        queued.fetch_add(1, Ordering::SeqCst);
+                        let _ = sender.send(JobMessage::Pass { colors: spare_colors.copy(&colors), plane: plane.clone(), pass: layers, total: supersampling_amount, layer_time: Duration::ZERO, whole: true });
+                    }
+                    if last || !next_frame(shown, &mut scale, auto, &mut join_after, &mut elapsed, &mut frame_started, &clock) {
                         break;
                     }
                     continue;
