@@ -43,7 +43,6 @@
 
 /// The memory allocator of the program: mimalloc gives memory that is freed back to the system, where glibc's malloc kept what each render thread freed (the
 /// idle window held gigabytes after a video, and more and more while moving around)
-#[cfg(not(target_os = "android"))]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -91,27 +90,6 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
         ..Default::default()
     };
     run_with(config, options)
-}
-
-/// Runs the Android app (issue #219): the same window as `run`, full screen. Saved images and videos go to `saved/` in the app's external files folder
-/// (`Android/data/nl.jortrr.mandelbrot/files`, which a file manager or a computer over USB can open), its settings to its private folder; the places are built
-/// into the program (see `points_of_interest::SHIPPED`)
-/// # Errors
-/// Returns an Error if the window cannot be created or its event loop fails
-#[cfg(target_os = "android")]
-pub fn run_on_android(app: winit::platform::android::activity::AndroidApp) -> Result<(), Box<dyn Error>> {
-    let private = app.internal_data_path();
-    if let Some(folder) = app.external_data_path().filter(|folder| std::fs::create_dir_all(folder).is_ok()).or_else(|| private.clone()) {
-        std::env::set_current_dir(&folder)?;
-    }
-    if let Some(folder) = private {
-        //(Settings go to the folder of `gui::settings_path`, which follows $HOME)
-        // SAFETY: at the start of the app, before any other thread runs
-        unsafe { std::env::set_var("HOME", &folder) };
-    }
-    let config = Config::default();
-    let options = eframe::NativeOptions { android_app: Some(app), ..Default::default() };
-    run_with(&config, options)
 }
 
 /// Runs the window with `options`, see `run`

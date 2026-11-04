@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 185.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.3,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.5799173896850942,
+      "real": -0.43472778659650024
+    },
+    "max_iterations": 23000,
+    "scale": 1.2557526953776312e-8
+  },
+  "name": "Rainbowbrot"
+}

@@ -1,0 +1,24 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 0.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.1,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.007564673723028381,
+      "real": -0.00045549745120321283
+    },
+    "julia": {
+      "imaginary": -0.2040303855888208,
+      "real": -0.8290413423045697
+    },
+    "max_iterations": 500,
+    "rotation": -5.999999999999983,
+    "scale": 1.3544884956431635
+  },
+  "name": "Interesting Julia"
+}

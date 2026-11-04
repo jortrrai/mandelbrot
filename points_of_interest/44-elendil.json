@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "BGR",
+    "color_offset": 160.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.1,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": -0.000021245215459925926,
+      "real": -1.7179738737027823
+    },
+    "max_iterations": 4604,
+    "scale": 5.817519683170929e-9
+  },
+  "name": "Elendil"
+}

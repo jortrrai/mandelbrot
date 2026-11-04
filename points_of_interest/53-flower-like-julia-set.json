@@ -1,0 +1,23 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": -0.0,
+      "real": 0.0
+    },
+    "julia": {
+      "imaginary": 0.6093605036447984,
+      "real": -0.42422133863485767
+    },
+    "max_iterations": 500,
+    "scale": 1.44
+  },
+  "name": "Flower like Julia set"
+}

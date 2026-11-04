@@ -1,0 +1,16 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "coloring": "bernstein"
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.7977314567512543,
+      "real": -0.02017487357186454
+    },
+    "max_iterations": 18820,
+    "scale": 3.6440845462350046e-9
+  },
+  "name": "Fractal"
+}

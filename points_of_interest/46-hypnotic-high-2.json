@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 499.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.18,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.5577808999282321,
+      "real": -0.4623789027781693
+    },
+    "max_iterations": 1483,
+    "scale": 0.000193908237053703
+  },
+  "name": "Hypnotic High 2"
+}

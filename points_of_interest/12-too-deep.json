@@ -1,0 +1,16 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "coloring": "bernstein"
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.5632117507138666,
+      "real": -0.4375202785055051
+    },
+    "max_iterations": 15128,
+    "scale": 2.3388856378797825e-11
+  },
+  "name": "Too Deep"
+}

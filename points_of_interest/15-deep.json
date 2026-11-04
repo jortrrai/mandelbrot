@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 185.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.3,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": -0.4601182677561186,
+      "real": -0.6652316729409997
+    },
+    "max_iterations": 34552,
+    "scale": 2.1696615120992144e-8
+  },
+  "name": "Deep"
+}

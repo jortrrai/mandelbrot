@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 185.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.3,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.566141845419313,
+      "real": -0.4432873973589223
+    },
+    "max_iterations": 2788,
+    "scale": 0.0003601200985443301
+  },
+  "name": "Mantis Shrimp"
+}

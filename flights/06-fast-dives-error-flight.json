@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "name": "Fast Dives Error Flight",
+  "start": {
+    "center": {
+      "real": -0.6604166666666667,
+      "imaginary": 0.4437500000000001
+    },
+    "scale": 0.1,
+    "max_iterations": 3992,
+    "iteration_divide": 0.17,
+    "color_offset": 420.0
+  },
+  "destination": {
+    "center": {
+      "real": -0.6604166666666667,
+      "imaginary": 0.4437500000000001
+    },
+    "scale": 0.1,
+    "max_iterations": 1000,
+    "iteration_divide": 0.17,
+    "color_offset": 420.0
+  },
+  "route": "Dive",
+  "pace": "Cinematic",
+  "constant_speed": 2.8,
+  "speed": 1.0,
+  "dive_zoom": 0.4
+}

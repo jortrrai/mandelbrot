@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.17675290725442586,
+      "real": -0.772644015939712
+    },
+    "max_iterations": 410,
+    "scale": 0.049678341342046135
+  },
+  "name": "Nice Colors"
+}

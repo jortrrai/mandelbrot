@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.17850023270065338,
+      "real": -0.8031029810446437
+    },
+    "max_iterations": 3847,
+    "scale": 1.4860586210971527e-11
+  },
+  "name": "Wow"
+}
