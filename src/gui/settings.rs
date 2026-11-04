@@ -86,6 +86,7 @@ pub(super) struct Settings {
     video_blend: Option<bool>,
     video_shutter: Option<f64>,
     video_keyframe_dives: Option<bool>,
+    video_exponential_dives: Option<bool>,
     /// The unit of the rotation: "degrees" or "radians"
     rotation_unit: Option<String>,
     /// The lowest level of messages the status log shows (see `status::LogLevel`)
@@ -207,6 +208,7 @@ impl MandelbrotApp {
             video_blend: Some(self.video_blend),
             video_shutter: Some(self.video_shutter),
             video_keyframe_dives: Some(self.video_keyframe_dives),
+            video_exponential_dives: Some(self.video_exponential_dives),
             rotation_unit: Some(String::from(if self.rotation_in_degrees { "degrees" } else { "radians" })),
             log_level: Some(self.log_level.name().to_string()),
             show_minimap: Some(self.show_minimap),
@@ -372,6 +374,7 @@ impl MandelbrotApp {
         }
         set(settings.show_julia_map, &mut self.show_julia);
         set(settings.video_keyframe_dives, &mut self.video_keyframe_dives);
+        set(settings.video_exponential_dives, &mut self.video_exponential_dives);
         if let Some(level) = settings.log_level.as_deref().and_then(|name| super::status::LogLevel::ALL.into_iter().find(|level| level.name() == name)) {
             self.log_level = level;
         }

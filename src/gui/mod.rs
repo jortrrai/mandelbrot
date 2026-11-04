@@ -223,6 +223,8 @@ pub struct MandelbrotApp {
     video_shutter: f64,
     /// Whether dives into a fixed center are composed from keyframe images (see `dive_keyframes`)
     video_keyframe_dives: bool,
+    /// Whether Fast dives into exact centers are read from an exponential map (an experiment, off by default, see `dive_keyframes::ExponentialDive`)
+    video_exponential_dives: bool,
     /// A fixed number of frames a video renders at once, for measurements (the window always lets the job choose, see `video::FrameScheduler`)
     video_at_once_fixed: Option<usize>,
     /// The saved flights (see `flight_files`): their folder (`flights`), the flights read from it (once the controls are first shown), the one chosen in the
@@ -480,6 +482,7 @@ impl MandelbrotApp {
             video_blend: false,
             video_shutter: 0.0,
             video_keyframe_dives: false,
+            video_exponential_dives: false,
             video_at_once_fixed: None,
             flights_folder: std::path::PathBuf::from("flights"),
             saved_flights: Vec::new(),

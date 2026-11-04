@@ -119,6 +119,18 @@ impl ExponentialMap {
         self.bands.insert(band, levels);
     }
 
+    /// Whether band `band` is there
+    #[must_use]
+    pub fn has(&self, band: usize) -> bool {
+        self.bands.contains_key(&band)
+    }
+
+    /// The first band there is
+    #[must_use]
+    pub fn first_band(&self) -> Option<usize> {
+        self.bands.keys().next().copied()
+    }
+
     /// Takes away the bands above `band` (that no frame reads any more)
     pub fn forget_above(&mut self, band: usize) {
         self.bands = self.bands.split_off(&band);
@@ -137,8 +149,11 @@ impl ExponentialMap {
         let turn_shift = -rotation / std::f64::consts::TAU;
         //(The rows there are: a row outside them is the nearest row in them. A band has the columns it was rendered with, see `MapSize::below_the_last`)
         let first_band = self.bands.keys().next().copied().unwrap_or(0);
-        //(Every row of the map with its levels, and for each the log2 of the spacing of its finest level along a ring a frame pixel from the center)
-        let map_rows: Vec<(Vec<&[TrueColor]>, f64)> = self.bands.range(first_band..).flat_map(|(_, levels)| (0..rows).map(move |row| {
+        let last_band = self.bands.keys().next_back().copied().unwrap_or(0);
+        //(Every row of the map with its levels, and for each the log2 of the spacing of its finest level along a ring a frame pixel from the center; a band
+        //that is not there, between two that are, is the one above it: a frame reads only bands that are there, one after the other)
+        let levels_of = (first_band..=last_band).filter_map(|band| self.bands.range(..=band).next_back().map(|(_, levels)| levels));
+        let map_rows: Vec<(Vec<&[TrueColor]>, f64)> = levels_of.flat_map(|levels| (0..rows).map(move |row| {
             let columns = levels[0].len() / rows;
             (levels.iter().map(|level| { let columns = level.len() / rows; &level[row * columns..(row + 1) * columns] }).collect(), (std::f64::consts::TAU / columns as f64).log2())
         })).collect();
@@ -250,24 +265,28 @@ pub(crate) mod tests {
     fn frames_read_from_the_map_are_close_to_the_frames_rendered_directly_also_turned_and_past_64_bit_floats() {
         //#287: frames between two doublings at 10^-400, read from the bands below them, against the same frames rendered directly by the deep renderer
         let (width, height) = (96, 64);
-        let (m, orbit) = deep_place(400);
+        let (mut m, orbit) = deep_place(400);
+        //(A cycling palette, so that the structure shows)
+        m.palette = crate::mandelbrot_set::ColorCycle { divide: 1.0, offset: 0.0, stretch: false };
         let color_of = |position: f64| m.interpolated_color(position, |count| m.color(TrueColor::new_from_bernstein_polynomials, count));
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let size = MapSize::for_frames((width, height), 1.0);
-        let shallowest = Depth::from_log2(-400.0 * std::f64::consts::LOG2_10);
-        //(The map starts at the corner of the shallowest frame: 2.5 · scale / width a pixel)
-        let top = shallowest.times(2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0));
-        let mut map = ExponentialMap::new(size, top);
-        for band in 0..MapSize::doublings_below_the_corner((width, height)) + 2 {
-            map.insert(band, render_band(&m, &orbit, top.times((-(band as f64)).exp2()), size, 4, &color_of, false, None, &cancel).unwrap());
-        }
-        for (doublings, rotation) in [(0.0_f64, 0.0), (0.4, 0.0), (1.7, 0.0), (0.9, 1.0)] {
-            let scale = shallowest.times((-doublings).exp2());
-            let read = map.frame(&FrameTaps::new((width, height)), scale, rotation);
-            let mut direct = Vec::new();
-            assert!(render_layers_on(&m, (&orbit, (0.0, 0.0)), (scale, rotation), (width, height), 16, &color_of, false, None, &cancel, |layer, _| direct = layer.to_vec()));
-            let difference = mean_difference(&read, &direct);
-            assert!(difference < 12.0, "{doublings} doublings down, turned {rotation}: mean difference {difference}");
+        //(Near i at 2^-26, with filaments, and at 10^-400)
+        for shallowest in [Depth::from_log2(-26.0), Depth::from_log2(-400.0 * std::f64::consts::LOG2_10)] {
+            //(The map starts at the corner of the shallowest frame: 2.5 · scale / width a pixel)
+            let top = shallowest.times(2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0));
+            let mut map = ExponentialMap::new(size, top);
+            for band in 0..MapSize::doublings_below_the_corner((width, height)) + 2 {
+                map.insert(band, render_band(&m, &orbit, top.times((-(band as f64)).exp2()), size, 4, &color_of, false, None, &cancel).unwrap());
+            }
+            for (doublings, rotation) in [(0.0_f64, 0.0), (0.4, 0.0), (1.7, 0.0), (0.9, 1.0)] {
+                let scale = shallowest.times((-doublings).exp2());
+                let read = map.frame(&FrameTaps::new((width, height)), scale, rotation);
+                let mut direct = Vec::new();
+                assert!(render_layers_on(&m, (&orbit, (0.0, 0.0)), (scale, rotation), (width, height), 16, &color_of, false, None, &cancel, |layer, _| direct = layer.to_vec()));
+                let difference = mean_difference(&read, &direct);
+                assert!(difference < 12.0, "{doublings} doublings down, turned {rotation}: mean difference {difference}");
+            }
         }
     }
 

@@ -294,6 +294,119 @@ fn compose_on_the_cpu(moments: &[Moment], (width, height): (usize, usize)) -> Ve
 
 /// The four taps inside a pixel, in its own units, in the order their colors are added
 const TAPS: [(f64, f64); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
+/// A dive into an exact center from an exponential map (issue #287, an experiment, off by default: see `rendering::exponential_map`): its bands rendered
+/// as the frames reach them, and kept only while frames read them. Instead of a keyframe a doubling at twice a frame's size, a band of rings a doubling
+/// (about 0.64 times the pixels), finest at the frames' centers; a turned frame costs no more than an unturned one
+pub(super) struct ExponentialDive<'a> {
+    width: usize,
+    height: usize,
+    /// The bands' size, and the corner of the shallowest frame (the first row of band 0)
+    size: crate::rendering::exponential_map::MapSize,
+    top: crate::rendering::deep::Depth,
+    /// The band of the deepest frame's corner: the bands below it have fewer columns (see `MapSize::below_the_last`)
+    last: usize,
+    /// The deepest frame's scale (log2)
+    deepest: f64,
+    /// The band with its first row at the radius, its size, and the scale (in logarithms) of the deepest frame that reads it, `None` when cancelled
+    render: Box<dyn Fn(crate::rendering::deep::Depth, crate::rendering::exponential_map::MapSize, f64) -> Option<Vec<TrueColor>> + Sync + 'a>,
+    map: std::sync::RwLock<crate::rendering::exponential_map::ExponentialMap>,
+    /// One band is rendered at a time (each with all the threads)
+    rendering: std::sync::Mutex<()>,
+    /// The first band of every frame being composed: no band from there down is forgotten while it is
+    in_flight: std::sync::Mutex<Vec<usize>>,
+    taps: crate::rendering::exponential_map::FrameTaps,
+}
+
+/// The bands above a frame's corner that an `ExponentialDive` keeps for frames that are still being composed (the frames go deeper)
+const KEPT_ABOVE: usize = 2;
+
+impl<'a> ExponentialDive<'a> {
+    /// The dive of frames `width` x `height` with scales from `2^shallowest` down to `2^deepest`; `render` renders a band (see `ExponentialDive::render`)
+    pub(super) fn new((width, height): (usize, usize), (shallowest, deepest): (f64, f64),
+        render: impl Fn(crate::rendering::deep::Depth, crate::rendering::exponential_map::MapSize, f64) -> Option<Vec<TrueColor>> + Sync + 'a) -> ExponentialDive<'a> {
+        use crate::rendering::exponential_map::{ExponentialMap, FrameTaps, MapSize};
+        let size = MapSize::for_frames((width, height), 1.0);
+        let top = crate::rendering::deep::Depth::from_log2(shallowest + Self::corner_log2((width, height)));
+        let last = ((shallowest - deepest).max(0.0) + 1e-9).floor() as usize;
+        ExponentialDive { width, height, size, top, last, deepest, render: Box::new(render), map: std::sync::RwLock::new(ExponentialMap::new(size, top)), rendering: std::sync::Mutex::new(()), in_flight: std::sync::Mutex::new(Vec::new()), taps: FrameTaps::new((width, height)) }
+    }
+
+    /// The log2 of the distance of a frame's corner from its center, in scales (a frame is `2.5 · scale` wide)
+    fn corner_log2((width, height): (usize, usize)) -> f64 {
+        (2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0)).log2()
+    }
+
+    /// The bands that the frame at the scale `e^ln_scale` reads: from the band of its corner to the deepest that its center reads
+    fn bands_of(&self, ln_scale: f64) -> std::ops::RangeInclusive<usize> {
+        let corner = ((self.top.log2() - ln_scale / std::f64::consts::LN_2 - Self::corner_log2((self.width, self.height))) + 1e-9).floor().max(0.0) as usize;
+        let below = crate::rendering::exponential_map::MapSize::doublings_below_the_corner((self.width, self.height));
+        corner.min(self.last)..=corner.min(self.last) + below
+    }
+
+    /// Band `band` in the map, rendered if it is not there (false: cancelled)
+    fn band(&self, band: usize) -> bool {
+        let there = || self.map.read().unwrap_or_else(std::sync::PoisonError::into_inner).has(band);
+        if there() {
+            return true;
+        }
+        let _rendering = self.rendering.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if there() {
+            return true;
+        }
+        let size = if band > self.last { self.size.below_the_last(band - self.last) } else { self.size };
+        //(The deepest frame that reads it has its corner in it, or it is the last frame)
+        let reader_log2 = (self.top.log2() - Self::corner_log2((self.width, self.height)) - (band.min(self.last) + 1) as f64).max(self.deepest);
+        //(Its radius by its exponent: `2^-band` underflows 64-bit floats past 10⁻³⁰⁸)
+        let top = crate::rendering::deep::Depth { exponent: self.top.exponent - i32::try_from(band).unwrap_or(i32::MAX), ..self.top };
+        let Some(colors) = (self.render)(top, size, reader_log2 * std::f64::consts::LN_2) else {
+            return false;
+        };
+        self.map.write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(band, colors);
+        true
+    }
+
+    /// The frame that averages the frames at the `(ln_scale, rotation)` of every moment (motion blur), each read from the map and rounded to 8 bits before
+    /// the average; `None` when a band it needs was cancelled
+    pub(super) fn compose_moments(&self, moments: &[(f64, f64)]) -> Option<Vec<TrueColor>> {
+        let needed: std::collections::BTreeSet<usize> = moments.iter().flat_map(|&(ln_scale, _)| self.bands_of(ln_scale)).collect();
+        let first = needed.first().copied().unwrap_or(0);
+        //(Other threads compose other frames at the same time: this frame's bands stay while it is composed, and it reads them all under one lock)
+        self.in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(first);
+        let frames = loop {
+            {
+                let map = self.map.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if needed.iter().all(|band| map.has(*band)) {
+                    break Some(moments.iter().map(|&(ln_scale, rotation)| map.frame(&self.taps, crate::rendering::deep::Depth::from_log2(ln_scale / std::f64::consts::LN_2), rotation)).collect::<Vec<_>>());
+                }
+            }
+            if !needed.iter().all(|band| self.band(*band)) {
+                break None;
+            }
+        };
+        //The bands above the first band of every frame being composed, but a few, are read no more (the frames go deeper)
+        let lowest = {
+            let mut in_flight = self.in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(at) = in_flight.iter().position(|band| *band == first) {
+                in_flight.swap_remove(at);
+            }
+            in_flight.iter().copied().min().unwrap_or(first).min(first)
+        };
+        if lowest > KEPT_ABOVE {
+            let mut map = self.map.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if map.first_band().is_some_and(|band| band < lowest - KEPT_ABOVE) {
+                map.forget_above(lowest - KEPT_ABOVE);
+            }
+        }
+        let frames = frames?;
+        let count = frames.len().max(1) as u32;
+        Some((0..self.width * self.height).map(|index| {
+            let sum = frames.iter().fold([0_u32; 3], |sum, frame| [sum[0] + u32::from(frame[index].red), sum[1] + u32::from(frame[index].green), sum[2] + u32::from(frame[index].blue)]);
+            let [red, green, blue] = sum.map(|total| ((total + count / 2) / count) as u8);
+            TrueColor::new(red, green, blue)
+        }).collect())
+    }
+}
+
 /// The two columns and the two rows of the taps
 const TAPS_X: [f64; 2] = [0.25, 0.75];
 const TAPS_Y: [f64; 2] = [0.25, 0.75];
