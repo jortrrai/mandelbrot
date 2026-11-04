@@ -69,6 +69,15 @@ pub fn render_band(m: &MandelbrotSet, orbit: &SharedOrbit, top: Depth, size: Map
         let (sin, cos) = (std::f64::consts::TAU * (column as f64 + jx) / columns as f64).sin_cos();
         (radius * cos, radius * sin)
     };
+    //Where 64-bit floats still tell the band's pixels apart, the 64-bit loop iterates them (as the 64-bit renderer does: it knows the main cardioid and
+    //bulb, which perturbation iterates to the limit); deeper, the deep renderer
+    let (center_real, center_imaginary) = orbit.center();
+    let center = (center_real.to_f64(), center_imaginary.to_f64());
+    let spacing = top.to_f64() / 2.0 * std::f64::consts::TAU / columns as f64;
+    let magnitude = (center.0.abs() + top.to_f64()).max(center.1.abs() + top.to_f64());
+    if top.to_f64().is_normal() && spacing / (f64::EPSILON * magnitude.max(f64::MIN_POSITIVE)) >= crate::complex_plane::PRECISION_LIMIT_STEPS {
+        return render_band_in_64_bits(m, center, (top.exponent, size), samples, color_of, &offset_of, cancel);
+    }
     let mut band = None;
     let done = render_points_on(m, orbit, (top.exponent, top.mantissa), (size.band_pixels(), &offset_of), samples, color_of, approximate, gpu, cancel, |layer, number| {
         if number == samples.max(1) {
@@ -76,6 +85,47 @@ pub fn render_band(m: &MandelbrotSet, orbit: &SharedOrbit, top: Depth, size: Map
         }
     });
     band.filter(|_| done)
+}
+
+/// `render_band` in 64-bit floats: the points `center + offset_of(point, sample) · 2^exponent`, on all the render threads
+fn render_band_in_64_bits(m: &MandelbrotSet, center: (f64, f64), (exponent, size): (i32, MapSize), samples: u8, color_of: &(impl Fn(f64) -> TrueColor + Sync),
+    offset_of: &(impl Fn(usize, u8) -> (f64, f64) + Sync), cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<TrueColor>> {
+    let pixels = size.band_pixels();
+    //(`offset_of` is in units of the band's exponent: back to the plane)
+    let unit = f64::from(exponent).exp2();
+    let per_thread = pixels.div_ceil(super::render_thread_count().max(1)).max(1);
+    let mut sums = vec![[0_u32; 3]; pixels];
+    for sample in 0..samples.max(1) {
+        std::thread::scope(|scope| {
+            for (part, sums) in sums.chunks_mut(per_thread).enumerate() {
+                scope.spawn(move || {
+                    let start = part * per_thread;
+                    let points: Vec<crate::complex::Complex> = (start..start + sums.len()).map(|index| {
+                        let (x, y) = offset_of(index, sample);
+                        crate::complex::Complex::new(center.0 + x * unit, center.1 + y * unit)
+                    }).collect();
+                    let mut positions = vec![0.0; points.len()];
+                    if m.positions(&points, &mut positions, Some(cancel)) < points.len() {
+                        return;
+                    }
+                    for (sum, position) in sums.iter_mut().zip(positions) {
+                        let color = color_of(position);
+                        for (total, channel) in sum.iter_mut().zip([color.red, color.green, color.blue]) {
+                            *total += u32::from(channel);
+                        }
+                    }
+                });
+            }
+        });
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+    }
+    let count = u32::from(samples.max(1));
+    Some(sums.iter().map(|sum| {
+        let [red, green, blue] = sum.map(|total| ((total + count / 2) / count) as u8);
+        TrueColor::new(red, green, blue)
+    }).collect())
 }
 
 /// The bands of a dive's exponential map that frames are read from: band `k` starts at the radius `top / 2^k`
