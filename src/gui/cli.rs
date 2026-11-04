@@ -6,6 +6,7 @@
 //! `{"error": …}` on stderr and exits with 1 (2 for a command that is not understood).
 //!
 //! ```text
+//! mandelbrot image --place "Fractal Flower" [--size 64K | 7680x4320] [--samples 32] [--blur on]   save a place as an image, like Save image in the window
 //! mandelbrot video new --to "Fractal Flower" [--from <place>] [--music song.mp3] [--length 3:20 | --speed 100]
 //!                      [--size 4K | 3840x2160] [--fps 60] [--samples 32] [--shutter 180] [--pace Cinematic] [--route Dive] [--quality "Very High"]
 //! mandelbrot video start <id>      render it here (in the foreground; with nohup or systemd for long renders), from its chunks if it has some
@@ -23,6 +24,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -87,8 +89,12 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
             _ => Err(usage(format!("unknown youtube command {command:?}: the command is mandelbrot youtube auth"))),
         };
     }
+    if group == "image" {
+        //(`image` takes its options right away: `command` is the first of them)
+        return image(&options(&arguments[1..])?);
+    }
     if group != "video" {
-        return Err(usage(format!("unknown command {group:?}: the commands are mandelbrot video …")));
+        return Err(usage(format!("unknown command {group:?}: the commands are mandelbrot video … and mandelbrot image …")));
     }
     let jobs = jobs_folder();
     match command {
@@ -172,10 +178,62 @@ fn size_of(text: &str) -> Result<(usize, usize), Failure> {
         "1440p" => Ok((2560, 1440)),
         "1080p" => Ok((1920, 1080)),
         "720p" => Ok((1280, 720)),
+        "16k" => Ok((15_360, 8640)),
+        "32k" => Ok((30_720, 17_280)),
+        "48k" => Ok((46_080, 25_920)),
+        "64k" => Ok((61_440, 34_560)),
         other => {
             let (width, height) = other.split_once('x').ok_or_else(|| usage(format!("--size {text:?}: use 4K, 1080p or WIDTHxHEIGHT")))?;
             Ok((width.trim().parse().map_err(|_| usage(format!("--size {text:?}: the width is not a number")))?, height.trim().parse().map_err(|_| usage(format!("--size {text:?}: the height is not a number")))?))
         }
+    }
+}
+
+/// `image`: saves the place `--place` as an image with the user's settings and these options, like *Save image* in the window (in strips, so a 64K image
+/// keeps its memory bounded, see `export`), reporting its progress as it goes; prints the path of the image
+fn image(options: &[(String, String)]) -> Result<(), Failure> {
+    let place = option(options, "place").ok_or_else(|| usage("image needs --place <place>"))?;
+    let mut app = headless_app();
+    let index = place_index(&app, place)?;
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_point_of_interest(index);
+    //(Arriving renders the view for the window: not wanted here, the image is rendered on its own)
+    app.interrupt_progressive_render();
+    if let Some(size) = option(options, "size") {
+        let (width, height) = size_of(size)?;
+        app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+        (app.save_size.custom_width, app.save_size.custom_height) = (width, height);
+    }
+    if let Some(samples) = number::<u8>(options, "samples")? {
+        (app.image_supersampling_amount, app.image_quality_blur) = (samples.clamp(1, 64), false);
+    }
+    if let Some(blur) = option(options, "blur") {
+        app.image_quality_blur = matches!(blur.to_ascii_lowercase().as_str(), "on" | "true" | "yes" | "1");
+    }
+    let started = Instant::now();
+    app.save_image();
+    let Some(save) = app.image_save.as_ref() else {
+        return Err(failed(app.log.last().cloned().unwrap_or_else(|| String::from("the image could not be saved"))));
+    };
+    let (ended, size) = (Arc::clone(&save.ended), save.size);
+    let mut reported = Instant::now();
+    while !ended.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(200));
+        if reported.elapsed() >= REPORT_EVERY {
+            if let Some(save) = &app.image_save {
+                println!("{}", json!({ "state": "rendering", "progress": save.fraction(), "text": save.text(), "elapsed_seconds": started.elapsed().as_secs_f64().round() }));
+            }
+            reported = Instant::now();
+        }
+    }
+    app.poll_job(); //(The message of the save, with its file)
+    let message = app.log.iter().rev().find(|line| line.contains("image") || line.contains("Image")).cloned().unwrap_or_default();
+    let saved = std::fs::read_dir("saved").ok().into_iter().flatten().filter_map(Result::ok).map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "png") && path.metadata().and_then(|metadata| metadata.modified()).is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age <= started.elapsed())))
+        .max_by_key(|path| path.metadata().and_then(|metadata| metadata.modified()).ok());
+    match saved {
+        Some(path) => print(&json!({ "state": "saved", "path": path.display().to_string(), "width": size.width, "height": size.height, "samples": app.image_supersampling_amount, "seconds": started.elapsed().as_secs_f64(), "log": message })),
+        None => Err(failed(if message.is_empty() { String::from("the image could not be saved") } else { message })),
     }
 }
 
