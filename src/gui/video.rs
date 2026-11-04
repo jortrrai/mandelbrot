@@ -566,6 +566,9 @@ pub(super) struct VideoSpec {
     /// Whether a dive into a fixed center is composed from keyframe images (see `dive_keyframes`, issue #209)
     #[serde(default)]
     pub(super) keyframe_dives: bool,
+    /// Whether a dive into an exact center is read from an exponential map instead of its keyframes (see `dive_keyframes::ExponentialDive`, issue #287)
+    #[serde(default)]
+    pub(super) exponential_dives: bool,
 }
 
 /// The name of a new video of `flight` in `folder` (without extension): the time and the name of the place, with a number when a video of that name (or its
@@ -720,6 +723,7 @@ impl MandelbrotApp {
             music,
             shutter: self.video_shutter,
             keyframe_dives: self.video_keyframe_dives,
+            exponential_dives: self.video_exponential_dives,
         })
     }
 
@@ -741,7 +745,7 @@ impl MandelbrotApp {
         let job_name = name.clone();
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, max_mbps, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, fast_deep, deep_f32, output: _, music, shutter, keyframe_dives } = spec;
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, max_mbps, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, fast_deep, deep_f32, output: _, music, shutter, keyframe_dives, exponential_dives } = spec;
         let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
@@ -793,8 +797,20 @@ impl MandelbrotApp {
         let deep_dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1 && shared_orbit.is_some())
             .then(|| super::dive_keyframes::DeepDive::plan((0..total).map(|frame| clock.time(frame)), |time| path.deep_at(time)))
             .flatten();
+        //An exponential map's band is read by frames 14 doublings apart: their colors may not depend on their limits (a cycling palette, or one limit)
+        let exponential_dives = exponential_dives && deep_dive.is_some() && {
+            let fits = !flight.palettes.0.stretch || auto_settings.is_none();
+            if !fits {
+                self.log("Exponential map: the palette is stretched over a limit that changes with the depth, so a ring would have other colors in every frame: keyframes instead (a cycling palette, Stretch off, or a fixed limit lets the map be used)");
+            }
+            fits
+        };
         if let Some((shallowest, deepest)) = deep_dive {
-            self.log(format!("Fast dive to an exact center: {} keyframe images, each rendered when the frames reach its depth, and every frame composed from them", (shallowest - deepest).ceil() as usize + 1));
+            if exponential_dives {
+                self.log(format!("Fast dive to an exact center from an exponential map (an experiment): {} bands of rings, each rendered when the frames reach its depth, and every frame read from them", (shallowest - deepest).max(0.0).floor() as usize + 1 + crate::rendering::exponential_map::MapSize::doublings_below_the_corner((width, height))));
+            } else {
+                self.log(format!("Fast dive to an exact center: {} keyframe images, each rendered when the frames reach its depth, and every frame composed from them", (shallowest - deepest).ceil() as usize + 1));
+            }
         }
         if keyframe_dives && dive.is_none() && deep_dive.is_none() {
             self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
@@ -1005,7 +1021,19 @@ impl MandelbrotApp {
             let keyframes = &keyframes;
             //A dive into an exact center: a keyframe in 64-bit floats where they suffice (as `DiveKeyframes` renders them), deeper by the deep renderer from the
             //orbit of the center (see `dive_keyframes::DeepDive`)
-            let deep_dive = deep_dive.map(|range| super::dive_keyframes::DeepDive::new((width, height), range, |depth: crate::rendering::deep::Depth| {
+            //(Or from an exponential map: its bands of rings with the deep renderer, see `dive_keyframes::ExponentialDive`)
+            let exponential_dive = deep_dive.filter(|_| exponential_dives).map(|range| super::dive_keyframes::ExponentialDive::new((width, height), range, |top, size, ln_scale| {
+                let mut set = m.clone();
+                set.palette = flight.palettes.0;
+                if let Some(settings) = &auto_settings {
+                    set.max_iterations = deep_limit_at(ln_scale, &flight, settings);
+                }
+                let orbit = shared_orbit.as_ref().expect("a deep dive has the orbit of its center");
+                let color_of = |position: f64| set.interpolated_color(position, |count| set.color(coloring_function, count));
+                crate::rendering::exponential_map::render_band(&set, orbit, top, size, samples, &color_of, fast_deep, gpu.as_deref().map(|gpu| (gpu, deep_f32)), &thread_cancel)
+            }));
+            let exponential_dive = &exponential_dive;
+            let deep_dive = deep_dive.filter(|_| !exponential_dives).map(|range| super::dive_keyframes::DeepDive::new((width, height), range, |depth: crate::rendering::deep::Depth| {
                 let (big_width, big_height) = (width * 2, height * 2);
                 let mut set = m.clone();
                 set.palette = flight.palettes.0;
@@ -1095,7 +1123,7 @@ impl MandelbrotApp {
                             plane.set_view(&clock.camera(path, frame, time).view());
                             plane.set_rotation(flight.rotation_at(path, time));
                             //A dive into an exact center: the same, from keyframes rendered as the frames reach them (with the camera in logarithms)
-                            if let Some(deep_dive) = deep_dive {
+                            if deep_dive.is_some() || exponential_dive.is_some() {
                                 let moments = if shutter > 0.0 {
                                     let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
                                     sample_times(DIVE_MOMENTS, time, interval, shutter, path.duration())
@@ -1103,7 +1131,8 @@ impl MandelbrotApp {
                                     vec![time]
                                 };
                                 let moments: Vec<(f64, f64)> = moments.iter().map(|moment| (path.deep_at(*moment).ln_scale, flight.rotation_at(path, *moment))).collect();
-                                let Some(colors) = deep_dive.compose_moments(&moments) else {
+                                let colors = deep_dive.as_ref().map_or_else(|| exponential_dive.as_ref().and_then(|dive| dive.compose_moments(&moments)), |deep_dive| deep_dive.compose_moments(&moments));
+                                let Some(colors) = colors else {
                                     scheduler.finish_frame(false);
                                     return;
                                 };
@@ -1112,7 +1141,9 @@ impl MandelbrotApp {
                                     return;
                                 }
                                 //(The next keyframe while the other threads compose: see `DeepDive::prefetch_after`)
-                                deep_dive.prefetch_after(&moments);
+                                if let Some(deep_dive) = deep_dive {
+                                    deep_dive.prefetch_after(&moments);
+                                }
                                 continue;
                             }
                             //A dive: the frame composed from its keyframe (with motion blur: from the moments of its shutter)
@@ -1493,6 +1524,7 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("Motion blur: every sample of a pixel is taken at its own moment while the shutter is open, as a film camera does, so motion blurs along its direction and fine detail shimmers less, at no extra cost (the same samples). 180° is the shutter of film; more is smoother and softer at the edges of a fast zoom, whose center stays sharp. Needs 2 samples or more, without Blend frames");
             ui.checkbox(&mut self.video_keyframe_dives, "Fast dives").on_hover_text("A dive into a fixed center (the same colors all the way, at most 4K, without Blend frames) is rendered as one large image per doubling of the zoom, and every frame is composed from the image of its depth: many times faster, a slightly different picture (each frame averages 1 to 4 keyframe pixels per pixel). Other flights render frame by frame");
+            ui.add_enabled(self.video_keyframe_dives, egui::Checkbox::new(&mut self.video_exponential_dives, "Exponential map")).on_hover_text("Off by default, an experiment (issue #287). With Fast dives, a dive into an exact center (a deep place) is rendered as rings around its center, one band a doubling of the zoom, instead of one large image a doubling, and every frame is read from them: measured about 1.5 to 2 times as fast per doubling, a little closer to frames rendered one by one overall but a little softer at the frame's edges, and turning costs nothing extra. Only for dives into deep places; other dives keep their keyframes");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
         });
         ui.horizontal(|ui| {

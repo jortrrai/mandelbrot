@@ -832,32 +832,43 @@ pub fn render_layers_around(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrb
 #[allow(clippy::too_many_arguments)] // The orbit and the view, its size and samples, how to color, the GPU, when to stop and where the layers go
 pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, (f64, f64)), (depth, rotation): (Depth, f64), (width, height): (usize, usize), samples: u8,
     color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<(&super::gpu::GpuIterator, bool)>, cancel: &std::sync::atomic::AtomicBool,
-    mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
-    use std::sync::atomic::Ordering;
+    on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
     //A pixel is `pixel · 2^depth.exponent`: the offsets are scaled by `2^-depth.exponent` (see `position_scaled`; within 64-bit floats' range bit for bit as before)
     let pixel = 2.5 * depth.mantissa / width as f64;
-    let scaled = -depth.exponent;
     //(The view's center from the orbit's, in the same scaled units)
     let shift = (right * depth.mantissa, up * depth.mantissa);
     let reach = max_offset(pixel, width, height) + shift.0.hypot(shift.1);
-    let reference = Reference::of(m, orbit.orbit_and_residuals(m.max_iterations), times_two_to(reach, depth.exponent), approximate);
-    let (center_real, center_imaginary) = orbit.center();
-    let center = (center_real.to_f64(), center_imaginary.to_f64());
-    let threads = super::render_thread_count().max(1);
-    let rows_per_thread = height.div_ceil(threads);
-    let mut sums = vec![[0_u32; 3]; width * height];
-    let mut colors = vec![crate::coloring::TrueColor::new(0, 0, 0); width * height];
-    //The offset of a pixel's sample from the orbit's center, scaled by `2^scaled`: the first sample in the middle of the pixel, the others at the jitter of
-    //the 64-bit renderer
-    let offset_of = |x: usize, y: usize, sample: u8| {
+    //The offset of a pixel's sample from the orbit's center, scaled by `2^-depth.exponent`: the first sample in the middle of the pixel, the others at the
+    //jitter of the 64-bit renderer
+    let offset_of = |index: usize, sample: u8| {
+        let (x, y) = (index % width, index / width);
         let (jx, jy) = if sample == 0 { (0.5, 0.5) } else { super::jitter::sample_jitter(x, y, sample) };
         let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), rotation);
         if shift == (0.0, 0.0) { offset } else { (offset.0 + shift.0, offset.1 + shift.1) }
     };
+    render_points_on(m, orbit, (depth.exponent, reach), (width * height, &offset_of), samples, color_of, approximate, gpu, cancel, on_layer)
+}
+
+/// The colors of `pixels` points around the center of `orbit`, averaged over `samples` samples each, one layer after the other.
+///
+/// `render_layers_on` renders a grid of them, #287 rings; the offset of a point's sample from the center is `offset_of(point, sample) · 2^exponent`, at
+/// most `reach · 2^exponent`
+#[allow(clippy::too_many_arguments)] // The orbit and the points, their samples, how to color, the GPU, when to stop and where the layers go
+pub fn render_points_on(m: &MandelbrotSet, orbit: &SharedOrbit, (exponent, reach): (i32, f64), (pixels, offset_of): (usize, &(impl Fn(usize, u8) -> (f64, f64) + Sync)), samples: u8,
+    color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<(&super::gpu::GpuIterator, bool)>, cancel: &std::sync::atomic::AtomicBool,
+    mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
+    use std::sync::atomic::Ordering;
+    let scaled = -exponent;
+    let reference = Reference::of(m, orbit.orbit_and_residuals(m.max_iterations), times_two_to(reach, exponent), approximate);
+    let (center_real, center_imaginary) = orbit.center();
+    let center = (center_real.to_f64(), center_imaginary.to_f64());
+    let threads = super::render_thread_count().max(1);
+    let per_thread = pixels.div_ceil(threads).max(1);
+    let mut sums = vec![[0_u32; 3]; pixels];
+    let mut colors = vec![crate::coloring::TrueColor::new(0, 0, 0); pixels];
     //(With `true`: the 32-bit loop, an approximation, see `GpuIterator::deep_outcomes32`)
     let gpu = gpu.filter(|(gpu, single)| if *single { gpu.has_deep32() } else { gpu.deep_works() });
     let table = gpu.map(|_| reference.gpu_table());
-    let pixels = width * height;
     let chunks = pixels.div_ceil(SHARE_CHUNK);
     for sample in 0..samples.max(1) {
         //The positions of the layer: the CPU threads and the GPU (where it can) take the next chunk of pixels as soon as they are free, so each computes as
@@ -868,11 +879,11 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
         let cpu_positions = |range: std::ops::Range<usize>| -> Vec<f64> {
             if scaled <= SCALED_BELOW {
                 positions(m, &reference, center, range, |index| {
-                    let (cx, cy) = offset_of(index % width, index / width, sample);
+                    let (cx, cy) = offset_of(index, sample);
                     (times_two_to(cx, -scaled), times_two_to(cy, -scaled))
                 })
             } else {
-                range.map(|index| position_scaled(m, &reference, center, offset_of(index % width, index / width, sample), scaled)).collect()
+                range.map(|index| position_scaled(m, &reference, center, offset_of(index, sample), scaled)).collect()
             }
         };
         std::thread::scope(|scope| {
@@ -898,7 +909,7 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
                     //The offsets as `position_scaled` takes them: unscaled at this depth, else scaled (the GPU does the scaled phase too)
                     let plain = scaled <= if single { SCALED_BELOW_32 } else { SCALED_BELOW };
                     let offsets: Vec<(f64, f64)> = range.clone().map(|index| {
-                        let (cx, cy) = offset_of(index % width, index / width, sample);
+                        let (cx, cy) = offset_of(index, sample);
                         if plain { (times_two_to(cx, -scaled), times_two_to(cy, -scaled)) } else { (cx, cy) }
                     }).collect();
                     //The smooth position of an escaped orbit as `position_from` and `position_scaled` end (in the scaled phase: of the center); the GPU failed:
@@ -922,7 +933,7 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
         }
         //The colors, added to the samples so far
         std::thread::scope(|scope| {
-            for ((rows, out), positions) in sums.chunks_mut(rows_per_thread * width).zip(colors.chunks_mut(rows_per_thread * width)).zip(positions.chunks(rows_per_thread * width)) {
+            for ((rows, out), positions) in sums.chunks_mut(per_thread).zip(colors.chunks_mut(per_thread)).zip(positions.chunks(per_thread)) {
                 scope.spawn(move || {
                     for ((sum, color), position) in rows.iter_mut().zip(out.iter_mut()).zip(positions) {
                         let new = color_of(*position);

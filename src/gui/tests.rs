@@ -3006,25 +3006,28 @@ fn a_dive_video_to_10_to_the_minus_400_renders_every_deep_frame_and_keeps_the_de
 }
 
 #[test]
-fn a_fast_dive_to_10_to_the_minus_400_composes_its_frames_from_deep_keyframes_close_to_the_frames_rendered_one_by_one() {
+fn a_fast_dive_to_10_to_the_minus_400_composes_its_frames_from_deep_keyframes_or_an_exponential_map_close_to_the_frames_rendered_one_by_one() {
     //Issue #263: Fast dives into an exact center deeper than 64-bit floats, with keyframes rendered as the frames reach them (see `dive_keyframes::DeepDive`)
     let power: u32 = 400;
     let (real, imaginary) = (format!("3e-{}", power + 1), format!("1.{}2", "0".repeat(power as usize)));
     let place = format!(r#"{{ "format_version": 1, "name": "Deep", "location": {{ "center": {{ "real": 0.0, "imaginary": 1.0, "real_text": "{real}", "imaginary_text": "{imaginary}" }}, "scale": 2.2250738585072014e-308, "scale_text": "1e-{power}", "max_iterations": 20000 }} }}"#);
     let mut videos = Vec::new();
-    for keyframe_dives in [false, true] {
+    //(Frame by frame, from keyframes, and from an exponential map: #287)
+    for (keyframe_dives, exponential) in [(false, false), (true, false), (true, true)] {
         let (mut app, folder) = app_with_points(&[("deep.json", &place)]);
         app.video_folder = folder.join("saved");
         app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
         (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs, app.video_speed) = (48, 32, 4, 3, true, 400);
-        (app.pace, app.route, app.constant_speed, app.video_keyframe_dives) = (super::flight::Pace::Constant, super::flight::Route::Dive, 20.0, keyframe_dives);
+        (app.pace, app.route, app.constant_speed, app.video_keyframe_dives, app.video_exponential_dives) = (super::flight::Pace::Constant, super::flight::Route::Dive, 20.0, keyframe_dives, exponential);
         app.go_to_point_of_interest(0);
+        //(A cycling palette: the colors of a ring do not depend on the limit of the frame that reads it, as the exponential map needs)
+        app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 2.0, offset: 50.0, stretch: false };
         app.skip_flight();
         app.start_video();
         let message = wait_for_video(&mut app);
         assert!(message.starts_with("Video of the flight:") && !message.contains("stopped"), "{message}");
         if keyframe_dives {
-            assert!(app.log.iter().any(|line| line.contains("Fast dive to an exact center")), "{:?}", app.log);
+            assert!(app.log.iter().any(|line| line.contains("Fast dive to an exact center") && line.contains("exponential map") == exponential), "{:?}", app.log);
         }
         let frames_folder = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
         let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&frames_folder).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
@@ -3037,13 +3040,16 @@ fn a_fast_dive_to_10_to_the_minus_400_composes_its_frames_from_deep_keyframes_cl
         }).collect::<Vec<_>>());
         let _ = std::fs::remove_dir_all(folder);
     }
-    assert_eq!(videos[0].len(), videos[1].len(), "the same frames");
+    assert!(videos[0].len() == videos[1].len() && videos[0].len() == videos[2].len(), "the same frames");
     assert!(videos[0].len() > 40);
-    //Every frame close to the one rendered by itself (a composed frame averages 1 to 4 keyframe pixels per pixel), all the way down
-    for (index, (one_by_one, composed)) in videos[0].iter().zip(&videos[1]).enumerate() {
-        let error = one_by_one.iter().zip(composed).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / one_by_one.len() as f64;
-        let distinct = composed.chunks(3).collect::<std::collections::BTreeSet<_>>().len();
-        assert!(error < 16.0 && distinct > 5, "frame {index}: mean difference {error:.1}, {distinct} colors");
+    //Every frame close to the one rendered by itself (a composed frame averages 1 to 4 keyframe pixels per pixel; a frame read from the map, rings around
+    //its center), all the way down
+    for composed_video in &videos[1..] {
+        for (index, (one_by_one, composed)) in videos[0].iter().zip(composed_video).enumerate() {
+            let error = one_by_one.iter().zip(composed).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / one_by_one.len() as f64;
+            let distinct = composed.chunks(3).collect::<std::collections::BTreeSet<_>>().len();
+            assert!(error < 16.0 && distinct > 5, "frame {index}: mean difference {error:.1}, {distinct} colors");
+        }
     }
 }
 
@@ -3058,7 +3064,8 @@ fn time_a_deep_dive_frame_by_frame_and_from_keyframes() {
     let place = format!(r#"{{ "format_version": 1, "name": "Deep", "location": {{ "center": {{ "real": 0.0, "imaginary": 1.0, "real_text": "{real}", "imaginary_text": "{imaginary}" }}, "scale": {}, "scale_text": "1e-{power}", "max_iterations": 20000 }} }}"#, format!("1e-{power}").parse::<f64>().unwrap().max(f64::MIN_POSITIVE));
     //MANDELBROT_DEEP_DIVE_MODES: "fast", "frames" or both (the default); the peak memory of the program is printed after each
     let modes = std::env::var("MANDELBROT_DEEP_DIVE_MODES").unwrap_or_else(|_| String::from("fast frames"));
-    for keyframe_dives in [true, false].into_iter().filter(|fast| modes.contains(if *fast { "fast" } else { "frames" })) {
+    //(And "map": Fast dives from an exponential map, #287)
+    for (keyframe_dives, exponential) in [(true, false), (true, true), (false, false)].into_iter().filter(|(fast, map)| modes.contains(if *map { "map" } else if *fast { "fast" } else { "frames" })) {
         let (mut app, folder) = app_with_points(&[("deep.json", &place)]);
         app.gpu = rendering::gpu::GpuIterator::new().ok().map(Arc::new);
         app.limit_zoom = false; //(Deep: past the fast GPU math's limit)
@@ -3066,7 +3073,10 @@ fn time_a_deep_dive_frame_by_frame_and_from_keyframes() {
         app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
         (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_speed) = (numbers[0] as usize, numbers[1] as usize, numbers[2] as u8, numbers[4] as u32, 100);
         (app.pace, app.route, app.constant_speed, app.video_keyframe_dives, app.fast_deep, app.dive_zoom) = (super::flight::Pace::Constant, super::flight::Route::Dive, numbers[5], keyframe_dives, true, numbers.get(6).copied().unwrap_or(1.0));
+        app.video_exponential_dives = exponential;
         app.go_to_point_of_interest(0);
+        //(A cycling palette in every mode: the exponential map needs one, see `video::start_video_of`)
+        app.m.palette = crate::mandelbrot_set::ColorCycle { divide: 4.0, offset: 0.0, stretch: false };
         app.skip_flight();
         let started = std::time::Instant::now();
         app.start_video();
@@ -3077,12 +3087,13 @@ fn time_a_deep_dive_frame_by_frame_and_from_keyframes() {
         }
         let message = app.log.iter().rev().find(|line| line.contains("Video of the flight")).cloned().unwrap_or_else(|| app.log.iter().rev().take(3).cloned().collect::<Vec<_>>().join(" | "));
         let peak = std::fs::read_to_string("/proc/self/status").ok().and_then(|status| status.lines().find(|line| line.starts_with("VmHWM:")).map(str::to_string)).unwrap_or_default();
-        println!("Fast dives {keyframe_dives}: {:.1} s; {message}; peak memory {peak}", started.elapsed().as_secs_f64());
+        let mode = if exponential { "map" } else if keyframe_dives { "fast" } else { "frames" };
+        println!("{mode}: {:.1} s; {message}; peak memory {peak}", started.elapsed().as_secs_f64());
         //MANDELBROT_DEEP_DIVE_KEEP: a folder to move the video into (else it is deleted with the test's folder)
         if let Ok(keep) = std::env::var("MANDELBROT_DEEP_DIVE_KEEP") {
             let video = std::fs::read_dir(folder.join("saved")).into_iter().flatten().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.extension().is_some_and(|extension| extension == "mp4"));
             if let Some(video) = video {
-                let target = std::path::Path::new(&keep).join(format!("deep-dive-{}.mp4", if keyframe_dives { "fast" } else { "frames" }));
+                let target = std::path::Path::new(&keep).join(format!("deep-dive-{mode}.mp4"));
                 let kept = std::fs::rename(&video, &target).or_else(|_| std::fs::copy(&video, &target).map(|_| ()));
                 println!("Kept the video as {} ({kept:?})", target.display());
             }
