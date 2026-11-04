@@ -25,6 +25,8 @@ mod cycle;
 mod deep_view;
 mod depth;
 mod dive_keyframes;
+#[cfg(test)]
+mod dive_quality;
 mod export;
 mod fit;
 mod flight;
