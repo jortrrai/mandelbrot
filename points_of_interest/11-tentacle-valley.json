@@ -1,0 +1,16 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "coloring": "bernstein"
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": -0.20403038558882083,
+      "real": -0.8290413423045699
+    },
+    "max_iterations": 6624,
+    "scale": 0.018228240412735353
+  },
+  "name": "Tentacle Valley"
+}

@@ -564,9 +564,10 @@ mod tests {
     fn the_shipped_folder_has_the_reset_view_first_then_the_ten_former_views_by_zoom_with_exactly_their_numbers() {
         let report = load_folder(&find_folder());
         assert!(report.problems.is_empty(), "{:?}", report.problems);
-        assert_eq!(report.points.len(), 11);
-        //The reset view first, the shallowest: exactly the view of `ComplexPlane::new`
-        let reset = &report.points[0];
+        //(The folder also has Jort's own places, added 2026-11-04: the reset view and the ten former views are among them)
+        assert!(report.points.len() >= 11, "{}", report.points.len());
+        //The reset view: exactly the view of `ComplexPlane::new`
+        let reset = report.points.iter().find(|p| p.file_name == "00-reset-view.json").expect("the reset view is shipped");
         let plane = crate::complex_plane::ComplexPlane::new(1200, 800);
         assert_eq!((reset.file_name.as_str(), reset.name.as_str()), ("00-reset-view.json", "Reset View"));
         assert_eq!((reset.location.real, reset.location.imaginary, reset.location.scale), (plane.center().x, plane.center().y, plane.get_scale()));
@@ -584,7 +585,8 @@ mod tests {
             assert_eq!((appearance.coloring, format!("{:?}", appearance.color_channels.unwrap())), (Some(Coloring::Bernstein), String::from("RGB")), "the default appearance of the application");
         }
         //Listed by zoom, the shallowest first; Frost on the Shoreline and Harbor of Moons have the same zoom, so they keep the order of their file names
-        let files: Vec<&str> = report.points.iter().map(|p| p.file_name.trim_end_matches(".json")).collect();
+        let former: Vec<String> = std::iter::once(String::from("00-reset-view")).chain(FORMER_VIEWS.iter().map(|view| view.0.to_string())).collect();
+        let files: Vec<&str> = report.points.iter().map(|p| p.file_name.trim_end_matches(".json")).filter(|file| former.iter().any(|f| f == file)).collect();
         assert_eq!(
             files,
             [

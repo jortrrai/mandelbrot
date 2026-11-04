@@ -1,0 +1,21 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.1848146163574197,
+      "imaginary_text": "0.1848146163574196815517388863201659186368259",
+      "real": -0.7957429802875395,
+      "real_text": "-0.7957429802875395176967877296139596165171952"
+    },
+    "max_iterations": 6699,
+    "scale": 3.632408027026447e-13
+  },
+  "name": "The Endless Spiral"
+}

@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 278.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.113,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.17850023270064097,
+      "real": -0.8031029810445636
+    },
+    "max_iterations": 3850,
+    "scale": 1.459993684161094e-11
+  },
+  "name": "Wow Sun"
+}

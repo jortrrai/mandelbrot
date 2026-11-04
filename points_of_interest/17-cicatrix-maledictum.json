@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 185.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.3,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.5678921241947836,
+      "real": -0.44445449607618936
+    },
+    "max_iterations": 3117,
+    "scale": 2.3462218727190213e-9
+  },
+  "name": "Cicatrix Maledictum"
+}

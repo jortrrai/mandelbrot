@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 420.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.17,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.48395444913585356,
+      "real": 0.30720805405013096
+    },
+    "max_iterations": 5780,
+    "scale": 2.5359097570561314e-11
+  },
+  "name": "Spiral Rainbow Minibrot"
+}

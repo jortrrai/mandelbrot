@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 185.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.3,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.5577810401930252,
+      "real": -0.46237872634386323
+    },
+    "max_iterations": 3130,
+    "scale": 2.1373270299427875e-9
+  },
+  "name": "Hypnotic"
+}

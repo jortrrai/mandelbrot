@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 0.0,
+    "coloring": "bernstein",
+    "iteration_divide": 2.5,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.5577104861439648,
+      "real": -0.46237083593237926
+    },
+    "max_iterations": 16336,
+    "scale": 6.410900837405954e-8
+  },
+  "name": "Cosmobrot"
+}

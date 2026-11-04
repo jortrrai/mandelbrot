@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "name": "Mantis Shrimp",
+  "start": {
+    "center": {
+      "real": -0.4471230243470381,
+      "imaginary": 0.5703502428998655
+    },
+    "scale": 0.0002848723526932793,
+    "max_iterations": 2267,
+    "iteration_divide": 0.3,
+    "color_offset": 185.0
+  },
+  "destination": {
+    "center": {
+      "real": -0.4432873973589223,
+      "imaginary": 0.566141845419313
+    },
+    "scale": 0.0003601200985443301,
+    "max_iterations": 2788,
+    "iteration_divide": 0.3,
+    "color_offset": 185.0
+  },
+  "route": "Shortest",
+  "pace": "Cinematic",
+  "constant_speed": 2.8,
+  "speed": 1.0,
+  "dive_zoom": 3.05,
+  "length_seconds": 226.933
+}

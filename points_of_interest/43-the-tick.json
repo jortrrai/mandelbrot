@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 499.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.45,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.4839544491358836,
+      "real": 0.3072080540501461
+    },
+    "max_iterations": 5820,
+    "scale": 2.104323256761771e-11
+  },
+  "name": "The Tick"
+}

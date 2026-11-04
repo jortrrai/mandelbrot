@@ -1,0 +1,19 @@
+{
+  "appearance": {
+    "color_channels": "RGB",
+    "color_offset": 185.0,
+    "coloring": "bernstein",
+    "iteration_divide": 0.3,
+    "stretch_palette": false
+  },
+  "format_version": 1,
+  "location": {
+    "center": {
+      "imaginary": 0.5703502428998655,
+      "real": -0.4471230243470382
+    },
+    "max_iterations": 857,
+    "scale": 0.0002848723526932793
+  },
+  "name": "Fractal Flower"
+}
