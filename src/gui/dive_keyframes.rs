@@ -114,15 +114,11 @@ impl DiveKeyframes {
     /// CPU threads, bit for bit the same
     pub(super) fn compose_moments(&self, moments: &[(f64, f64)], gpu: Option<&rendering::gpu::GpuIterator>) -> Vec<TrueColor> {
         let (width, height) = (self.width, self.height);
-        let big_height = height * 2;
         let moments: Vec<Moment> = moments.iter().map(|&(scale, rotation)| Moment::new(self, scale, rotation)).collect();
         if let (Some(gpu), Some(images)) = (gpu, &self.on_gpu) {
-            let unturned: Option<Vec<(usize, Vec<Tap>)>> = moments.iter().map(|moment| moment.columns.as_ref().map(|columns| {
-                let rows = TAPS_Y.map(|tap_y| (0..height).map(move |y| Tap::at((y as f64 + tap_y - height as f64 / 2.0) * moment.footprint + big_height as f64 / 2.0, big_height)));
-                (moment.index, columns.iter().flatten().copied().chain(rows.into_iter().flatten()).collect())
-            })).collect();
+            let unturned: Option<Vec<(usize, Vec<Tap>)>> = moments.iter().map(|moment| moment.gpu_taps(height).map(|taps| (moment.index, taps))).collect();
             if let Some(colors) = unturned.and_then(|unturned| gpu.compose(images, (width, height), &unturned).ok()) {
-                return colors.iter().map(|color| TrueColor::new((color & 0xff) as u8, ((color >> 8) & 0xff) as u8, ((color >> 16) & 0xff) as u8)).collect();
+                return colors_of_the_gpu(&colors);
             }
         }
         compose_on_the_cpu(&moments, (width, height))
@@ -146,10 +142,18 @@ pub(super) struct DeepDive<'a> {
     count: usize,
     /// Renders the keyframe at a scale, twice the frame's size on each side (`None`: cancelled)
     render: Box<dyn Fn(crate::rendering::deep::Depth) -> Option<Vec<TrueColor>> + Sync + 'a>,
-    kept: std::sync::Mutex<Vec<(usize, std::sync::Arc<Vec<TrueColor>>)>>,
+    kept: std::sync::Mutex<Vec<KeptKeyframe>>,
     /// One keyframe is rendered at a time (each with all the threads)
     rendering: std::sync::Mutex<()>,
+    /// The GPU that composes the unturned frames, as for `DiveKeyframes` (bit for bit the CPU's; each kept keyframe is put on it when it is rendered)
+    gpu: Option<&'a GpuIterator>,
 }
+
+/// A keyframe a `DeepDive` keeps: its number and its image
+type KeptKeyframe = (usize, KeyframeImage);
+
+/// A keyframe image of a `DeepDive`, and the image on the GPU (if it could be put there)
+type KeyframeImage = (std::sync::Arc<Vec<TrueColor>>, Option<std::sync::Arc<rendering::gpu::ComposeImages>>);
 
 /// The keyframes a `DeepDive` keeps: the one in use and the two before it (for frames that are still composed from them)
 const KEPT_KEYFRAMES: usize = 3;
@@ -173,7 +177,13 @@ impl<'a> DeepDive<'a> {
     /// The dive of frames `width` x `height` from the scale `2^shallowest` to `2^deepest` (see `plan`), whose keyframes `render` renders
     pub(super) fn new((width, height): (usize, usize), (shallowest, deepest): (f64, f64), render: impl Fn(crate::rendering::deep::Depth) -> Option<Vec<TrueColor>> + Sync + 'a) -> DeepDive<'a> {
         let count = (shallowest - deepest).ceil().max(0.0) as usize + 1;
-        DeepDive { width, height, shallowest: crate::rendering::deep::Depth::from_log2(shallowest), count, render: Box::new(render), kept: std::sync::Mutex::new(Vec::new()), rendering: std::sync::Mutex::new(()) }
+        DeepDive { width, height, shallowest: crate::rendering::deep::Depth::from_log2(shallowest), count, render: Box::new(render), kept: std::sync::Mutex::new(Vec::new()), rendering: std::sync::Mutex::new(()), gpu: None }
+    }
+
+    /// This dive with `gpu` composing its unturned frames (as `DiveKeyframes::compose_moments` does: the same frames, bit for bit)
+    #[must_use]
+    pub(super) fn with_gpu(self, gpu: Option<&'a GpuIterator>) -> DeepDive<'a> {
+        DeepDive { gpu, ..self }
     }
 
     /// The number of keyframes
@@ -188,8 +198,8 @@ impl<'a> DeepDive<'a> {
     }
 
     /// Keyframe `index`, rendered if it is not kept (`None`: cancelled)
-    fn keyframe(&self, index: usize) -> Option<std::sync::Arc<Vec<TrueColor>>> {
-        let find = || self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(kept, _)| *kept == index).map(|(_, image)| std::sync::Arc::clone(image));
+    fn keyframe(&self, index: usize) -> Option<KeyframeImage> {
+        let find = || self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(kept, _)| *kept == index).map(|(_, image)| image.clone());
         if let Some(image) = find() {
             return Some(image);
         }
@@ -198,13 +208,15 @@ impl<'a> DeepDive<'a> {
             return Some(image); //(Rendered while this one waited)
         }
         let image = std::sync::Arc::new((self.render)(self.depth(index))?);
+        //(Without room on the GPU, the CPU composes its frames)
+        let on_gpu = self.gpu.and_then(|gpu| gpu.upload_images(std::slice::from_ref(&*image), self.width * 2, self.height * 2).ok()).map(std::sync::Arc::new);
         let mut kept = self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        kept.push((index, std::sync::Arc::clone(&image)));
+        kept.push((index, (std::sync::Arc::clone(&image), on_gpu.clone())));
         //(The deepest few: the frames go deeper)
         kept.sort_by_key(|(kept, _)| std::cmp::Reverse(*kept));
         kept.truncate(KEPT_KEYFRAMES);
         drop(kept);
-        Some(image)
+        Some((image, on_gpu))
     }
 
     /// The frame that averages the frames at the moments `(ln_scale, rotation)` (the natural logarithm of the scale), each composed from the keyframe of its
@@ -221,7 +233,15 @@ impl<'a> DeepDive<'a> {
             images.push(self.keyframe(index)?);
             placed.push((index, footprint, rotation));
         }
-        let moments: Vec<Moment> = placed.iter().zip(&images).map(|(&(index, footprint, rotation), image)| Moment::with((index, image), footprint, rotation, self.width)).collect();
+        let moments: Vec<Moment> = placed.iter().zip(&images).map(|(&(index, footprint, rotation), (image, _))| Moment::with((index, image), footprint, rotation, self.width)).collect();
+        //On the GPU when every moment is unturned and of one keyframe that is there (a frame between two keyframes, or turned, goes to the CPU)
+        if let (Some(gpu), Some((_, Some(on_gpu)))) = (self.gpu, images.first()) {
+            let one_keyframe = moments.iter().all(|moment| moment.index == moments[0].index);
+            let unturned: Option<Vec<(usize, Vec<Tap>)>> = moments.iter().map(|moment| moment.gpu_taps(self.height).map(|taps| (0, taps))).collect();
+            if let Some(colors) = unturned.filter(|_| one_keyframe).and_then(|unturned| gpu.compose(on_gpu, (self.width, self.height), &unturned).ok()) {
+                return Some(colors_of_the_gpu(&colors));
+            }
+        }
         Some(compose_on_the_cpu(&moments, (self.width, self.height)))
     }
 }
@@ -306,6 +326,20 @@ impl<'a> Moment<'a> {
         let columns = (sin.to_bits() == 0.0_f64.to_bits() && cos.to_bits() == 1.0_f64.to_bits()).then(|| TAPS_X.map(|tap_x| (0..width).map(|x| Tap::at((x as f64 + tap_x - width as f64 / 2.0) * footprint + big_width as f64 / 2.0, big_width)).collect()));
         Moment { index, image, footprint, sin, cos, columns }
     }
+
+    /// For an unturned moment, its taps as `GpuIterator::compose` takes them: the two taps of every column, then the two of every row, of frames `height` high
+    fn gpu_taps(&self, height: usize) -> Option<Vec<Tap>> {
+        let big_height = height * 2;
+        self.columns.as_ref().map(|columns| {
+            let rows = TAPS_Y.map(|tap_y| (0..height).map(move |y| Tap::at((y as f64 + tap_y - height as f64 / 2.0) * self.footprint + big_height as f64 / 2.0, big_height)));
+            columns.iter().flatten().copied().chain(rows.into_iter().flatten()).collect()
+        })
+    }
+}
+
+/// The colors of a frame that the GPU composed (8 bits each of red, green and blue in a word)
+fn colors_of_the_gpu(colors: &[u32]) -> Vec<TrueColor> {
+    colors.iter().map(|color| TrueColor::new((color & 0xff) as u8, ((color >> 8) & 0xff) as u8, ((color >> 16) & 0xff) as u8)).collect()
 }
 
 /// Where a tap falls along one side of a keyframe: the two pixels it is between and its share of the second, as `bilinear` works them out (the GPU's type, see
@@ -411,6 +445,32 @@ mod tests {
         }).collect()
     }
 
+    /// Times composing frames of a deep dive (`DeepDive::compose_moments`) at 1920 x 1080, one moment a frame (no motion blur), on the CPU and with the GPU: the
+    /// share of a frame's time that composing takes in a long deep video (issue #263). Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn time_composing_deep_dive_frames() {
+        let (width, height) = (1920, 1080);
+        let image: Vec<TrueColor> = (0..width * height * 4).map(|index| TrueColor::new((index % 251) as u8, (index % 241) as u8, (index % 239) as u8)).collect();
+        let gpu = GpuIterator::new().ok();
+        for gpu in [None, gpu.as_ref()] {
+            let dive = DeepDive::new((width, height), (-40.0, -80.0), |_| Some(image.clone())).with_gpu(gpu);
+            //(The keyframes first, so only composing is timed)
+            for k in 0..4 {
+                dive.compose_moments(&[((-40.0 - f64::from(k)) * std::f64::consts::LN_2, 0.0)]).unwrap();
+            }
+            for rotation in [0.0, 0.3] {
+                let started = std::time::Instant::now();
+                let frames = 60;
+                for frame in 0..frames {
+                    let log2 = -40.0 - 3.0 * f64::from(frame) / f64::from(frames);
+                    dive.compose_moments(&[(log2 * std::f64::consts::LN_2, rotation)]).unwrap();
+                }
+                println!("rotation {rotation}, {}: {:.1} ms a frame", if gpu.is_some() { "GPU" } else { "CPU" }, started.elapsed().as_secs_f64() * 1000.0 / f64::from(frames));
+            }
+        }
+    }
+
     #[test]
     fn a_deep_dive_renders_each_keyframe_once_keeps_a_few_and_composes_like_the_keyframes_of_a_shallow_dive() {
         //#263: keyframes at exact halvings, rendered as the frames reach them; within 64-bit floats the frames are bit for bit those of `DiveKeyframes`
@@ -478,6 +538,28 @@ mod tests {
             let differ = gpu_frame.iter().zip(&cpu_frame).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
             assert_eq!(differ, 0, "{moments:?}");
         }
+    }
+
+    #[test]
+    fn the_gpu_composes_bit_for_bit_the_frames_of_a_deep_dive_that_the_cpu_composes() {
+        //#263: the unturned frames of a deep dive (one keyframe for all moments) on the GPU, the others on the CPU: the same colors either way
+        let Ok(gpu) = GpuIterator::new() else {
+            eprintln!("no suitable GPU: skipped");
+            return;
+        };
+        let (width, height) = (90, 50);
+        let image_of = |depth: crate::rendering::deep::Depth| -> Vec<TrueColor> {
+            let seed = depth.exponent.unsigned_abs();
+            (0..width * height * 4).map(|index| TrueColor::new((index as u32 * 7 + seed * 31) as u8, (index as u32 * 13 + seed) as u8, (index as u32 / 3 + seed * 5) as u8)).collect()
+        };
+        let (cpu, on_gpu) = (DeepDive::new((width, height), (-1000.0, -1010.0), |depth| Some(image_of(depth))), DeepDive::new((width, height), (-1000.0, -1010.0), |depth| Some(image_of(depth))).with_gpu(Some(&gpu)));
+        let ln = |log2: f64| log2 * std::f64::consts::LN_2;
+        for moments in [vec![(ln(-1000.2), 0.0)], vec![(ln(-1003.1), 0.0), (ln(-1003.4), 0.0), (ln(-1003.6), 0.0), (ln(-1003.9), 0.0)], vec![(ln(-1004.5), 0.0), (ln(-1005.5), 0.0)], vec![(ln(-1006.3), 0.2)]] {
+            let (gpu_frame, cpu_frame) = (on_gpu.compose_moments(&moments).unwrap(), cpu.compose_moments(&moments).unwrap());
+            let differ = gpu_frame.iter().zip(&cpu_frame).filter(|(a, b)| (a.red, a.green, a.blue) != (b.red, b.green, b.blue)).count();
+            assert_eq!(differ, 0, "{moments:?}");
+        }
+        assert!(on_gpu.kept.lock().unwrap().iter().all(|(_, (_, on_gpu))| on_gpu.is_some()), "the keyframes are on the GPU");
     }
 
     #[test]

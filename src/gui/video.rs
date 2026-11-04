@@ -1035,7 +1035,8 @@ impl MandelbrotApp {
                 };
                 completed.then_some(colors)
             }));
-            let deep_dive = &deep_dive;
+            //(Its unturned frames composed on the GPU, bit for bit those of the CPU)
+            let deep_dive = &deep_dive.map(|dive| dive.with_gpu(gpu.as_deref()));
             std::thread::scope(|scope| {
                 //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
                 let (next_ref, steering_cancel) = (&next, &thread_cancel);
