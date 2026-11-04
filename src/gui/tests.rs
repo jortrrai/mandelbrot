@@ -355,11 +355,12 @@ fn the_controls_are_in_sections_with_the_image_quality_in_its_own_and_saving_wit
     wait_for_job(&mut app);
     let texts = controls_texts(&mut app);
     let position = |needle: &str| texts.iter().position(|t| t.starts_with(needle)).unwrap_or_else(|| panic!("{needle:?} is not drawn: {texts:?}"));
-    let sections = ["Navigation", "Places", "Image quality", "Colors", "Flights", "Performance", "Save image and video", "Benchmark"].map(&position);
+    let sections = ["View", "Places", "Julia sets and overlays", "Image quality", "Colors", "Flights", "Performance", "Save image and video", "Benchmark"].map(&position);
     assert!(sections.windows(2).all(|pair| pair[0] < pair[1]), "the sections in order: {sections:?}");
-    let [_, _, quality_section, colors, flights, performance, saving, benchmark] = sections;
-    //Every control in its section
-    for (needle, section, next) in [("Quality:", quality_section, colors), ("Max. iterations:", quality_section, colors), ("Coloring:", colors, flights), ("Color channels", colors, flights),
+    let [view, places, overlays, quality_section, colors, flights, performance, saving, benchmark] = sections;
+    //Every control in its section: the View section only changes the center, the scale and the rotation (review 9)
+    for (needle, section, next) in [("depth", view, places), ("rotation", view, places), ("Julia map", overlays, quality_section), ("Show orbit", overlays, quality_section), ("Center marker", overlays, quality_section),
+        ("Fast deep zoom (BLA)", performance, saving), ("Quality:", quality_section, colors), ("Max. iterations:", quality_section, colors), ("Coloring:", colors, flights), ("Color channels", colors, flights),
         ("Flight:", flights, performance), ("Frames ahead:", flights, performance), ("Saved image quality:", saving, benchmark), ("Video of the last flight", saving, benchmark)] {
         let at = position(needle);
         assert!(section < at && at < next, "{needle} is in its section");
@@ -2715,6 +2716,31 @@ fn while_a_deep_view_renders_its_old_image_follows_a_drag_and_a_zoom() {
 }
 
 #[test]
+fn a_right_click_and_a_double_click_in_a_deep_view_stay_in_it() {
+    //Review 9: a right click moved the 64-bit plane, which left the deep view for the deepest view of 64-bit floats (about 10^-12)
+    let mut app = manual_app(&Config::sized(64, 48, 200, 1));
+    let depth = crate::rendering::deep::Depth::parse("1e-400").unwrap();
+    app.go_to_exact(&(String::from("-0.7957429802875415"), String::from("0.18481461635741003")), depth);
+    app.render("Deep");
+    wait_for_job(&mut app);
+    let exact = |app: &MandelbrotApp| app.deep_shown().map(|deep| (deep.real.clone(), deep.imaginary.clone(), deep.scale));
+    let (real, imaginary, _) = exact(&app).expect("deep");
+    //Right-clicking 8 pixels right of the center and 4 above it: there exactly, at the same depth
+    app.handle_image_click(40.0, 20.0, true);
+    let pixel = depth.times(2.5 / 64.0);
+    let expected = (real.plus_scaled(8.0 * pixel.mantissa, pixel.exponent), imaginary.plus_scaled(4.0 * pixel.mantissa, pixel.exponent));
+    let (moved_real, moved_imaginary, scale) = exact(&app).expect("still deep after a right click");
+    assert_eq!((moved_real.to_decimal(), moved_imaginary.to_decimal()), (expected.0.to_decimal(), expected.1.to_decimal()));
+    assert_eq!(scale, depth);
+    wait_for_job(&mut app);
+    //A double click zooms in twice there, still deep
+    app.zoom_in_at(32.0, 24.0);
+    let (_, _, scale) = exact(&app).expect("still deep after a double click");
+    assert!((scale.log2() - depth.log2() + 1.0).abs() < 1e-9, "{scale:?}");
+    wait_for_job(&mut app);
+}
+
+#[test]
 fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
     //Issue #141: around c = i, a point of the boundary, which has structure at every depth
     let mut app = manual_app(&Config::sized(64, 48, 200, 4));
@@ -3865,11 +3891,11 @@ fn without_a_folder_of_places_the_built_in_ones_load_and_a_narrow_screen_hides_t
     //(A new area is measured in its first frame and drawn from the second)
     let _ = texts(&mut app);
     let narrow = texts(&mut app);
-    assert!(narrow.contains("☰ Controls") && !narrow.contains("Navigation"), "{narrow}");
+    assert!(narrow.contains("☰ Controls") && !narrow.contains("|View|"), "{narrow}");
     app.show_controls = true;
     let _ = texts(&mut app);
     let open = texts(&mut app);
-    assert!(open.contains("✕ Close") && open.contains("Navigation"), "{open}");
+    assert!(open.contains("✕ Close") && open.contains("|View|"), "{open}");
 }
 
 #[test]

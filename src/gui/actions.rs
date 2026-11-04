@@ -158,6 +158,12 @@ impl MandelbrotApp {
         if centering && self.lock_center {
             //Lock center keeps the center against the mouse, the right click too
             self.log(format!("Lock center is on: the view stays centered (clicked ({:.10}, {:.10}))", complex.x, complex.y));
+        } else if centering && self.deep_view().is_some() {
+            //Deeper than 64-bit floats: by exact steps of whole pixels in the deep view (moving the 64-bit plane would leave it, see `deep_view`)
+            let (width, height) = (self.p.pixel_plane.width as f64, self.p.pixel_plane.height as f64);
+            let (columns_right, rows_up) = ((f64::from(x) - width / 2.0).round() as i64, (height / 2.0 - f64::from(y)).round() as i64);
+            self.pan_deep(columns_right, rows_up);
+            self.render(&format!("Centered the view on ({:.10}, {:.10})", complex.x, complex.y));
         } else if centering {
             //Moves by whole pixels, so the samples of the pixels that stay visible are kept: the clicked point ends up within half a pixel of the center
             //(In a turned view, along the screen's axes: the point and the center turned back, see `ComplexPlane::unturned`)

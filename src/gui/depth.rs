@@ -108,12 +108,18 @@ impl MandelbrotApp {
                 .on_hover_text("How fast the view turns, in degrees per second (type a value; negative: clockwise; 360 is a whole turn)");
         });
         ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.rotation_in_degrees, true, "degrees").on_hover_text("Show and type the rotation in degrees (the angle stays the same)");
+            ui.selectable_value(&mut self.rotation_in_degrees, false, "radians").on_hover_text("Show and type the rotation in radians (the angle stays the same)");
+        });
+    }
+
+    /// *Center marker* and its size: a circle on the screen only
+    pub(super) fn center_marker_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
             ui.checkbox(&mut self.center_marker, "Center marker").on_hover_text("Draws a circle around the exact center of the view, to put a feature right in the middle before turning or diving around it. Only on the screen: saved images and videos do not show it");
             if self.center_marker {
                 ui.add(egui::Slider::new(&mut self.center_marker_radius, CENTER_MARKER_RADII).logarithmic(true).integer().suffix(" px").text("size")).on_hover_text("The radius of the circle on the screen");
             }
-            ui.selectable_value(&mut self.rotation_in_degrees, true, "degrees").on_hover_text("Show and type the rotation in degrees (the angle stays the same)");
-            ui.selectable_value(&mut self.rotation_in_degrees, false, "radians").on_hover_text("Show and type the rotation in radians (the angle stays the same)");
         });
     }
 
@@ -172,6 +178,10 @@ impl MandelbrotApp {
             }
             ui.checkbox(&mut self.lock_center, "Lock center").on_hover_text("The mouse keeps the center of the view too: the wheel zooms around the center instead of the cursor, and dragging and right-clicking do not move the view");
         });
+    }
+
+    /// The speed of views deeper than 64-bit floats: *Fast deep zoom* and *Fast deep GPU math* (both off at first, they change some pixels)
+    pub(super) fn deep_performance_controls(&mut self, ui: &mut egui::Ui) {
         let response = ui.checkbox(&mut self.fast_deep, "Fast deep zoom (BLA)").on_hover_text("Off by default. Deeper than ×10¹³, where 64-bit numbers run out and the deep renderer takes over, skip most of the iterations by bilinear approximation: several times as fast, up to 40 times inside the set, while about 1 pixel in 100 gets another color in the most chaotic parts (fewer than a move of a thousandth of a pixel changes). Also for saved images and videos.");
         if response.changed() && self.deep_shown().is_some() {
             self.render(&format!("Turned fast deep zoom {}", if self.fast_deep { "on" } else { "off" }));

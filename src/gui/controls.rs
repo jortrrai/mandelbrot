@@ -27,13 +27,18 @@ impl MandelbrotApp {
         self.progress_controls(ui);
         self.video_progress_ui(ui);
         //The sections: the ones used most are open at first; a click on a title opens or closes it
-        self.section(ui, "Navigation", true, |app, ui| {
+        self.section(ui, "View", true, |app, ui| {
             app.move_controls(ui);
             ui.separator();
             app.zoom_controls(ui);
             app.go_to_view_controls(ui);
         });
         self.section(ui, "Places", true, Self::places_controls);
+        //(The View section only changes the center, the scale and the rotation: what is drawn over the view, and the Julia sets, are here)
+        self.section(ui, "Julia sets and overlays", false, |app, ui| {
+            app.julia_controls(ui);
+            app.center_marker_controls(ui);
+        });
         self.section(ui, "Image quality", true, Self::quality_controls);
         self.section(ui, "Colors", false, Self::color_controls);
         self.section(ui, "Flights", false, |app, ui| {
@@ -89,7 +94,6 @@ impl MandelbrotApp {
         self.sharing_controls(ui);
         self.depth_controls(ui);
         self.rotation_controls(ui);
-        self.julia_controls(ui);
     }
 
     /// How flights fly: the pace, the route and the rendering of their frames, frames ahead, and blending and blurring their frames
@@ -180,6 +184,9 @@ impl MandelbrotApp {
             ui.add_enabled(self.render_neighborhood, egui::DragValue::new(&mut self.neighborhood_margin).range(10..=5000).speed(5).suffix("% per side"))
                 .on_hover_text("How far the neighborhood reaches past every side, in percent of the view (type a value; 100% is one view to every side). A large neighborhood takes longer and gets a lower resolution, so it stays within 8192 pixels on a side");
         });
+        ui.separator();
+        self.deep_performance_controls(ui);
+        ui.separator();
         ui.checkbox(&mut self.immersion, "Immersion").on_hover_text("Never shows black where nothing is rendered yet: while you move the view, and during flights, the view only moves once the new view has at least a complete low-resolution frame. Off: the view follows at once and fills in as the render goes (best effort).");
     }
 

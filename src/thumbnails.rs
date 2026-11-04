@@ -87,6 +87,16 @@ impl ThumbnailRequest {
         feed(&[u8::from(self.palette.stretch)]);
         feed(&(self.width as u64).to_le_bytes());
         feed(&(self.height as u64).to_le_bytes());
+        //(A place deeper than 64-bit floats is where its exact center is, review 9)
+        if let Some((real, imaginary)) = &self.location.exact {
+            feed(real.as_bytes());
+            feed(b",");
+            feed(imaginary.as_bytes());
+        }
+        if let Some(depth) = self.location.deep_scale {
+            feed(&depth.mantissa.to_bits().to_le_bytes());
+            feed(&depth.exponent.to_le_bytes());
+        }
         feed(&RENDER_REVISION.to_le_bytes());
         hash
     }
@@ -106,8 +116,27 @@ pub fn render_thumbnail(request: &ThumbnailRequest, orbit_radius: f64, cancel: &
         Coloring::Hsv => TrueColor::new_from_hsv_colors,
         Coloring::Bernstein => TrueColor::new_from_bernstein_polynomials,
     };
+    if let Some(exact) = &request.location.exact {
+        return render_deep_thumbnail(request, exact, &set, coloring_function, cancel);
+    }
     let mut last = None;
     let completed = Render::new(&plane, &set, request.width, request.height, coloring_function).supersampling(THUMBNAIL_SAMPLES).cancel_with(cancel).run( |colors, _| {
+        last = Some(colors.to_vec());
+    });
+    if completed { last } else { None }
+}
+
+/// `render_thumbnail` of a place saved deeper than 64-bit floats can show: rendered by the deep renderer at its exact center, as going there renders it
+/// (review 9: the 64-bit renderer drew the nearest 64-bit center, somewhere else)
+fn render_deep_thumbnail(request: &ThumbnailRequest, (real, imaginary): &(String, String), set: &MandelbrotSet, coloring_function: fn(f64, f64) -> TrueColor, cancel: &AtomicBool) -> Option<Vec<TrueColor>> {
+    use crate::rendering::deep;
+    let depth = request.location.deep_scale.unwrap_or_else(|| deep::Depth::from_f64(request.location.scale));
+    let bits = deep::bits_for_depth(depth, request.width);
+    let (real, imaginary) = (deep::Fixed::parse(real, bits)?, deep::Fixed::parse(imaginary, bits)?);
+    let color_of = |position: f64| set.interpolated_color(position, |count| set.color(coloring_function, count));
+    let orbit = deep::SharedOrbit::new(&real, &imaginary);
+    let mut last = None;
+    let completed = deep::render_layers_on(set, (&orbit, (0.0, 0.0)), (depth, request.location.rotation.to_radians()), (request.width, request.height), THUMBNAIL_SAMPLES, &color_of, false, None, cancel, |colors, _| {
         last = Some(colors.to_vec());
     });
     if completed { last } else { None }
@@ -177,6 +206,32 @@ mod tests {
 
     fn request() -> ThumbnailRequest {
         ThumbnailRequest { location: Location { real: -0.7498100000000001, imaginary: -0.020300000000000054, scale: 0.02, max_iterations: 300, rotation: 0.0, julia: None, exact: None, deep_scale: None }, coloring: Coloring::Bernstein, color_channels: ColorChannelMapping::RGB, palette: ColorCycle::CYCLE, width: 36, height: 24 }
+    }
+
+    #[test]
+    fn a_thumbnail_of_a_place_deeper_than_64_bit_floats_shows_its_exact_center() {
+        //Review 9: next to c = i at 10^-400 (structure at every depth); the 64-bit renderer drew the nearest 64-bit center, at the smallest 64-bit scale
+        let depth = crate::rendering::deep::Depth::parse("1e-400").unwrap();
+        let exact = (String::from("3e-401"), format!("1.{}2", "0".repeat(400)));
+        let mut deep = request();
+        deep.location = Location { real: 0.0, imaginary: 1.0, scale: f64::MIN_POSITIVE, max_iterations: 3000, exact: Some(exact.clone()), deep_scale: Some(depth), ..deep.location };
+        let colors = render_thumbnail(&deep, 2.0, &AtomicBool::new(false)).expect("not cancelled");
+        assert_eq!(colors.len(), 36 * 24);
+        let distinct: std::collections::BTreeSet<(u8, u8, u8)> = colors.iter().map(|color| (color.red, color.green, color.blue)).collect();
+        assert!(distinct.len() > 10, "the place has structure: {} colors", distinct.len());
+        //The same as the deep renderer's image of the place
+        let mut set = MandelbrotSet::new(3000, 2.0);
+        set.palette = deep.palette;
+        let color_of = |position: f64| set.interpolated_color(position, |count| set.color(TrueColor::new_from_bernstein_polynomials, count));
+        let bits = crate::rendering::deep::bits_for_depth(depth, 36);
+        let orbit = crate::rendering::deep::SharedOrbit::new(&crate::rendering::deep::Fixed::parse(&exact.0, bits).unwrap(), &crate::rendering::deep::Fixed::parse(&exact.1, bits).unwrap());
+        let mut expected = Vec::new();
+        crate::rendering::deep::render_layers_on(&set, (&orbit, (0.0, 0.0)), (depth, 0.0), (36, 24), THUMBNAIL_SAMPLES, &color_of, false, None, &AtomicBool::new(false), |layer, _| expected = layer.to_vec());
+        assert!(colors.iter().zip(&expected).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)));
+        //Another exact center is another thumbnail
+        let mut other = deep.clone();
+        other.location.exact = Some((String::from("4e-401"), exact.1));
+        assert_ne!(deep.key(), other.key());
     }
 
     #[test]
