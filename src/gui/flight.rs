@@ -262,6 +262,13 @@ impl Leg {
         Leg { from, to, length: (r1 - r0) / RHO, pan: Some((u1, r0)), straight: None, deep: None }
     }
 
+    /// The pure zoom from keyframe `from` to keyframe `to` at one center, in logarithms (see `deep_at`), however deep they are
+    fn zoom_in_logarithms(from: &super::sequence::Keyframe, to: &super::sequence::Keyframe) -> Leg {
+        let (ln_from, ln_to) = (from.depth().log2() * std::f64::consts::LN_2, to.depth().log2() * std::f64::consts::LN_2);
+        let clamp = |camera: Camera| Camera { scale: camera.scale.max(f64::MIN_POSITIVE), ..camera };
+        Leg { from: clamp(from.camera()), to: clamp(to.camera()), length: (ln_to - ln_from).abs() / RHO, pan: None, straight: None, deep: Some(DeepLeg { ln_from, ln_to, r1: 0.0 }) }
+    }
+
     /// This leg with its destination at the scale `e^ln_to` instead, deeper than 64-bit floats reach (issue #263): the same path, with its scales and the
     /// part of the pan still to go computed as logarithms and in units of the scale, which do not underflow (see `deep_at`)
     fn deeper(&self, ln_to: f64) -> Leg {
@@ -412,7 +419,9 @@ impl Flight {
             let first = sequence.keyframes.first().map_or(Camera { x: -0.75, y: 0.0, scale: 1.0 }, super::sequence::Keyframe::camera);
             return Flight { leg: Leg::new(first, first), pace: Pace::Constant, duration: Duration::from_millis(1), timing, sequence: None };
         }
-        let legs: Vec<Leg> = sequence.keyframes.windows(2).map(|pair| Leg::new(pair[0].camera(), pair[1].camera())).collect();
+        //A dive along one exact center (see `Sequence::shared_exact`): pure zooms in logarithms, also beyond 64-bit floats (issue #263)
+        let along_one_center = sequence.shared_exact().is_some();
+        let legs: Vec<Leg> = sequence.keyframes.windows(2).map(|pair| if along_one_center { Leg::zoom_in_logarithms(&pair[0], &pair[1]) } else { Leg::new(pair[0].camera(), pair[1].camera()) }).collect();
         let starts: Vec<f64> = sequence.seconds.iter().scan(0.0, |start, seconds| {
             let this = *start;
             *start += seconds;
@@ -460,10 +469,11 @@ impl Flight {
 
     /// The camera `elapsed` after the start, also deeper than 64-bit floats (see `DeepCamera`)
     pub fn deep_at(&self, elapsed: Duration) -> DeepCamera {
-        if self.sequence.is_some() {
-            let camera = self.camera_at(elapsed);
-            let to = self.camera_at(self.duration);
-            return DeepCamera { right: (camera.x - to.x) / camera.scale, up: (camera.y - to.y) / camera.scale, ln_scale: camera.scale.ln() };
+        if let Some(path) = &self.sequence {
+            //(From the leg's keyframe: for a dive along one exact center, its center)
+            let (index, share) = path.transition_at(elapsed.as_secs_f64());
+            let leg = &path.legs[index];
+            return leg.deep_at(share * leg.length);
         }
         self.leg.deep_at(self.pace.ease(elapsed.as_secs_f64() / self.duration.as_secs_f64()) * self.leg.length)
     }
@@ -521,7 +531,7 @@ mod tests {
     #[test]
     fn a_sequence_passes_every_keyframe_at_its_time_and_a_dive_never_moves_sideways() {
         use super::super::sequence::{Keyframe, Sequence};
-        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { julia: None, real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false, rotation: 0.0 };
+        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { julia: None, exact: None, depth: None, real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false, rotation: 0.0 };
         let sequence = Sequence { keyframes: vec![keyframe(1.0, 1.0, 300), keyframe(1e-3, 0.5, 1000), keyframe(1e-6, 4.0, 5000)], seconds: vec![4.0, 6.0] };
         let flight = Flight::of_sequence(sequence.clone(), (3.0, 1.0));
         assert_eq!(flight.duration(), Duration::from_secs(10));

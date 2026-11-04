@@ -36,9 +36,20 @@ pub(super) struct Keyframe {
     /// The Julia set of the keyframe, by its parameter c (issue #229); none: the Mandelbrot set. All keyframes of a sequence are in the same set
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) julia: Option<(f64, f64)>,
+    /// The exact center of a keyframe in a deep view, as decimal text (see `deep_view`; then `real` and `imaginary` are the nearest 64-bit numbers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) exact: Option<(String, String)>,
+    /// The scale of a keyframe deeper than 64-bit floats reach (issue #263; then `scale` is the smallest normal 64-bit float)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) depth: Option<crate::rendering::deep::Depth>,
 }
 
 impl Keyframe {
+    /// The scale, also beyond 64-bit floats
+    pub(super) fn depth(&self) -> crate::rendering::deep::Depth {
+        self.depth.unwrap_or_else(|| crate::rendering::deep::Depth::from_f64(self.scale))
+    }
+
     pub(super) const fn camera(&self) -> Camera {
         Camera { x: self.real, y: self.imaginary, scale: self.scale }
     }
@@ -56,6 +67,24 @@ pub(super) struct Sequence {
 }
 
 impl Sequence {
+    /// The exact center of a sequence that dives along one (issue #263): its keyframes in deep views all at this center, and the others (above 64-bit
+    /// floats' depth) at its nearest 64-bit point, as the depth control keeps them (see `depth`). `None` for any other sequence, also one without deep
+    /// keyframes
+    pub(super) fn shared_exact(&self) -> Option<(String, String)> {
+        let first = self.keyframes.iter().find_map(|keyframe| keyframe.exact.clone())?;
+        let deepest = self.keyframes.iter().map(Keyframe::depth).min_by(|a, b| a.log2().total_cmp(&b.log2()))?;
+        let bits = crate::rendering::deep::bits_for_depth(deepest, 1) + 64;
+        let parse = |exact: &(String, String)| crate::rendering::deep::Fixed::parse(&exact.0, bits).zip(crate::rendering::deep::Fixed::parse(&exact.1, bits));
+        let center = parse(&first)?;
+        let nearest = (center.0.to_f64(), center.1.to_f64());
+        self.keyframes.iter().all(|keyframe| keyframe.exact.as_ref().map_or_else(|| (keyframe.real.to_bits(), keyframe.imaginary.to_bits()) == (nearest.0.to_bits(), nearest.1.to_bits()), |exact| parse(exact).is_some_and(|other| other == center))).then_some(first)
+    }
+
+    /// The scale of its deepest keyframe
+    pub(super) fn deepest(&self) -> Option<crate::rendering::deep::Depth> {
+        self.keyframes.iter().map(Keyframe::depth).min_by(|a, b| a.log2().total_cmp(&b.log2()))
+    }
+
     /// Whether it can be flown: at least two keyframes, and a positive time for every transition
     pub(super) fn is_complete(&self) -> bool {
         self.keyframes.len() >= 2 && self.seconds.len() == self.keyframes.len() - 1 && self.seconds.iter().all(|seconds| seconds.is_finite() && *seconds > 0.0)
@@ -80,7 +109,7 @@ impl MandelbrotApp {
     /// The current view as a keyframe: its exact center (see `depth`), scale, iteration limit and colors
     fn current_keyframe(&self) -> Keyframe {
         let location = self.current_point(String::new(), String::new()).location;
-        Keyframe { real: location.real, imaginary: location.imaginary, scale: location.scale, max_iterations: location.max_iterations, divide: self.m.palette.divide, offset: self.m.palette.offset, stretch: self.m.palette.stretch, rotation: self.c.rotation(), julia: location.julia }
+        Keyframe { real: location.real, imaginary: location.imaginary, scale: location.scale, max_iterations: location.max_iterations, divide: self.m.palette.divide, offset: self.m.palette.offset, stretch: self.m.palette.stretch, rotation: self.c.rotation(), julia: location.julia, exact: location.exact, depth: location.deep_scale }
     }
 
     /// The sequence of the keyframes and the typed times (a time that is not a positive number makes it incomplete)
@@ -107,6 +136,10 @@ impl MandelbrotApp {
         self.c.set_view(&crate::complex_plane::View::new(keyframe.real, keyframe.imaginary, keyframe.scale));
         self.c.set_rotation(keyframe.rotation);
         self.depth_center = Some(crate::complex::Complex::new(keyframe.real, keyframe.imaginary));
+        //(A keyframe in a deep view: there again, exactly)
+        if let Some(exact) = &keyframe.exact {
+            self.go_to_exact(exact, keyframe.depth());
+        }
         (self.m.max_iterations, self.max_iterations_input, self.m.palette) = (keyframe.max_iterations, keyframe.max_iterations, keyframe.palette());
         self.render(&format!("Went to keyframe {}", index + 1));
     }
@@ -123,6 +156,7 @@ impl MandelbrotApp {
             self.log("A sequence stays in one set: its keyframes are partly in a Julia set and partly elsewhere (or in different Julia sets); make them all in the same set");
             return;
         }
+        let (sequence_exact, sequence_deepest) = (sequence.shared_exact(), sequence.deepest());
         let flight = super::video::VideoFlight {
             from: first.camera(),
             to: last.camera(),
@@ -137,8 +171,9 @@ impl MandelbrotApp {
             rotations: (first.rotation, last.rotation),
             julia: first.julia,
             sequence: Some(sequence),
-            to_exact: None,
-            to_depth: None,
+            //(A dive along one exact center, also deeper than 64-bit floats: its deep frames there, see `Sequence::shared_exact`)
+            to_exact: sequence_exact.clone(),
+            to_depth: sequence_exact.as_ref().and(sequence_deepest).filter(|depth| !depth.to_f64().is_normal()),
         };
         self.fly_video_flight(&flight);
     }

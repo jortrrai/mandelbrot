@@ -784,7 +784,9 @@ impl MandelbrotApp {
         //from one orbit of the destination, computed once with the bits of the deepest frame (see `rendering::deep::SharedOrbit`, issue #263)
         let shared_orbit = flight.to_exact.as_ref().and_then(|exact| {
             use crate::rendering::deep::{bits_for_depth, Depth, Fixed, SharedOrbit};
-            let bits = bits_for_depth(flight.to_depth.unwrap_or_else(|| Depth::from_f64(flight.to.scale)), width);
+            //(With the bits of the deepest frame: of a sequence, its deepest keyframe)
+            let deepest = flight.sequence.as_ref().and_then(super::sequence::Sequence::deepest).or(flight.to_depth).unwrap_or_else(|| Depth::from_f64(flight.to.scale));
+            let bits = bits_for_depth(deepest, width);
             Some(SharedOrbit::new(&Fixed::parse(&exact.0, bits)?, &Fixed::parse(&exact.1, bits)?))
         });
         //A dive into an exact center, also deeper than 64-bit floats: its keyframes rendered when the frames reach their depth (see `dive_keyframes::DeepDive`)

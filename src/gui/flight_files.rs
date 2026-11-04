@@ -263,7 +263,7 @@ impl super::MandelbrotApp {
         let point = crate::points_of_interest::PointOfInterest {
             name: flight.name.clone(),
             description: String::new(),
-            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, rotation: flight.rotations.1.to_degrees(), julia: flight.julia, exact: None, deep_scale: None },
+            location: crate::points_of_interest::Location { real: flight.to.x, imaginary: flight.to.y, scale: flight.to.scale, max_iterations: flight.limits.1, rotation: flight.rotations.1.to_degrees(), julia: flight.julia, exact: flight.to_exact.clone(), deep_scale: flight.to_depth },
             appearance: None,
             file_name: String::new(),
         };

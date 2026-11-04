@@ -2765,6 +2765,67 @@ fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
 }
 
 #[test]
+fn a_sequence_of_keyframes_along_one_exact_center_dives_past_10_to_the_minus_308_in_its_video() {
+    //Issue #263: keyframes made with the depth control along one exact center, at 10^-5 (64-bit), 10^-200 and 10^-400 (deep views): the sequence is a
+    //dive in logarithms, its video renders the deep frames at that center, and going to a deep keyframe opens the deep view there again
+    let power: u32 = 400;
+    let (real, imaginary) = (format!("3e-{}", power + 1), format!("1.{}2", "0".repeat(power as usize)));
+    let place = format!(r#"{{ "format_version": 1, "name": "Deep", "location": {{ "center": {{ "real": 0.0, "imaginary": 1.0, "real_text": "{real}", "imaginary_text": "{imaginary}" }}, "scale": 2.2250738585072014e-308, "scale_text": "1e-{power}", "max_iterations": 20000 }} }}"#);
+    let (mut app, folder) = app_with_points(&[("deep.json", &place)]);
+    app.pace = super::flight::Pace::NoFlight;
+    app.go_to_point_of_interest(0);
+    assert!(app.deep_view().is_some());
+    (app.max_iterations_input, app.m.max_iterations) = (20_000, 20_000);
+    //The keyframes, the shallowest first: 10^-5, 10^-200, 10^-400
+    assert!(app.set_depth_power(5.0));
+    app.add_keyframe();
+    assert!(app.set_depth_power(200.0));
+    app.add_keyframe();
+    assert!(app.set_depth_power(400.0));
+    app.add_keyframe();
+    assert!(app.sequence_keyframes[0].exact.is_none() && app.sequence_keyframes[1].exact.is_some() && app.sequence_keyframes[2].depth.is_some());
+    app.sequence_seconds = vec![String::from("2"), String::from("2")];
+    let sequence = app.sequence();
+    assert!(sequence.shared_exact().is_some(), "one exact center");
+    //Going to the deepest keyframe: the deep view at 10^-400 again
+    app.c.set_view(&View::new(-0.75, 0.0, 1.0));
+    app.go_to_keyframe(2);
+    assert!((app.shown_depth().log10() + 400.0).abs() < 1e-6, "{:?}", app.shown_depth());
+    //Its video
+    app.video_folder = folder.join("saved");
+    app.save_size.choice = super::save_size::SaveSizeChoice::Custom;
+    (app.save_size.custom_width, app.save_size.custom_height, app.image_supersampling_amount, app.video_fps, app.video_pngs, app.video_speed) = (48, 32, 1, 10, true, 100);
+    app.fly_sequence();
+    let flight = app.last_flight.clone().unwrap();
+    assert!(flight.to_exact.is_some() && flight.to_depth.is_some(), "the flight knows its exact center and depth");
+    app.skip_flight();
+    app.start_video();
+    let message = wait_for_video(&mut app);
+    assert!(message.starts_with("Video of the flight:"), "{message}");
+    let frames_folder = std::fs::read_dir(folder.join("saved")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).find(|path| path.is_dir()).unwrap();
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(&frames_folder).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    frames.sort();
+    let colors_of = |path: &std::path::Path| {
+        let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap())).read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        reader.next_frame(&mut pixels).unwrap();
+        pixels.chunks(3).map(|pixel| (pixel[0], pixel[1], pixel[2])).collect::<std::collections::BTreeSet<_>>().len()
+    };
+    let mut deep_frames = 0;
+    for frame in &frames {
+        let view = crate::image_metadata::view_of_png(frame).unwrap();
+        if view.location.exact.is_some() {
+            deep_frames += 1;
+            assert!(colors_of(frame) > 5, "{}, at 10^{:.0}: {} colors", frame.display(), view.location.depth_log2() / std::f64::consts::LOG2_10, colors_of(frame));
+        }
+    }
+    assert!(deep_frames * 2 > frames.len(), "most frames are deeper than 64-bit floats: {deep_frames} of {}", frames.len());
+    let last = crate::image_metadata::view_of_png(frames.last().unwrap()).unwrap();
+    assert!((last.location.depth_log2() / std::f64::consts::LOG2_10 + f64::from(power)).abs() < 1e-6, "the last frame is the last keyframe: {:?}", last.location.deep_scale);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_flight_in_the_window_to_a_deep_place_shows_deep_frames_on_the_way() {
     //Issue #263: frames of a flight deeper than 64-bit floats were their 64-bit stand-ins (where every pixel has the same coordinates: one color); now
     //the deep renderer draws them, from the destination's orbit, with the camera in logarithms (see `flight_job`)
