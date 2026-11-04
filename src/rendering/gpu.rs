@@ -208,6 +208,8 @@ pub struct GpuIterator {
     name: String,
     /// The buffers of finished dispatches, for the next ones (several renders feed the GPU at once)
     spare: std::sync::Mutex<Vec<Buffers>>,
+    /// The sums and the read-back buffer of the last frame composed, for the next frames of its size (see `compose`)
+    compose_buffers: std::sync::Mutex<Option<(u64, wgpu::Buffer, wgpu::Buffer)>>,
 }
 
 impl GpuIterator {
@@ -312,7 +314,7 @@ impl GpuIterator {
             })
         };
         let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
-        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), mask, mask_works: std::sync::atomic::AtomicBool::new(false), deep, deep32, deep32_works: std::sync::atomic::AtomicBool::new(false), deep_works: std::sync::atomic::AtomicBool::new(false), layout, compose, compose_layout, name, spare: std::sync::Mutex::new(Vec::new()) })
+        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), mask, mask_works: std::sync::atomic::AtomicBool::new(false), deep, deep32, deep32_works: std::sync::atomic::AtomicBool::new(false), deep_works: std::sync::atomic::AtomicBool::new(false), layout, compose, compose_layout, name, spare: std::sync::Mutex::new(Vec::new()), compose_buffers: std::sync::Mutex::new(None) })
     }
 
     /// Puts the keyframe images of a dive (each `width` x `height` pixels) on the GPU, for `compose`
@@ -336,13 +338,13 @@ impl GpuIterator {
         Ok(ComposeImages { buffer, width: u32::try_from(width).map_err(|_| String::from("too wide"))?, pixels: u32::try_from(pixels).map_err(|_| String::from("too large"))? })
     }
 
-    /// The `width` x `height` frame that averages the colors `moments` give its pixels (see `gpu_compose.wgsl`), as red | green << 8 | blue << 16. A moment is the
+    /// The `width` x `height` frame that averages the colors `moments` give its pixels (see `gpu_compose.wgsl`). A moment is the
     /// index of its keyframe in `images` and its taps: `2 * width` column taps (tap x 0.25, then 0.75), then `2 * height` row taps. The number of moments is
     /// a power of two (then the average is exact)
     ///
     /// # Errors
     /// A failure of the GPU, or a number of moments that is not a power of two: the CPU composes the frame then
-    pub fn compose(&self, images: &ComposeImages, (width, height): (usize, usize), moments: &[(usize, Vec<ComposeTap>)]) -> Result<Vec<u32>, String> {
+    pub fn compose(&self, images: &ComposeImages, (width, height): (usize, usize), moments: &[(usize, Vec<ComposeTap>)]) -> Result<Vec<TrueColor>, String> {
         if !moments.len().is_power_of_two() {
             return Err(String::from("the moments are not a power of two"));
         }
@@ -368,34 +370,49 @@ impl GpuIterator {
             buffer
         };
         let (params, moment_buffer, tap_buffer) = (with_data("compose params", bytemuck::cast_slice(&params)), with_data("compose moments", bytemuck::cast_slice(&moment_words)), with_data("compose taps", bytemuck::cast_slice(&taps)));
-        let sums = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose sums"), size: size.max(16), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-        let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose read"), size: size.max(16), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.compose_layout, entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: moment_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: tap_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: images.buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: sums.as_entire_binding() },
-        ] });
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&self.compose);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(pixels.div_ceil(64).clamp(1, COMPOSE_WORKGROUPS), 1, 1);
+        //(The two frame-sized buffers of the last frame again, if they fit: creating them for every frame, and wgpu clearing them, cost more than composing,
+        //as for the dispatches in #212. The shader writes every pixel's sum, so what they held does not matter)
+        let mut kept = self.compose_buffers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kept.as_ref().is_some_and(|(kept_size, _, _)| *kept_size != size) {
+            *kept = None;
         }
-        encoder.copy_buffer_to_buffer(&sums, 0, &read, 0, size);
-        let index = self.queue.submit([encoder.finish()]);
-        read.slice(..size).map_async(wgpu::MapMode::Read, |_| {});
-        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
-        errors.into_iter().flatten().next().map_or(Ok(()), |error| Err(format!("{}: {error}", self.name)))?;
-        self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
-        let out = {
-            let view = read.slice(..size).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
-            bytemuck::cast_slice::<u8, u32>(&view).to_vec()
-        };
-        read.unmap();
-        Ok(out)
+        let (_, sums, read) = &*kept.get_or_insert_with(|| (size, self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose sums"), size: size.max(16), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
+            self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose read"), size: size.max(16), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })));
+        let composed = (|| -> Result<Vec<TrueColor>, String> {
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.compose_layout, entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: moment_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tap_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: images.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: sums.as_entire_binding() },
+            ] });
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                pass.set_pipeline(&self.compose);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.dispatch_workgroups(pixels.div_ceil(64).clamp(1, COMPOSE_WORKGROUPS), 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(sums, 0, read, 0, size);
+            let index = self.queue.submit([encoder.finish()]);
+            read.slice(..size).map_async(wgpu::MapMode::Read, |_| {});
+            let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+            errors.into_iter().flatten().next().map_or(Ok(()), |error| Err(format!("{}: {error}", self.name)))?;
+            self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
+            let out = {
+                let view = read.slice(..size).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
+                //(8 bits each of red, green and blue in a word, straight to colors: one pass over the frame)
+                bytemuck::cast_slice::<u8, u32>(&view).iter().map(|color| TrueColor::new((color & 0xff) as u8, ((color >> 8) & 0xff) as u8, ((color >> 16) & 0xff) as u8)).collect()
+            };
+            read.unmap();
+            Ok(out)
+        })();
+        //(A failure may leave the read-back buffer mapped: new ones for the next frame)
+        if composed.is_err() {
+            *kept = None;
+        }
+        drop(kept);
+        composed
     }
 
     /// The name and the backend of the GPU

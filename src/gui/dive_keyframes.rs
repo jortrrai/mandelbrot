@@ -118,7 +118,7 @@ impl DiveKeyframes {
         if let (Some(gpu), Some(images)) = (gpu, &self.on_gpu) {
             let unturned: Option<Vec<(usize, Vec<Tap>)>> = moments.iter().map(|moment| moment.gpu_taps(height).map(|taps| (moment.index, taps))).collect();
             if let Some(colors) = unturned.and_then(|unturned| gpu.compose(images, (width, height), &unturned).ok()) {
-                return colors_of_the_gpu(&colors);
+                return colors;
             }
         }
         compose_on_the_cpu(&moments, (width, height))
@@ -260,7 +260,7 @@ impl<'a> DeepDive<'a> {
             let one_keyframe = moments.iter().all(|moment| moment.index == moments[0].index);
             let unturned: Option<Vec<(usize, Vec<Tap>)>> = moments.iter().map(|moment| moment.gpu_taps(self.height).map(|taps| (0, taps))).collect();
             if let Some(colors) = unturned.filter(|_| one_keyframe).and_then(|unturned| gpu.compose(on_gpu, (self.width, self.height), &unturned).ok()) {
-                return Some(colors_of_the_gpu(&colors));
+                return Some(colors);
             }
         }
         Some(compose_on_the_cpu(&moments, (self.width, self.height)))
@@ -356,11 +356,6 @@ impl<'a> Moment<'a> {
             columns.iter().flatten().copied().chain(rows.into_iter().flatten()).collect()
         })
     }
-}
-
-/// The colors of a frame that the GPU composed (8 bits each of red, green and blue in a word)
-fn colors_of_the_gpu(colors: &[u32]) -> Vec<TrueColor> {
-    colors.iter().map(|color| TrueColor::new((color & 0xff) as u8, ((color >> 8) & 0xff) as u8, ((color >> 16) & 0xff) as u8)).collect()
 }
 
 /// Where a tap falls along one side of a keyframe: the two pixels it is between and its share of the second, as `bilinear` works them out (the GPU's type, see
