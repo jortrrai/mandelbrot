@@ -340,6 +340,9 @@ pub struct Reference {
     length: usize,
     /// `levels[l][k]`: the approximation of the `2^(l + 1)` steps from step `1 + k · 2^(l + 1)` of the orbit
     levels: Vec<Vec<Bla>>,
+    /// `widest[at]`: the largest square of a radius of the approximations from step `at` (0 without any): a difference at least that large takes none,
+    /// which `skip` sees in one comparison (most steps near the escape, where the differences are large)
+    widest: Vec<f64>,
 }
 
 impl Reference {
@@ -354,7 +357,13 @@ impl Reference {
     pub fn of(m: &MandelbrotSet, (orbit, residuals): OrbitAndResiduals, max_offset: f64, approximate: bool) -> Reference {
         let length = orbit.len().min(m.max_iterations as usize + 1);
         let levels = if approximate { Self::table(&orbit[..length], max_offset, m.orbit_radius) } else { Vec::new() };
-        Reference { orbit, residuals, length, levels }
+        let widest = if levels.is_empty() { Vec::new() } else {
+            (0..length).map(|at| if at == 0 { 0.0 } else {
+                let aligned = ((at - 1).trailing_zeros() as usize).min(levels.len());
+                (1..=aligned).filter_map(|level| levels[level - 1].get((at - 1) >> level)).map(|bla| bla.radius_squared).fold(0.0, f64::max)
+            }).collect()
+        };
+        Reference { orbit, residuals, length, levels, widest }
     }
 
     /// The points of the orbit of this view
@@ -407,6 +416,10 @@ impl Reference {
     /// The longest approximation that a difference of `|z|² = size_squared` at step `at` of the orbit may take, of at most `left` steps: it and its steps
     fn skip(&self, at: usize, size_squared: f64, left: u32) -> Option<(&Bla, u32)> {
         if at == 0 || self.levels.is_empty() {
+            return None;
+        }
+        //(Larger than every approximation from here: none of them, as the search below would find)
+        if self.widest.get(at).is_none_or(|widest| size_squared >= *widest) {
             return None;
         }
         let aligned = ((at - 1).trailing_zeros() as usize).min(self.levels.len());
@@ -1063,6 +1076,34 @@ pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &F
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_widest_radius_of_a_step_turns_away_exactly_the_differences_that_no_approximation_takes() {
+        //#263: `skip` with its one comparison against `widest` gives what the search of the levels alone gives, for every step and size
+        let search = |reference: &Reference, at: usize, size_squared: f64, left: u32| -> Option<(f64, u32)> {
+            if at == 0 || reference.levels.is_empty() {
+                return None;
+            }
+            let aligned = ((at - 1).trailing_zeros() as usize).min(reference.levels.len());
+            (1..=aligned).rev().find_map(|level| reference.levels[level - 1].get((at - 1) >> level).filter(|bla| (1_u64 << level) <= u64::from(left) && size_squared < bla.radius_squared).map(|bla| (bla.radius_squared, 1_u32 << level)))
+        };
+        let m = MandelbrotSet::new(3000, 2.0);
+        let bits = bits_for_depth(Depth::parse("1e-100").unwrap(), 400);
+        let (cx, cy) = (Fixed::parse("3e-101", bits).unwrap(), Fixed::parse(&format!("1.{}2", "0".repeat(100)), bits).unwrap());
+        let reference = Reference::new(&m, (&cx, &cy), 1e-100, true);
+        assert!(!reference.levels.is_empty());
+        let mut taken = 0;
+        for at in 0..reference.points().len() {
+            for size_squared in [0.0, 1e-250, 1e-210, 1e-200, 1e-150, 1e-100, 1e-50, 1e-10, 1.0, f64::NAN] {
+                for left in [1, 2, 7, 64, 3000] {
+                    let skipped = reference.skip(at, size_squared, left).map(|(bla, steps)| (bla.radius_squared, steps));
+                    assert_eq!(skipped.map(|(radius, steps)| (radius.to_bits(), steps)), search(&reference, at, size_squared, left).map(|(radius, steps)| (radius.to_bits(), steps)), "step {at}, |z|² {size_squared}, {left} left");
+                    taken += usize::from(skipped.is_some());
+                }
+            }
+        }
+        assert!(taken > 1000, "{taken} approximations taken");
+    }
 
     #[test]
     fn pixels_iterated_four_at_a_time_have_exactly_the_positions_of_one_at_a_time() {
