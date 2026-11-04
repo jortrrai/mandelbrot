@@ -527,13 +527,13 @@ mod tests {
         for fineness in [1.0, std::f64::consts::SQRT_2] {
             let size = crate::rendering::exponential_map::MapSize::for_frames((width, height), fineness);
             let top = shallowest.times(2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0));
-            let mut map = crate::rendering::exponential_map::ExponentialMap { size, top, bands: std::collections::BTreeMap::new() };
+            let mut map = crate::rendering::exponential_map::ExponentialMap::new(size, top);
             let started = std::time::Instant::now();
             let bands = doublings + crate::rendering::exponential_map::MapSize::doublings_below_the_corner((width, height)) + 1;
             let mut times = Vec::new();
             for band in 0..bands {
                 let band_started = std::time::Instant::now();
-                map.bands.insert(band, crate::rendering::exponential_map::render_band(&m, &orbit, top.times((-(band as f64)).exp2()), size, samples, &color_of, false, None, &cancel).unwrap());
+                map.insert(band, crate::rendering::exponential_map::render_band(&m, &orbit, top.times((-(band as f64)).exp2()), size, samples, &color_of, false, None, &cancel).unwrap());
                 times.push(band_started.elapsed().as_secs_f64());
             }
             let band_time = started.elapsed().as_secs_f64() / bands as f64;
@@ -557,12 +557,12 @@ mod tests {
         let size = crate::rendering::exponential_map::MapSize::for_frames((width, height), 1.0);
         let top = shallowest.times(2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0));
         let render_map = |tail: bool| {
-            let mut map = crate::rendering::exponential_map::ExponentialMap { size, top, bands: std::collections::BTreeMap::new() };
+            let mut map = crate::rendering::exponential_map::ExponentialMap::new(size, top);
             let mut tail_time = 0.0;
             for band in 0..=doublings + crate::rendering::exponential_map::MapSize::doublings_below_the_corner((width, height)) {
                 let band_size = if tail && band > doublings { size.below_the_last(band - doublings) } else { size };
                 let started = std::time::Instant::now();
-                map.bands.insert(band, crate::rendering::exponential_map::render_band(&m, &orbit, top.times((-(band as f64)).exp2()), band_size, samples, &color_of, false, None, &cancel).unwrap());
+                map.insert(band, crate::rendering::exponential_map::render_band(&m, &orbit, top.times((-(band as f64)).exp2()), band_size, samples, &color_of, false, None, &cancel).unwrap());
                 if band > doublings {
                     tail_time += started.elapsed().as_secs_f64();
                 }

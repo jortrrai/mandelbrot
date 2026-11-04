@@ -26,7 +26,8 @@ impl MapSize {
     #[must_use]
     pub fn for_frames((width, height): (usize, usize), fineness: f64) -> MapSize {
         let corner = (width as f64 / 2.0).hypot(height as f64 / 2.0);
-        let columns = (std::f64::consts::TAU * corner * fineness).ceil() as usize;
+        //(A multiple of 64, so that the levels of a band halve it evenly, see `ExponentialMap::insert`)
+        let columns = ((std::f64::consts::TAU * corner * fineness / 64.0).ceil() as usize) * 64;
         let rows = (columns as f64 * std::f64::consts::LN_2 / std::f64::consts::TAU).ceil() as usize;
         MapSize { columns, rows }
     }
@@ -83,14 +84,46 @@ pub struct ExponentialMap {
     pub size: MapSize,
     /// The radius of the first row of band 0
     pub top: Depth,
-    /// The bands there are, by number (the frames read only these: a row outside them is the nearest row in them)
-    pub bands: std::collections::BTreeMap<usize, Vec<TrueColor>>,
+    /// The bands there are, by number (the frames read only these: a row outside them is the nearest row in them), each with its coarser levels (see
+    /// `insert`)
+    bands: std::collections::BTreeMap<usize, Vec<Vec<TrueColor>>>,
 }
+
+/// How far apart the map's pixels are at most along a ring where a frame reads them, in frame pixels (the taps are half a pixel apart): nearer a frame's
+/// center the map is finer than that, and a frame reads a coarser level of it there, its columns averaged two by two as often as it takes (so the
+/// center does not alias)
+const SPACING: f64 = 0.5;
 
 /// Where a frame's pixel taps the map (as the keyframes of Fast dives are tapped, see `dive_keyframes`): two by two in a pixel
 const TAPS: [f64; 2] = [0.25, 0.75];
 
 impl ExponentialMap {
+    /// A map of bands of `size`, band 0 starting at the radius `top`, without bands yet
+    #[must_use]
+    pub fn new(size: MapSize, top: Depth) -> ExponentialMap {
+        ExponentialMap { size, top, bands: std::collections::BTreeMap::new() }
+    }
+
+    /// Band `band` (of `self.size.rows` rows, of the columns it was rendered with), and its coarser levels: each with half the columns of the one before
+    /// (averaged two by two), down to `MIN_COLUMNS / 2`
+    pub fn insert(&mut self, band: usize, colors: Vec<TrueColor>) {
+        let rows = self.size.rows;
+        let mut levels = vec![colors];
+        while let Some(finer) = levels.last().filter(|finer| finer.len() / rows >= MIN_COLUMNS && (finer.len() / rows).is_multiple_of(2)) {
+            let coarser: Vec<TrueColor> = finer.as_chunks::<2>().0.iter().map(|pair| {
+                let mean = |a: u8, b: u8| (u16::from(a) + u16::from(b)).div_ceil(2) as u8;
+                TrueColor::new(mean(pair[0].red, pair[1].red), mean(pair[0].green, pair[1].green), mean(pair[0].blue, pair[1].blue))
+            }).collect();
+            levels.push(coarser);
+        }
+        self.bands.insert(band, levels);
+    }
+
+    /// Takes away the bands above `band` (that no frame reads any more)
+    pub fn forget_above(&mut self, band: usize) {
+        self.bands = self.bands.split_off(&band);
+    }
+
     /// The frame `width` x `height` of the dive at `scale` (its view `2.5 · scale` wide), turned counterclockwise by `rotation` radians, on all the render
     /// threads, with the taps of `taps` (made for frames of this size)
     #[must_use]
@@ -104,11 +137,18 @@ impl ExponentialMap {
         let turn_shift = -rotation / std::f64::consts::TAU;
         //(The rows there are: a row outside them is the nearest row in them. A band has the columns it was rendered with, see `MapSize::below_the_last`)
         let first_band = self.bands.keys().next().copied().unwrap_or(0);
-        let map_rows: Vec<&[TrueColor]> = self.bands.range(first_band..).flat_map(|(_, band)| band.chunks(band.len() / rows)).collect();
+        //(Every row of the map with its levels, and for each the log2 of the spacing of its finest level along a ring a frame pixel from the center)
+        let map_rows: Vec<(Vec<&[TrueColor]>, f64)> = self.bands.range(first_band..).flat_map(|(_, levels)| (0..rows).map(move |row| {
+            let columns = levels[0].len() / rows;
+            (levels.iter().map(|level| { let columns = level.len() / rows; &level[row * columns..(row + 1) * columns] }).collect(), (std::f64::consts::TAU / columns as f64).log2())
+        })).collect();
         let (first, last) = (first_band * rows, first_band * rows + map_rows.len() - 1);
-        //The color of row `row` at the angle `turns` (in turns; pixel centers at half columns, wrapping around), between the two columns around it
-        let along = |row: usize, turns: f64| -> [f32; 3] {
-            let colors = map_rows[row - first];
+        //The color of row `row` at the angle `turns` (in turns; pixel centers at half columns, wrapping around), between the two columns around it, at the
+        //level whose spacing is at most `SPACING` at `2^log2_distance` frame pixels from the center
+        let along = |row: usize, turns: f64, log2_distance: f64| -> [f32; 3] {
+            let (levels, log2_spacing) = &map_rows[row - first];
+            let level = ((SPACING.log2() - log2_spacing - log2_distance).floor().max(0.0) as usize).min(levels.len() - 1);
+            let colors = levels[level];
             let columns = colors.len();
             //(`turns` is within one turn, see `at`)
             let u = turns.mul_add(columns as f64, -0.5);
@@ -122,13 +162,13 @@ impl ExponentialMap {
         };
         //The color at the angle `turns` and the row `v` (continuous, row centers at whole numbers), from the two rows around it as `bilinear` in
         //`dive_keyframes`
-        let at = |turns: f64, v: f64| -> [f32; 3] {
+        let at = |turns: f64, v: f64, log2_distance: f64| -> [f32; 3] {
             let v = v.clamp(first as f64, last as f64);
             let turns = turns - turns.floor();
             let row = v.floor();
             let fy = (v - row) as f32;
             let row = row as usize;
-            let (above, below) = (along(row, turns), along((row + 1).min(last), turns));
+            let (above, below) = (along(row, turns, log2_distance), along((row + 1).min(last), turns, log2_distance));
             std::array::from_fn(|channel| above[channel] * (1.0 - fy) + below[channel] * fy)
         };
         let mut frame = vec![TrueColor::new(0, 0, 0); width * height];
@@ -141,7 +181,7 @@ impl ExponentialMap {
                     for (color, pixel_taps) in out.iter_mut().zip(pixel_taps.chunks(TAPS.len() * TAPS.len())) {
                         let mut sum = [0.0_f32; 3];
                         for &(column, row) in pixel_taps {
-                            let tap = at(f64::from(column) + turn_shift, f64::from(row) * rows as f64 + row_shift);
+                            let tap = at(f64::from(column) + turn_shift, f64::from(row) * rows as f64 + row_shift, -f64::from(row));
                             for (total, channel) in sum.iter_mut().zip(tap) {
                                 *total += channel;
                             }
@@ -202,7 +242,7 @@ pub(crate) mod tests {
     #[test]
     fn a_map_is_as_fine_as_a_frame_at_its_corners() {
         let size = MapSize::for_frames((1920, 1080), 1.0);
-        assert_eq!((size.columns, size.rows), (6921, 764));
+        assert_eq!((size.columns, size.rows), (6976, 770));
         assert_eq!(MapSize::doublings_below_the_corner((1920, 1080)), 14);
     }
 
@@ -217,9 +257,9 @@ pub(crate) mod tests {
         let shallowest = Depth::from_log2(-400.0 * std::f64::consts::LOG2_10);
         //(The map starts at the corner of the shallowest frame: 2.5 · scale / width a pixel)
         let top = shallowest.times(2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0));
-        let mut map = ExponentialMap { size, top, bands: std::collections::BTreeMap::new() };
+        let mut map = ExponentialMap::new(size, top);
         for band in 0..MapSize::doublings_below_the_corner((width, height)) + 2 {
-            map.bands.insert(band, render_band(&m, &orbit, top.times((-(band as f64)).exp2()), size, 4, &color_of, false, None, &cancel).unwrap());
+            map.insert(band, render_band(&m, &orbit, top.times((-(band as f64)).exp2()), size, 4, &color_of, false, None, &cancel).unwrap());
         }
         for (doublings, rotation) in [(0.0_f64, 0.0), (0.4, 0.0), (1.7, 0.0), (0.9, 1.0)] {
             let scale = shallowest.times((-doublings).exp2());
@@ -240,7 +280,10 @@ pub(crate) mod tests {
         let size = MapSize::for_frames((width, height), 1.0);
         let band: Vec<TrueColor> = (0..size.band_pixels()).map(|index| TrueColor::new((index % 251) as u8, (index % 241) as u8, (index % 239) as u8)).collect();
         let top = Depth::from_log2(-40.0);
-        let map = ExponentialMap { size, top, bands: (0..=MapSize::doublings_below_the_corner((width, height)) + 3).map(|k| (k, band.clone())).collect() };
+        let mut map = ExponentialMap::new(size, top);
+        for k in 0..=MapSize::doublings_below_the_corner((width, height)) + 3 {
+            map.insert(k, band.clone());
+        }
         let started = std::time::Instant::now();
         let taps = FrameTaps::new((width, height));
         println!("taps worked out in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
