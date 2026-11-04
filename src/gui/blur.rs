@@ -126,33 +126,72 @@ pub(super) fn blurred(colors: &[crate::coloring::TrueColor], width: usize, heigh
     let weights: Vec<f32> = (-radius..=radius).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
     let total: f32 = weights.iter().sum();
     let weights: Vec<f32> = weights.iter().map(|weight| weight / total).collect();
-    //One pass along a direction: `horizontal`, or down the columns
-    let pass = |source: &[[f32; 3]], horizontal: bool| -> Vec<[f32; 3]> {
-        let mut out = vec![[0.0; 3]; width * height];
-        let rows_per_chunk = height.div_ceil(crate::rendering::render_thread_count()).max(1);
-        std::thread::scope(|scope| {
-            for (chunk, block) in out.chunks_mut(rows_per_chunk * width).enumerate() {
-                let weights = &weights;
-                scope.spawn(move || {
-                    for (index, pixel) in block.iter_mut().enumerate() {
-                        let (x, y) = (index % width, chunk * rows_per_chunk + index / width);
-                        let mut sum = [0.0; 3];
-                        for (offset, weight) in (-radius..=radius).zip(weights) {
-                            //(The edge pixels are repeated)
-                            let (sx, sy) = if horizontal { (x.saturating_add_signed(offset).min(width - 1), y) } else { (x, y.saturating_add_signed(offset).min(height - 1)) };
-                            for (channel, value) in sum.iter_mut().zip(source[sy * width + sx]) {
-                                *channel += value * weight;
-                            }
-                        }
-                        *pixel = sum;
-                    }
-                });
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    //Row by row, with the taps outside and the pixels of a row inside: every pixel still adds its taps in the same order, one tap after the other from the
+    //left (or the top), so the colors are those of a pixel at a time, bit for bit, while a row's pixels go through the same tap at once (and the columns
+    //of the second pass are read along their rows). The three channels of a pixel are next to each other and take the same weight
+    let rows_per_chunk = height.div_ceil(crate::rendering::render_thread_count()).max(1);
+    let row = 3 * width;
+    //Along a row: a tap `offset` pixels away, the edge pixels repeated
+    let along = |source: &[f32], out: &mut [f32]| {
+        for (offset, weight) in (-radius..=radius).zip(&weights) {
+            let shift = 3 * offset;
+            //(The pixels whose tap is in the row: from `low` to `high`)
+            let (low, high) = ((-offset).clamp(0, width.cast_signed()).cast_unsigned(), (width.cast_signed() - offset).clamp(0, width.cast_signed()).cast_unsigned());
+            for x in (0..low).chain(high..width) {
+                let from = 3 * x.saturating_add_signed(offset).min(width - 1);
+                for channel in 0..3 {
+                    out[3 * x + channel] += source[from + channel] * weight;
+                }
             }
-        });
-        out
+            if high > low {
+                for (value, from) in out[3 * low..3 * high].iter_mut().zip(&source[(3 * low).saturating_add_signed(shift)..(3 * high).saturating_add_signed(shift)]) {
+                    *value += from * weight;
+                }
+            }
+        }
     };
-    let image: Vec<[f32; 3]> = colors.iter().map(|color| [f32::from(color.red), f32::from(color.green), f32::from(color.blue)]).collect();
-    pass(&pass(&image, true), false).iter().map(|[red, green, blue]| crate::coloring::TrueColor::new(red.round() as u8, green.round() as u8, blue.round() as u8)).collect()
+    let mut first = vec![0.0_f32; row * height];
+    std::thread::scope(|scope| {
+        for (rows, colors) in first.chunks_mut(rows_per_chunk * row).zip(colors.chunks(rows_per_chunk * width)) {
+            let along = &along;
+            scope.spawn(move || {
+                let mut source = vec![0.0_f32; row];
+                for (out, colors) in rows.chunks_mut(row).zip(colors.chunks(width)) {
+                    for (channels, color) in source.chunks_mut(3).zip(colors) {
+                        channels.copy_from_slice(&[f32::from(color.red), f32::from(color.green), f32::from(color.blue)]);
+                    }
+                    along(&source, out);
+                }
+            });
+        }
+    });
+    //Down the columns: the rows `offset` rows away, the edge rows repeated; each row rounded to colors as soon as it is done
+    let mut blurred = vec![crate::coloring::TrueColor::new(0, 0, 0); width * height];
+    std::thread::scope(|scope| {
+        for (chunk, rows) in blurred.chunks_mut(rows_per_chunk * width).enumerate() {
+            let (first, weights) = (&first, &weights);
+            scope.spawn(move || {
+                let mut out = vec![0.0_f32; row];
+                for (index, colors) in rows.chunks_mut(width).enumerate() {
+                    let y = chunk * rows_per_chunk + index;
+                    out.fill(0.0);
+                    for (offset, weight) in (-radius..=radius).zip(weights) {
+                        let from = y.saturating_add_signed(offset).min(height - 1) * row;
+                        for (value, source) in out.iter_mut().zip(&first[from..from + row]) {
+                            *value += source * weight;
+                        }
+                    }
+                    for (color, pixel) in colors.iter_mut().zip(out.chunks(3)) {
+                        *color = crate::coloring::TrueColor::new(pixel[0].round() as u8, pixel[1].round() as u8, pixel[2].round() as u8);
+                    }
+                }
+            });
+        }
+    });
+    blurred
 }
 
 /// A quality preset: samples per pixel, and whether the image is blurred (the blur preset: one sample and the blur of a full-resolution frame, σ 0.8, see #118)
@@ -182,6 +221,76 @@ impl Quality {
             (_, true) => format!("{}x + blur", self.samples),
             (64, false) => String::from("64x (best)"),
             (samples, false) => format!("{samples}x"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coloring::TrueColor;
+
+    /// The blur as it was, a pixel at a time (the reference of `blurred`)
+    fn blurred_a_pixel_at_a_time(colors: &[crate::coloring::TrueColor], width: usize, height: usize, sigma: f32) -> Vec<crate::coloring::TrueColor> {
+        let radius = blur_radius(sigma).cast_signed();
+        let weights: Vec<f32> = (-radius..=radius).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+        let total: f32 = weights.iter().sum();
+        let weights: Vec<f32> = weights.iter().map(|weight| weight / total).collect();
+        //One pass along a direction: `horizontal`, or down the columns
+        let pass = |source: &[[f32; 3]], horizontal: bool| -> Vec<[f32; 3]> {
+            let mut out = vec![[0.0; 3]; width * height];
+            let rows_per_chunk = height.div_ceil(crate::rendering::render_thread_count()).max(1);
+            std::thread::scope(|scope| {
+                for (chunk, block) in out.chunks_mut(rows_per_chunk * width).enumerate() {
+                    let weights = &weights;
+                    scope.spawn(move || {
+                        for (index, pixel) in block.iter_mut().enumerate() {
+                            let (x, y) = (index % width, chunk * rows_per_chunk + index / width);
+                            let mut sum = [0.0; 3];
+                            for (offset, weight) in (-radius..=radius).zip(weights) {
+                                //(The edge pixels are repeated)
+                                let (sx, sy) = if horizontal { (x.saturating_add_signed(offset).min(width - 1), y) } else { (x, y.saturating_add_signed(offset).min(height - 1)) };
+                                for (channel, value) in sum.iter_mut().zip(source[sy * width + sx]) {
+                                    *channel += value * weight;
+                                }
+                            }
+                            *pixel = sum;
+                        }
+                    });
+                }
+            });
+            out
+        };
+        let image: Vec<[f32; 3]> = colors.iter().map(|color| [f32::from(color.red), f32::from(color.green), f32::from(color.blue)]).collect();
+        pass(&pass(&image, true), false).iter().map(|[red, green, blue]| crate::coloring::TrueColor::new(red.round() as u8, green.round() as u8, blue.round() as u8)).collect()
+    }
+
+    #[test]
+    fn the_blur_row_by_row_gives_the_colors_of_the_blur_a_pixel_at_a_time_bit_for_bit() {
+        //Sizes narrower and lower than the blur's radius, and an image of every color step, for several blurs (the preset's σ 0.8 and the largest)
+        for (width, height) in [(1, 1), (3, 2), (5, 17), (64, 36), (129, 70)] {
+            let image: Vec<TrueColor> = (0..width * height).map(|index| TrueColor::new((index * 37 % 256) as u8, (index * 101 % 256) as u8, (index * 7 % 256) as u8)).collect();
+            for sigma in [0.3, 0.8, blur_sigma(1, 64), 4.0] {
+                let (rows, pixels) = (blurred(&image, width, height, sigma), blurred_a_pixel_at_a_time(&image, width, height, sigma));
+                assert!(rows.iter().zip(&pixels).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)) && rows.len() == pixels.len(), "{width} x {height}, σ {sigma}");
+            }
+        }
+    }
+
+    /// Times the blur of a 1920 x 1080 and a 3840 x 2160 frame, row by row and a pixel at a time. Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn time_the_blur() {
+        for (width, height) in [(1920, 1080), (3840, 2160)] {
+            let image: Vec<TrueColor> = (0..width * height).map(|index| TrueColor::new((index * 37 % 256) as u8, (index * 101 % 256) as u8, (index * 7 % 256) as u8)).collect();
+            let sigma = blur_sigma(1, 8);
+            for (name, blur) in [("row by row", blurred as fn(&[TrueColor], usize, usize, f32) -> Vec<TrueColor>), ("a pixel at a time", blurred_a_pixel_at_a_time)] {
+                let started = std::time::Instant::now();
+                for _ in 0..20 {
+                    std::hint::black_box(blur(&image, width, height, sigma));
+                }
+                println!("{width} x {height}, {name}: {:.2} ms a frame", started.elapsed().as_secs_f64() * 1000.0 / 20.0);
+            }
         }
     }
 }
