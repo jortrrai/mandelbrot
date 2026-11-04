@@ -2694,12 +2694,16 @@ fn while_a_deep_view_renders_its_old_image_follows_a_drag_and_a_zoom() {
     assert!(app.deep_shown().is_some() && app.buffer_is_complete);
     assert_eq!(app.drawn_fraction(), FULL_TEXTURE);
     //Dragged 8 pixels to the right and 6 up: the old image moves 8 left and 6 down until the render of the new view arrives
+    app.gesture_active = true;
     app.pan_deep(8, 6);
     app.render("Moved by dragging");
     let fraction = app.drawn_fraction();
     let expected = egui::Rect::from_min_max(egui::pos2(-8.0 / 64.0, 6.0 / 48.0), egui::pos2(1.0 - 8.0 / 64.0, 1.0 + 6.0 / 48.0));
     assert!((fraction.min - expected.min).length() + (fraction.max - expected.max).length() < 1e-4, "{fraction:?} is not {expected:?}");
+    //A frame of the drag shows a coarse preview first, which fills the uncovered strip at once
     wait_for_job(&mut app);
+    assert_eq!(app.previews_received, 1, "a preview during the drag");
+    app.gesture_active = false;
     assert_eq!(app.drawn_fraction(), FULL_TEXTURE);
     //Zoomed in twice around the center: the old image is twice as large, around the center
     app.zoom_deep(0.5, (32.0, 24.0));

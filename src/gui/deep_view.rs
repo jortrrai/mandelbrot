@@ -20,6 +20,9 @@ use super::{transform, MandelbrotApp};
 use crate::complex_plane::{ComplexPlane, Precision, View};
 use crate::rendering::deep::{self, Depth, Fixed};
 
+/// The blocks of the preview of a frame of a gesture in a deep view, in pixels on a side (see `deep::render_preview_on`): a sixteenth of the work of a layer
+const PREVIEW_BLOCK: usize = 4;
+
 /// The exact view deeper than 64-bit floats: its center, its scale, and the view of the complex plane it left (to tell when something else moved it)
 pub(super) struct DeepView {
     pub(super) real: Fixed,
@@ -202,6 +205,9 @@ impl MandelbrotApp {
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let (sender, receiver) = mpsc::channel();
+        //During a drag or a wheel zoom, a coarse preview first: every frame of the gesture starts a new render, which a full layer seldom finishes before the next
+        let preview = self.settle.is_some().then_some(PREVIEW_BLOCK);
+        (self.previews_received, self.preview_levels) = (0, preview.into_iter().collect());
         let samples = if self.quality_blur { self.supersampling_amount.max(1) } else { self.supersampling_amount.clamp(1, 64) };
         let message = format!("{message} (deep zoom, scale {}, {} iterations, {samples} samples)", depth.to_text(), m.max_iterations);
         std::thread::spawn(move || {
@@ -209,7 +215,11 @@ impl MandelbrotApp {
             let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
             let mut layer_started = Instant::now();
             let orbit = deep::SharedOrbit::new(&real, &imaginary);
-            let completed = deep::render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, c.rotation()), (width, height), samples, &color_of, fast_deep, gpu.as_deref().map(|gpu| (gpu, deep_f32)), &thread_cancel, |colors, layer| {
+            let gpu = gpu.as_deref().map(|gpu| (gpu, deep_f32));
+            if let Some(colors) = preview.and_then(|block| deep::render_preview_on(&m, &orbit, (depth, c.rotation()), (width, height), block, &color_of, fast_deep, gpu, &thread_cancel)) {
+                let _ = sender.send(JobMessage::Pass { colors, plane: c.clone(), pass: 0, total: samples, layer_time: layer_started.elapsed(), whole: true });
+            }
+            let completed = deep::render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, c.rotation()), (width, height), samples, &color_of, fast_deep, gpu, &thread_cancel, |colors, layer| {
                 let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass: layer, total: samples, layer_time: layer_started.elapsed(), whole: true });
                 layer_started = Instant::now();
             });

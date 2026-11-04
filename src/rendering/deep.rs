@@ -857,6 +857,24 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
     render_points_on(m, orbit, (depth.exponent, reach), (width * height, &offset_of), samples, color_of, approximate, gpu, cancel, on_layer)
 }
 
+/// A coarse preview of the view that `render_layers_on` renders around the center of `orbit`, for a frame of a drag or a wheel zoom in a deep view.
+///
+/// One sample for every block of `block` x `block` pixels, in the middle of its top-left pixel (bit for bit that pixel's first sample, as the 64-bit renderer's previews, see `Render::preview`), and the whole block
+/// in its color; `None` when `cancel` was set first (review 9)
+#[allow(clippy::too_many_arguments)] // The orbit and the view, its size, the block, how to color, the GPU and when to stop
+pub fn render_preview_on(m: &MandelbrotSet, orbit: &SharedOrbit, (depth, rotation): (Depth, f64), (width, height): (usize, usize), block: usize,
+    color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<(&super::gpu::GpuIterator, bool)>, cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<crate::coloring::TrueColor>> {
+    let (pixel, block) = (2.5 * depth.mantissa / width as f64, block.max(1));
+    let columns = width.div_ceil(block);
+    let offset_of = |index: usize, _sample: u8| {
+        let (x, y) = ((index % columns) * block, (index / columns) * block);
+        turned(((x as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - 0.5) * pixel), rotation)
+    };
+    let mut blocks = Vec::new();
+    let completed = render_points_on(m, orbit, (depth.exponent, max_offset(pixel, width, height)), (columns * height.div_ceil(block), &offset_of), 1, color_of, approximate, gpu, cancel, |layer, _| blocks = layer.to_vec());
+    completed.then(|| (0..width * height).map(|index| blocks[index / width / block * columns + index % width / block]).collect())
+}
+
 /// The colors of `pixels` points around the center of `orbit`, averaged over `samples` samples each, one layer after the other.
 ///
 /// `render_layers_on` renders a grid of them, #287 rings; the offset of a point's sample from the center is `offset_of(point, sample) · 2^exponent`, at
@@ -1383,6 +1401,34 @@ mod tests {
     }
 
     #[test]
+    fn a_deep_preview_has_bit_for_bit_the_first_sample_of_the_top_left_pixel_of_every_block() {
+        //Past 64-bit floats' range and within it, turned and not, with a size that the blocks do not divide
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (width, height, block) = (37, 22, 4);
+        let mut m = MandelbrotSet::new(3000, 2.0);
+        m.palette = crate::mandelbrot_set::ColorCycle { divide: 0.113, offset: 278.0, stretch: false };
+        let color_of = |position: f64| m.interpolated_color(position, |count| m.color(crate::coloring::TrueColor::new_from_bernstein_polynomials, count));
+        for (power, rotation) in [(-400_i32, 0.0), (-20, 0.7)] {
+            //(Next to c = i, which has structure at every depth)
+            let (scale, real, imaginary) = (format!("1e{power}"), format!("3e{}", power - 1), format!("1.{}2", "0".repeat(power.unsigned_abs() as usize)));
+            let depth = Depth::parse(&scale).unwrap();
+            let bits = bits_for_depth(depth, width);
+            let orbit = SharedOrbit::new(&Fixed::parse(&real, bits).unwrap(), &Fixed::parse(&imaginary, bits).unwrap());
+            let mut layer = Vec::new();
+            render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, rotation), (width, height), 1, &color_of, true, None, &cancel, |colors, _| layer = colors.to_vec());
+            let preview = render_preview_on(&m, &orbit, (depth, rotation), (width, height), block, &color_of, true, None, &cancel).unwrap();
+            assert_eq!(preview.len(), width * height);
+            for (index, color) in preview.iter().enumerate() {
+                let (x, y) = (index % width / block * block, index / width / block * block);
+                let other = &layer[y * width + x];
+                assert_eq!((color.red, color.green, color.blue), (other.red, other.green, other.blue), "{scale}: pixel {index}");
+            }
+            let distinct: std::collections::BTreeSet<(u8, u8, u8)> = preview.iter().map(|color| (color.red, color.green, color.blue)).collect();
+            assert!(distinct.len() > 3, "{scale}: the view has structure");
+        }
+    }
+
+    #[test]
     fn a_turned_deep_view_shows_the_points_of_the_turned_64_bit_view() {
         //Turned like the 64-bit renderer turns a view, so a deep view looks the same turned as the view just above it
         let mut plane = crate::complex_plane::ComplexPlane::new(64, 48);
@@ -1680,6 +1726,37 @@ mod depth_timing {
                 let coloring = started.elapsed().as_secs_f64() * 1000.0;
                 println!("{name} 10^{power}, BLA {approximate}: {total:.0} ms a keyframe; its reference {reference_time:.0} ms; coloring 8.3 M positions on one thread {coloring:.0} ms");
             }
+        }
+    }
+
+    /// Review 9: the parts of a frame of a drag in a deep view of the window (1200 x 800, Deep Trippy at 10⁻⁴⁰⁰ and 10⁻⁶⁰, the iteration limit auto iterations
+    /// starts with there): the reference orbit, its reference table, the frame, and the frame at an eighth of the resolution. Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn time_the_parts_of_a_deep_drag_frame() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (width, height) = (1200, 800);
+        for (power, iterations) in [(-60, 20_000), (-400, 100_000)] {
+            let mut m = MandelbrotSet::new(iterations, 2.0);
+            m.palette = crate::mandelbrot_set::ColorCycle { divide: 0.113, offset: 278.0, stretch: false };
+            let color_of = |position: f64| m.interpolated_color(position, |count| m.color(crate::coloring::TrueColor::new_from_bernstein_polynomials, count));
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let bits = bits_for_depth(depth, width);
+            let started = std::time::Instant::now();
+            let orbit = SharedOrbit::new(&Fixed::parse("-0.7957429802875415", bits).unwrap(), &Fixed::parse("0.18481461635741003", bits).unwrap());
+            let length = orbit.orbit(iterations).len();
+            let orbit_time = started.elapsed().as_secs_f64() * 1000.0;
+            let started = std::time::Instant::now();
+            let pixel = 2.5 * depth.mantissa / width as f64;
+            std::hint::black_box(Reference::of(&m, orbit.orbit_and_residuals(iterations), times_two_to(max_offset(pixel, width, height), depth.exponent), true));
+            let reference_time = started.elapsed().as_secs_f64() * 1000.0;
+            let mut times = Vec::new();
+            for (w, h) in [(width, height), (width / 8, height / 8)] {
+                let started = std::time::Instant::now();
+                render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, 0.0), (w, h), 1, &color_of, true, None, &cancel, |layer, _| { std::hint::black_box(layer); });
+                times.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!("10^{power}: orbit of {length} points {orbit_time:.0} ms; reference {reference_time:.0} ms; frame {:.0} ms; an eighth {:.0} ms", times[0], times[1]);
         }
     }
 
