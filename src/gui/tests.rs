@@ -2716,6 +2716,26 @@ fn while_a_deep_view_renders_its_old_image_follows_a_drag_and_a_zoom() {
 }
 
 #[test]
+fn a_deep_render_shows_the_progress_bar_of_its_layers() {
+    //Review 9: deep renders showed no progress bar
+    let mut app = manual_app(&Config::sized(64, 48, 200, 4));
+    app.go_to_exact(&(String::from("3e-401"), format!("1.{}2", "0".repeat(400))), crate::rendering::deep::Depth::parse("1e-400").unwrap());
+    app.render("Deep");
+    let bars = app.bars.as_ref().expect("a progress bar while the deep view renders");
+    assert_eq!((bars.total_layers, bars.pixels_total, bars.finished), (4, 64 * 48, None));
+    wait_for_job(&mut app);
+    let bars = app.bars.as_ref().expect("the bar stays, with the times of the render");
+    assert_eq!(bars.layer_times.len(), 4, "a time for every layer");
+    assert!(matches!(bars.finished, Some((_, true))), "finished: {:?}", bars.finished);
+    assert_eq!(bars.pixels_done.load(Ordering::Relaxed), 64 * 48, "the last layer is full");
+    //The next render starts a new bar
+    app.pan_deep(3, 0);
+    app.render("Moved");
+    assert!(app.bars.as_ref().is_some_and(|bars| bars.layer_times.is_empty() && bars.finished.is_none()));
+    wait_for_job(&mut app);
+}
+
+#[test]
 fn a_right_click_and_a_double_click_in_a_deep_view_stay_in_it() {
     //Review 9: a right click moved the 64-bit plane, which left the deep view for the deepest view of 64-bit floats (about 10^-12)
     let mut app = manual_app(&Config::sized(64, 48, 200, 1));

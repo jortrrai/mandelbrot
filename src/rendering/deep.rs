@@ -841,6 +841,17 @@ pub fn render_layers_around(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrb
 pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, (f64, f64)), (depth, rotation): (Depth, f64), (width, height): (usize, usize), samples: u8,
     color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<(&super::gpu::GpuIterator, bool)>, cancel: &std::sync::atomic::AtomicBool,
     on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
+    render_layers_counted(m, (orbit, (right, up)), (depth, rotation), (width, height), samples, color_of, approximate, gpu, (cancel, None), on_layer)
+}
+
+/// `render_layers_on`, counting the pixels of the current layer in `pixels_done`.
+///
+/// The count is reset to 0 at the start of every layer and grows as the positions of its pixels are done, so another thread can show how far the layer
+/// is (the progress bar of the window, review 9)
+#[allow(clippy::too_many_arguments)] // The orbit and the view, its size and samples, how to color, the GPU, when to stop, the count and where the layers go
+pub fn render_layers_counted(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, (f64, f64)), (depth, rotation): (Depth, f64), (width, height): (usize, usize), samples: u8,
+    color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<(&super::gpu::GpuIterator, bool)>,
+    (cancel, pixels_done): (&std::sync::atomic::AtomicBool, Option<&std::sync::atomic::AtomicUsize>), on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
     //A pixel is `pixel · 2^depth.exponent`: the offsets are scaled by `2^-depth.exponent` (see `position_scaled`; within 64-bit floats' range bit for bit as before)
     let pixel = 2.5 * depth.mantissa / width as f64;
     //(The view's center from the orbit's, in the same scaled units)
@@ -854,7 +865,7 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
         let offset = turned(((x as f64 + jx - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - y as f64 - jy) * pixel), rotation);
         if shift == (0.0, 0.0) { offset } else { (offset.0 + shift.0, offset.1 + shift.1) }
     };
-    render_points_on(m, orbit, (depth.exponent, reach), (width * height, &offset_of), samples, color_of, approximate, gpu, cancel, on_layer)
+    render_points_counted(m, orbit, (depth.exponent, reach), (width * height, &offset_of), samples, color_of, approximate, gpu, (cancel, pixels_done), on_layer)
 }
 
 /// A coarse preview of the view that `render_layers_on` renders around the center of `orbit`, for a frame of a drag or a wheel zoom in a deep view.
@@ -882,8 +893,21 @@ pub fn render_preview_on(m: &MandelbrotSet, orbit: &SharedOrbit, (depth, rotatio
 #[allow(clippy::too_many_arguments)] // The orbit and the points, their samples, how to color, the GPU, when to stop and where the layers go
 pub fn render_points_on(m: &MandelbrotSet, orbit: &SharedOrbit, (exponent, reach): (i32, f64), (pixels, offset_of): (usize, &(impl Fn(usize, u8) -> (f64, f64) + Sync)), samples: u8,
     color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<(&super::gpu::GpuIterator, bool)>, cancel: &std::sync::atomic::AtomicBool,
-    mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
+    on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
+    render_points_counted(m, orbit, (exponent, reach), (pixels, offset_of), samples, color_of, approximate, gpu, (cancel, None), on_layer)
+}
+
+/// `render_points_on`, counting the points of the current layer whose positions are done in `pixels_done` (see `render_layers_counted`)
+#[allow(clippy::too_many_arguments)] // The orbit and the points, their samples, how to color, the GPU, when to stop, the count and where the layers go
+fn render_points_counted(m: &MandelbrotSet, orbit: &SharedOrbit, (exponent, reach): (i32, f64), (pixels, offset_of): (usize, &(impl Fn(usize, u8) -> (f64, f64) + Sync)), samples: u8,
+    color_of: &(impl Fn(f64) -> crate::coloring::TrueColor + Sync), approximate: bool, gpu: Option<(&super::gpu::GpuIterator, bool)>,
+    (cancel, pixels_done): (&std::sync::atomic::AtomicBool, Option<&std::sync::atomic::AtomicUsize>), mut on_layer: impl FnMut(&[crate::coloring::TrueColor], u8)) -> bool {
     use std::sync::atomic::Ordering;
+    let count = |done: usize| {
+        if let Some(pixels_done) = pixels_done {
+            pixels_done.fetch_add(done, Ordering::Relaxed);
+        }
+    };
     let scaled = -exponent;
     let reference = Reference::of(m, orbit.orbit_and_residuals(m.max_iterations), times_two_to(reach, exponent), approximate);
     let (center_real, center_imaginary) = orbit.center();
@@ -897,6 +921,9 @@ pub fn render_points_on(m: &MandelbrotSet, orbit: &SharedOrbit, (exponent, reach
     let table = gpu.map(|_| reference.gpu_table());
     let chunks = pixels.div_ceil(SHARE_CHUNK);
     for sample in 0..samples.max(1) {
+        if let Some(pixels_done) = pixels_done {
+            pixels_done.store(0, Ordering::Relaxed);
+        }
         //The positions of the layer: the CPU threads and the GPU (where it can) take the next chunk of pixels as soon as they are free, so each computes as
         //much as its speed on this view allows, without a setting or a measurement (issue #263); both give the same positions, bit for bit
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -914,18 +941,20 @@ pub fn render_points_on(m: &MandelbrotSet, orbit: &SharedOrbit, (exponent, reach
         };
         std::thread::scope(|scope| {
             for _ in 0..threads {
-                let (sender, next, cpu_positions) = (sender.clone(), &next, &cpu_positions);
+                let (sender, next, cpu_positions, count) = (sender.clone(), &next, &cpu_positions, &count);
                 scope.spawn(move || loop {
                     let chunk = next.fetch_add(1, Ordering::Relaxed);
                     if chunk >= chunks || cancel.load(Ordering::Relaxed) {
                         return;
                     }
                     let range = chunk * SHARE_CHUNK..((chunk + 1) * SHARE_CHUNK).min(pixels);
+                    let done = range.len();
                     let _ = sender.send((range.start, cpu_positions(range)));
+                    count(done);
                 });
             }
             if let Some(((gpu, single), table)) = gpu.zip(table.as_ref()) {
-                let (sender, next, cpu_positions, offset_of, reference) = (sender.clone(), &next, &cpu_positions, &offset_of, &reference);
+                let (sender, next, cpu_positions, offset_of, reference, count) = (sender.clone(), &next, &cpu_positions, &offset_of, &reference, &count);
                 scope.spawn(move || loop {
                     let chunk = next.fetch_add(GPU_CHUNKS, Ordering::Relaxed);
                     if chunk >= chunks || cancel.load(Ordering::Relaxed) {
@@ -945,6 +974,7 @@ pub fn render_points_on(m: &MandelbrotSet, orbit: &SharedOrbit, (exponent, reach
                     let positions = dispatched.map_or_else(|_| cpu_positions(range.clone()), |outcomes| {
                         offsets.iter().zip(&outcomes).map(|(&offset, outcome)| position_of_outcome(m, center, offset, scale, outcome)).collect()
                     });
+                    count(positions.len());
                     let _ = sender.send((range.start, positions));
                 });
             }
@@ -1398,6 +1428,28 @@ mod tests {
             close += usize::from((deep - direct).abs() < 0.01);
         }
         assert!(close * 100 >= deep.len() * 95, "{close} of {} pixels agree", deep.len());
+    }
+
+    #[test]
+    fn a_deep_render_counts_the_pixels_of_every_layer_from_zero_without_changing_its_colors() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (width, height, samples) = (40, 30, 3);
+        let m = MandelbrotSet::new(2000, 2.0);
+        let color_of = |position: f64| m.interpolated_color(position, |count| m.color(crate::coloring::TrueColor::new_from_bernstein_polynomials, count));
+        let depth = Depth::parse("1e-400").unwrap();
+        let bits = bits_for_depth(depth, width);
+        let orbit = SharedOrbit::new(&Fixed::parse("3e-401", bits).unwrap(), &Fixed::parse(&format!("1.{}2", "0".repeat(400)), bits).unwrap());
+        let done = std::sync::atomic::AtomicUsize::new(12345);
+        let (mut counted, mut layers) = (Vec::new(), Vec::new());
+        assert!(render_layers_counted(&m, (&orbit, (0.0, 0.0)), (depth, 0.0), (width, height), samples, &color_of, false, None, (&cancel, Some(&done)), |colors, _| {
+            counted.push(done.load(std::sync::atomic::Ordering::Relaxed));
+            layers.push(colors.iter().map(|color| (color.red, color.green, color.blue)).collect::<Vec<_>>());
+        }));
+        //Every layer counts all its pixels once (reset at its start, so not the 12345 from before nor the layers before)
+        assert_eq!(counted, vec![width * height; samples as usize]);
+        let mut plain = Vec::new();
+        render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, 0.0), (width, height), samples, &color_of, false, None, &cancel, |colors, _| plain.push(colors.iter().map(|color| (color.red, color.green, color.blue)).collect::<Vec<_>>()));
+        assert_eq!(layers, plain);
     }
 
     #[test]

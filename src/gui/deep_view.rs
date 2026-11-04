@@ -209,6 +209,9 @@ impl MandelbrotApp {
         let preview = self.settle.is_some().then_some(PREVIEW_BLOCK);
         (self.previews_received, self.preview_levels) = (0, preview.into_iter().collect());
         let samples = if self.quality_blur { self.supersampling_amount.max(1) } else { self.supersampling_amount.clamp(1, 64) };
+        //The progress bar of the window, as for a 64-bit render: a bar for every layer, the current one filling as its pixels are done (review 9)
+        let (pixels_done, now) = (Arc::new(std::sync::atomic::AtomicUsize::new(0)), Instant::now());
+        self.bars = Some(super::render_job::RenderBars { total_layers: samples.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done: Arc::clone(&pixels_done), pixels_total: width * height, finished: None });
         let message = format!("{message} (deep zoom, scale {}, {} iterations, {samples} samples)", depth.to_text(), m.max_iterations);
         std::thread::spawn(move || {
             let started = Instant::now();
@@ -219,7 +222,7 @@ impl MandelbrotApp {
             if let Some(colors) = preview.and_then(|block| deep::render_preview_on(&m, &orbit, (depth, c.rotation()), (width, height), block, &color_of, fast_deep, gpu, &thread_cancel)) {
                 let _ = sender.send(JobMessage::Pass { colors, plane: c.clone(), pass: 0, total: samples, layer_time: layer_started.elapsed(), whole: true });
             }
-            let completed = deep::render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, c.rotation()), (width, height), samples, &color_of, fast_deep, gpu, &thread_cancel, |colors, layer| {
+            let completed = deep::render_layers_counted(&m, (&orbit, (0.0, 0.0)), (depth, c.rotation()), (width, height), samples, &color_of, fast_deep, gpu, (&thread_cancel, Some(&pixels_done)), |colors, layer| {
                 let _ = sender.send(JobMessage::Pass { colors: colors.to_vec(), plane: c.clone(), pass: layer, total: samples, layer_time: layer_started.elapsed(), whole: true });
                 layer_started = Instant::now();
             });

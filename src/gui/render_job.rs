@@ -267,8 +267,9 @@ impl MandelbrotApp {
                         progress.total = total;
                     }
                     if let Some(bars) = &mut self.bars {
-                        if pass == 1 && whole {
-                            //Only a render of the whole view tells the time per pixel: a continued render only computes the pixels that miss samples
+                        if pass == 1 && whole && self.job_deep.is_none() {
+                            //Only a render of the whole view tells the time per pixel: a continued render only computes the pixels that miss samples (and a deep
+                            //render's time says nothing about the 64-bit renderer's)
                             self.first_layer_per_pixel = Some(layer_time / u32::try_from(bars.pixels_total.max(1)).unwrap_or(u32::MAX));
                         }
                         bars.layer_times.push(layer_time);
