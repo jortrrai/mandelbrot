@@ -509,6 +509,77 @@ fn position_from(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), (
     f64::from(m.max_iterations)
 }
 
+/// The pixels that `positions` iterates at the same time on one thread
+const LANES: usize = 4;
+
+/// The state of a pixel in `positions`: its number, its `c` from the center, its difference from the reference orbit, the step of that orbit, its steps
+struct Lane {
+    index: usize,
+    c: (f64, f64),
+    z: (f64, f64),
+    at: usize,
+    step: u32,
+}
+
+/// `position` of the points `offset_of(index)` from the center for every index of `indices`, `LANES` at a time.
+///
+/// Each point does exactly the steps of `position`, in the same order, but the steps of `LANES` points are interleaved, so the processor works on one
+/// while another waits for its last result (a step waits for the one before it). A point that is done makes room for the next. The same positions, bit
+/// for bit
+pub fn positions(m: &MandelbrotSet, reference: &Reference, center: (f64, f64), indices: std::ops::Range<usize>, offset_of: impl Fn(usize) -> (f64, f64)) -> Vec<f64> {
+    let (orbit, residuals) = (reference.points(), reference.residuals());
+    let radius_squared = m.orbit_radius * m.orbit_radius;
+    let near_circle = radius_squared * (1.0 - 1e-12);
+    let start = indices.start;
+    let mut out = vec![0.0; indices.len()];
+    let mut pending = indices;
+    let mut next_lane = || pending.next().map(|index| Lane { index, c: offset_of(index), z: (0.0, 0.0), at: 0, step: 0 });
+    let mut lanes: [Option<Lane>; LANES] = std::array::from_fn(|_| next_lane());
+    loop {
+        let mut active = false;
+        for slot in &mut lanes {
+            let Some(lane) = slot else { continue };
+            active = true;
+            let (dcx, dcy) = lane.c;
+            //(As `position_from`, one step)
+            let done = if lane.step >= m.max_iterations {
+                Some(f64::from(m.max_iterations))
+            } else {
+                let (mut zx, mut zy) = lane.z;
+                if let Some((bla, steps)) = reference.skip(lane.at, zx * zx + zy * zy, m.max_iterations - lane.step) {
+                    (zx, zy) = (bla.a.0 * zx - bla.a.1 * zy + (bla.b.0 * dcx - bla.b.1 * dcy), bla.a.0 * zy + bla.a.1 * zx + (bla.b.0 * dcy + bla.b.1 * dcx));
+                    lane.at += steps as usize;
+                    lane.step += steps;
+                } else {
+                    let (ox, oy) = orbit[lane.at];
+                    (zx, zy) = (2.0 * (ox * zx - oy * zy) + (zx * zx - zy * zy) + dcx, 2.0 * (ox * zy + oy * zx) + 2.0 * zx * zy + dcy);
+                    lane.at += 1;
+                    lane.step += 1;
+                }
+                let (fx, fy) = (orbit[lane.at].0 + zx, orbit[lane.at].1 + zy);
+                let full = fx * fx + fy * fy;
+                if full >= near_circle && outside(full, radius_squared, orbit[lane.at], residuals[lane.at], (zx, zy), 0) {
+                    Some(m.smooth_position_of(lane.step, (fx, fy), (center.0 + dcx, center.1 + dcy)))
+                } else {
+                    if full < zx * zx + zy * zy || lane.at + 1 >= orbit.len() {
+                        (zx, zy) = (fx, fy);
+                        lane.at = 0;
+                    }
+                    lane.z = (zx, zy);
+                    None
+                }
+            };
+            if let Some(position) = done {
+                out[lane.index - start] = position;
+                *slot = next_lane();
+            }
+        }
+        if !active {
+            return out;
+        }
+    }
+}
+
 /// A positive number beyond the range of 64-bit floats, `mantissa · 2^exponent`: the scale of a view deeper than 10⁻³⁰⁰ (issue #263)
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Depth {
@@ -780,7 +851,17 @@ pub fn render_layers_on(m: &MandelbrotSet, (orbit, (right, up)): (&SharedOrbit, 
         //much as its speed on this view allows, without a setting or a measurement (issue #263); both give the same positions, bit for bit
         let next = std::sync::atomic::AtomicUsize::new(0);
         let (sender, receiver) = std::sync::mpsc::channel::<(usize, Vec<f64>)>();
-        let cpu_positions = |range: std::ops::Range<usize>| -> Vec<f64> { range.map(|index| position_scaled(m, &reference, center, offset_of(index % width, index / width, sample), scaled)).collect() };
+        //(Within 64-bit floats' range, `LANES` pixels at a time, see `positions`; deeper, the scaled phase first, see `position_scaled`)
+        let cpu_positions = |range: std::ops::Range<usize>| -> Vec<f64> {
+            if scaled <= SCALED_BELOW {
+                positions(m, &reference, center, range, |index| {
+                    let (cx, cy) = offset_of(index % width, index / width, sample);
+                    (times_two_to(cx, -scaled), times_two_to(cy, -scaled))
+                })
+            } else {
+                range.map(|index| position_scaled(m, &reference, center, offset_of(index % width, index / width, sample), scaled)).collect()
+            }
+        };
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 let (sender, next, cpu_positions) = (sender.clone(), &next, &cpu_positions);
@@ -982,6 +1063,33 @@ pub fn render_fixed(m: &MandelbrotSet, center_real: &Fixed, center_imaginary: &F
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixels_iterated_four_at_a_time_have_exactly_the_positions_of_one_at_a_time() {
+        //#263: `positions` interleaves the steps of `LANES` pixels; each does the steps of `position`, so the positions are the same, bit for bit (near i
+        //at 10^-100, in the seahorse valley at 10^-30 with points inside the set, at the tip c = -2; with and without BLA; and a count not a multiple of 4)
+        let near_i = (format!("3e{}", -101), format!("1.{}2", "0".repeat(100)), -100_i32, 3000_u32);
+        let seahorse = (String::from("-0.743643887037158704752191506114774"), String::from("0.131825904205311970493132056385139"), -30, 5000);
+        let tip = (String::from("-2"), String::from("0"), -40, 2000);
+        for (real, imaginary, power, limit) in [near_i, seahorse, tip] {
+            let m = MandelbrotSet::new(limit, 2.0);
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let (width, height) = (61, 37);
+            let bits = bits_for_depth(depth, width);
+            let (cx, cy) = (Fixed::parse(&real, bits).unwrap(), Fixed::parse(&imaginary, bits).unwrap());
+            let pixel = 2.5 * depth.to_f64() / width as f64;
+            let offset_of = |index: usize| (((index % width) as f64 + 0.5 - width as f64 / 2.0) * pixel, (height as f64 / 2.0 - (index / width) as f64 - 0.5) * pixel);
+            for approximate in [false, true] {
+                let reference = Reference::new(&m, (&cx, &cy), max_offset(pixel, width, height), approximate);
+                let center = (cx.to_f64(), cy.to_f64());
+                let together = positions(&m, &reference, center, 3..width * height, offset_of);
+                let alone: Vec<f64> = (3..width * height).map(|index| position(&m, &reference, center, offset_of(index))).collect();
+                assert!(together.iter().zip(&alone).all(|(a, b)| a.to_bits() == b.to_bits()), "{real} at 10^{power}, BLA {approximate}");
+                //(The seahorse valley at this limit is all inside: the pixels run to the limit there)
+                assert!(power == -30 || alone.iter().any(|position| *position < f64::from(limit)), "some escape: {real} at 10^{power}");
+            }
+        }
+    }
 
     /// The escape counts of the pixels of a `width` x `height` view of `depth` around `(real, imaginary)` in exact fixed-point arithmetic (the reference that
     /// perturbation is checked against): every pixel's own orbit, step by step, until it leaves radius 2
@@ -1475,6 +1583,42 @@ mod depth_timing {
                 }
                 let same = timed[0].1.iter().zip(&timed[1].1).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue));
                 println!("{name} 10^{power}, BLA {approximate}: CPU {:.0} ms, CPU + GPU {:.0} ms ({:.2}x), the same image: {same}", timed[0].0, timed[1].0, timed[0].0 / timed[1].0);
+            }
+        }
+    }
+
+    /// A keyframe of a deep Fast dive (#263): 3840 x 2160 at 1 sample on the CPU, near i and in the seahorse valley, with and without BLA, and the share of
+    /// its reference (the orbit's table and the BLA levels, see `Reference::of`) and its colors. Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn time_a_keyframe_and_its_parts() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (width, height) = (3840, 2160);
+        let near_i = |power: i64| (String::from("i"), power, format!("3e{}", power - 1), format!("1.{}2", "0".repeat((-power) as usize)), 20_000_u32);
+        //(MANDELBROT_KEYFRAME_SEAHORSE: also the seahorse valley, minutes a keyframe)
+        let seahorse = std::env::var("MANDELBROT_KEYFRAME_SEAHORSE").is_ok().then(|| (String::from("seahorse"), -30, String::from("-0.743643887037158704752191506114774"), String::from("0.131825904205311970493132056385139"), 50_000));
+        for (name, power, real, imaginary, iterations) in [near_i(-20), near_i(-100)].into_iter().chain(seahorse) {
+            let mut m = MandelbrotSet::new(iterations, 2.0);
+            m.palette = crate::mandelbrot_set::ColorCycle { divide: 4.0, offset: 0.0, stretch: false };
+            let color_of = |position: f64| m.interpolated_color(position, |count| m.color(crate::coloring::TrueColor::new_from_bernstein_polynomials, count));
+            let depth = Depth::parse(&format!("1e{power}")).unwrap();
+            let bits = bits_for_depth(depth, width);
+            let orbit = SharedOrbit::new(&Fixed::parse(&real, bits).unwrap(), &Fixed::parse(&imaginary, bits).unwrap());
+            orbit.orbit(iterations);
+            for approximate in [false, true] {
+                let started = std::time::Instant::now();
+                let pixel = 2.5 * depth.mantissa / width as f64;
+                let reference = Reference::of(&m, orbit.orbit_and_residuals(iterations), times_two_to(max_offset(pixel, width, height), depth.exponent), approximate);
+                let reference_time = started.elapsed().as_secs_f64() * 1000.0;
+                std::hint::black_box(&reference);
+                let started = std::time::Instant::now();
+                render_layers_on(&m, (&orbit, (0.0, 0.0)), (depth, 0.0), (width, height), 1, &color_of, approximate, None, &cancel, |layer, _| { std::hint::black_box(layer); });
+                let total = started.elapsed().as_secs_f64() * 1000.0;
+                let started = std::time::Instant::now();
+                let recolored: Vec<crate::coloring::TrueColor> = (0..width * height).map(|index| color_of(f64::from((index % 977) as u32))).collect();
+                std::hint::black_box(&recolored);
+                let coloring = started.elapsed().as_secs_f64() * 1000.0;
+                println!("{name} 10^{power}, BLA {approximate}: {total:.0} ms a keyframe; its reference {reference_time:.0} ms; coloring 8.3 M positions on one thread {coloring:.0} ms");
             }
         }
     }
