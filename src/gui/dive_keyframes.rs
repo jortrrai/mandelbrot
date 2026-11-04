@@ -471,6 +471,90 @@ mod tests {
         }
     }
 
+    fn psnr(a: &[TrueColor], b: &[TrueColor]) -> f64 {
+        let squared = a.iter().zip(b).map(|(a, b)| [(a.red, b.red), (a.green, b.green), (a.blue, b.blue)].iter().map(|(a, b)| (f64::from(*a) - f64::from(*b)).powi(2)).sum::<f64>()).sum::<f64>() / (3 * a.len()) as f64;
+        10.0 * (255.0 * 255.0 / squared.max(1e-12)).log10()
+    }
+
+    /// Fast dives against the exponential map on one deep dive (#287): the time per doubling of each, and how close their frames are to the frames rendered
+    /// one by one at 4 times the samples (PSNR), on the CPU (Embla trains on the GPU). Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn measure_the_exponential_map_against_the_keyframes_of_fast_dives() {
+        let (width, height) = (320, 180);
+        let samples = 4;
+        let doublings = 6;
+        //The place: MANDELBROT_MAP_PLACE="real imaginary log2-of-the-shallowest-scale limit", else near i at 10^-400
+        let place = std::env::var("MANDELBROT_MAP_PLACE").ok();
+        let (m, orbit, shallowest) = place.map_or_else(|| {
+            let (m, orbit) = crate::rendering::exponential_map::tests::deep_place(400);
+            (m, orbit, crate::rendering::deep::Depth::from_log2(-400.0 * std::f64::consts::LOG2_10))
+        }, |place| {
+            let parts: Vec<&str> = place.split_whitespace().collect();
+            let log2: f64 = parts[2].parse().unwrap();
+            let bits = crate::rendering::deep::bits_for_depth(crate::rendering::deep::Depth::from_log2(log2 - 40.0), 4096);
+            let (real, imaginary) = (crate::rendering::deep::Fixed::parse(parts[0], bits).unwrap(), crate::rendering::deep::Fixed::parse(parts[1], bits).unwrap());
+            (MandelbrotSet::new(parts[3].parse().unwrap(), 2.0), crate::rendering::deep::SharedOrbit::new(&real, &imaginary), crate::rendering::deep::Depth::from_log2(log2))
+        });
+        let color_of = |position: f64| m.interpolated_color(position, |count| m.color(TrueColor::new_from_bernstein_polynomials, count));
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let render = |scale: crate::rendering::deep::Depth, (w, h): (usize, usize), samples: u8| {
+            let mut colors = Vec::new();
+            assert!(crate::rendering::deep::render_layers_on(&m, (&orbit, (0.0, 0.0)), (scale, 0.0), (w, h), samples, &color_of, false, None, &cancel, |layer, _| colors = layer.to_vec()));
+            colors
+        };
+        //The frames: 30 a doubling, and the reference of each
+        let scales: Vec<crate::rendering::deep::Depth> = (0..doublings * 30).map(|frame| shallowest.times((-(frame as f64) / 30.0).exp2())).collect();
+        let references: Vec<Vec<TrueColor>> = scales.iter().step_by(7).map(|scale| render(*scale, (width, height), samples * 4)).collect();
+        //Fast dives: a keyframe a doubling at twice the size, as `DeepDive` renders them (and one more below the last frame)
+        let started = std::time::Instant::now();
+        let mut keyframe_times = Vec::new();
+        let keyframes: Vec<Vec<TrueColor>> = (0..=doublings).map(|k| {
+            let keyframe_started = std::time::Instant::now();
+            let keyframe = render(shallowest.times((-(k as f64)).exp2()), (width * 2, height * 2), samples);
+            keyframe_times.push((keyframe_started.elapsed().as_secs_f64() * 1000.0).round());
+            keyframe
+        }).collect();
+        println!("  keyframe times (ms): {keyframe_times:?}");
+        let keyframe_time = started.elapsed().as_secs_f64() / (doublings + 1) as f64;
+        let log2 = |scale: crate::rendering::deep::Depth| scale.log2() * std::f64::consts::LN_2;
+        let dive = DeepDive::new((width, height), (shallowest.log2(), shallowest.log2() - doublings as f64), |depth| {
+            let k = (shallowest.log2() - depth.log2()).round() as usize;
+            Some(keyframes[k].clone())
+        });
+        let fast: Vec<Vec<TrueColor>> = scales.iter().step_by(7).map(|scale| dive.compose_moments(&[(log2(*scale), 0.0)]).unwrap()).collect();
+        //The exponential map
+        for fineness in [1.0, std::f64::consts::SQRT_2] {
+            let size = crate::rendering::exponential_map::MapSize::for_frames((width, height), fineness);
+            let top = shallowest.times(2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0));
+            let mut map = crate::rendering::exponential_map::ExponentialMap { size, top, bands: std::collections::BTreeMap::new() };
+            let started = std::time::Instant::now();
+            let bands = doublings + crate::rendering::exponential_map::MapSize::doublings_below_the_corner((width, height)) + 1;
+            let mut times = Vec::new();
+            for band in 0..bands {
+                let band_started = std::time::Instant::now();
+                map.bands.insert(band, crate::rendering::exponential_map::render_band(&m, &orbit, top.times((-(band as f64)).exp2()), size, samples, &color_of, false, None, &cancel).unwrap());
+                times.push(band_started.elapsed().as_secs_f64());
+            }
+            let band_time = started.elapsed().as_secs_f64() / bands as f64;
+            println!("  band times (ms): {:?}", times.iter().map(|time| (time * 1000.0).round()).collect::<Vec<_>>());
+            let started = std::time::Instant::now();
+            let taps = crate::rendering::exponential_map::FrameTaps::new((width, height));
+            let read: Vec<Vec<TrueColor>> = scales.iter().step_by(7).map(|scale| map.frame(&taps, *scale, 0.0)).collect();
+            let compose = started.elapsed().as_secs_f64() / read.len() as f64;
+            let mean = |frames: &[Vec<TrueColor>]| frames.iter().zip(&references).map(|(frame, reference)| psnr(frame, reference)).sum::<f64>() / references.len() as f64;
+            //(The outer pixels, more than 80% of the way to a corner: where the map is coarsest)
+            let outer = |frame: &[TrueColor]| -> Vec<TrueColor> {
+                let corner = (width as f64 / 2.0).hypot(height as f64 / 2.0);
+                frame.iter().enumerate().filter(|(index, _)| ((index % width) as f64 + 0.5 - width as f64 / 2.0).hypot((index / width) as f64 + 0.5 - height as f64 / 2.0) > 0.8 * corner).map(|(_, color)| *color).collect()
+            };
+            let mean_outer = |frames: &[Vec<TrueColor>]| frames.iter().zip(&references).map(|(frame, reference)| psnr(&outer(frame), &outer(reference))).sum::<f64>() / references.len() as f64;
+            println!("  outer pixels: PSNR {:.2} dB (Fast dives {:.2} dB)", mean_outer(&read), mean_outer(&fast));
+            println!("map, fineness {fineness:.2}: {} x {} a doubling ({} pixels, keyframes {}), {:.0} ms a doubling (keyframes {:.0} ms), {:.1} ms to read a frame; PSNR {:.2} dB (Fast dives {:.2} dB)",
+                size.columns, size.rows, size.band_pixels(), width * height * 4, band_time * 1000.0, keyframe_time * 1000.0, compose * 1000.0, mean(&read), mean(&fast));
+        }
+    }
+
     #[test]
     fn a_deep_dive_renders_each_keyframe_once_keeps_a_few_and_composes_like_the_keyframes_of_a_shallow_dive() {
         //#263: keyframes at exact halvings, rendered as the frames reach them; within 64-bit floats the frames are bit for bit those of `DiveKeyframes`

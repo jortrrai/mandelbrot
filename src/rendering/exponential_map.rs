@@ -1,0 +1,239 @@
+//! Dive frames from an exponential map (issue #287, the method of Fraktaler 3 / Kalles Fraktaler 2+ with zoomasm, implemented from its description).
+//!
+//! A dive into a fixed center is rendered once as rings around the center: row `r` of the map is the ring at the radius `top · 2^(-r / rows)`, column `c`
+//! the angle `2π · c / columns`. A frame at any depth and turn is then read from the map: a pixel at the distance `d` from the frame's center is the ring at
+//! that distance, so going deeper is moving down the rows and turning is moving along the columns. The map is rendered in bands of one doubling
+//! (`rows` rows), each a view of its own depth for the deep renderer, so it reaches any depth with a few bands in memory.
+//!
+//! The map is as fine as a frame at the frame's corners (with `fineness` 1) and finer towards its center, where every frame reads the deeper rows.
+
+use super::deep::{render_points_on, Depth, SharedOrbit};
+use crate::coloring::TrueColor;
+use crate::mandelbrot_set::MandelbrotSet;
+
+/// The size of an exponential map: its columns (the angles), and its rows per doubling of the radius
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapSize {
+    /// The angles around the center
+    pub columns: usize,
+    /// The rings per doubling of the radius
+    pub rows: usize,
+}
+
+impl MapSize {
+    /// The map of frames `width` x `height`: a column and a row are `1 / fineness` frame pixels at the frame's corners (square map pixels: a row is as tall
+    /// as a column is wide at every radius)
+    #[must_use]
+    pub fn for_frames((width, height): (usize, usize), fineness: f64) -> MapSize {
+        let corner = (width as f64 / 2.0).hypot(height as f64 / 2.0);
+        let columns = (std::f64::consts::TAU * corner * fineness).ceil() as usize;
+        let rows = (columns as f64 * std::f64::consts::LN_2 / std::f64::consts::TAU).ceil() as usize;
+        MapSize { columns, rows }
+    }
+
+    /// The pixels of a band (one doubling)
+    #[must_use]
+    pub fn band_pixels(self) -> usize {
+        self.columns * self.rows
+    }
+
+    /// The doublings below a frame's corner that its pixels read, down to a tenth of a pixel from its center (the deepest bands a frame needs)
+    #[must_use]
+    pub fn doublings_below_the_corner((width, height): (usize, usize)) -> usize {
+        ((width as f64 / 2.0).hypot(height as f64 / 2.0) / 0.1).log2().ceil() as usize
+    }
+}
+
+/// The band of an exponential map whose first row is the ring at the radius `top`: one doubling, `size.rows` rows of `size.columns`.
+///
+/// Averaged over `samples` samples a pixel (at the jitter of the 64-bit renderer); `None` when `cancel` stopped it
+#[allow(clippy::too_many_arguments)] // The orbit, the band and its samples, how to color, the GPU and when to stop
+pub fn render_band(m: &MandelbrotSet, orbit: &SharedOrbit, top: Depth, size: MapSize, samples: u8, color_of: &(impl Fn(f64) -> TrueColor + Sync), approximate: bool,
+    gpu: Option<(&super::gpu::GpuIterator, bool)>, cancel: &std::sync::atomic::AtomicBool) -> Option<Vec<TrueColor>> {
+    let MapSize { columns, rows } = size;
+    let offset_of = |index: usize, sample: u8| {
+        let (column, row) = (index % columns, index / columns);
+        let (jx, jy) = if sample == 0 { (0.5, 0.5) } else { super::jitter::sample_jitter(column, row, sample) };
+        let radius = top.mantissa * (-(row as f64 + jy) / rows as f64).exp2();
+        let (sin, cos) = (std::f64::consts::TAU * (column as f64 + jx) / columns as f64).sin_cos();
+        (radius * cos, radius * sin)
+    };
+    let mut band = None;
+    let done = render_points_on(m, orbit, (top.exponent, top.mantissa), (size.band_pixels(), &offset_of), samples, color_of, approximate, gpu, cancel, |layer, number| {
+        if number == samples.max(1) {
+            band = Some(layer.to_vec());
+        }
+    });
+    band.filter(|_| done)
+}
+
+/// The bands of a dive's exponential map that frames are read from: band `k` starts at the radius `top / 2^k`
+pub struct ExponentialMap {
+    /// The size of its bands
+    pub size: MapSize,
+    /// The radius of the first row of band 0
+    pub top: Depth,
+    /// The bands there are, by number (the frames read only these: a row outside them is the nearest row in them)
+    pub bands: std::collections::BTreeMap<usize, Vec<TrueColor>>,
+}
+
+/// Where a frame's pixel taps the map (as the keyframes of Fast dives are tapped, see `dive_keyframes`): two by two in a pixel
+const TAPS: [f64; 2] = [0.25, 0.75];
+
+impl ExponentialMap {
+    /// The frame `width` x `height` of the dive at `scale` (its view `2.5 · scale` wide), turned counterclockwise by `rotation` radians, on all the render
+    /// threads, with the taps of `taps` (made for frames of this size)
+    #[must_use]
+    pub fn frame(&self, taps: &FrameTaps, scale: Depth, rotation: f64) -> Vec<TrueColor> {
+        let (width, height) = (taps.width, taps.height);
+        let MapSize { columns, rows } = self.size;
+        //The row of a tap is its row in a map whose first row is at the frame's pixel, moved down by the doublings from the map's top to the pixel; its
+        //column moves back by the turn (as `deep::turned` turns the offsets of a frame: by -rotation in the plane)
+        let log2_pixel = scale.log2() + (2.5 / width as f64).log2();
+        let row_shift = (self.top.log2() - log2_pixel) * rows as f64 - 0.5;
+        let column_shift = -rotation * columns as f64 / std::f64::consts::TAU - 0.5;
+        //(The rows there are: a row outside them is the nearest row in them)
+        let first_band = self.bands.keys().next().copied().unwrap_or(0);
+        let bands: Vec<&[TrueColor]> = self.bands.range(first_band..).map(|(_, band)| band.as_slice()).collect();
+        let (first, last) = (first_band * rows, (first_band + bands.len()) * rows - 1);
+        let pixel = |column: usize, row: usize| -> [f32; 3] {
+            let (band, row) = ((row - first) / rows, (row - first) % rows);
+            let color = bands[band][row * columns + column];
+            [f32::from(color.red), f32::from(color.green), f32::from(color.blue)]
+        };
+        //The color at the column `u` and the row `v` (continuous, pixel centers at whole numbers; the columns wrap around), from the four map pixels
+        //around it as `bilinear` in `dive_keyframes`
+        let at = |u: f64, v: f64| -> [f32; 3] {
+            let v = v.clamp(first as f64, last as f64);
+            let u = u.rem_euclid(columns as f64);
+            let (row, column) = (v.floor(), u.floor());
+            let (fy, fx) = ((v - row) as f32, (u - column) as f32);
+            let (row, column) = (row as usize, (column as usize).min(columns - 1));
+            let (below, next) = ((row + 1).min(last), if column + 1 == columns { 0 } else { column + 1 });
+            let (a, b, c, d) = (pixel(column, row), pixel(next, row), pixel(column, below), pixel(next, below));
+            std::array::from_fn(|channel| (a[channel] * (1.0 - fx) + b[channel] * fx) * (1.0 - fy) + (c[channel] * (1.0 - fx) + d[channel] * fx) * fy)
+        };
+        let mut frame = vec![TrueColor::new(0, 0, 0); width * height];
+        let threads = super::render_thread_count().max(1);
+        let per_thread = (width * height).div_ceil(threads).max(1);
+        std::thread::scope(|scope| {
+            for (out, pixel_taps) in frame.chunks_mut(per_thread).zip(taps.taps.chunks(per_thread * TAPS.len() * TAPS.len())) {
+                let at = &at;
+                scope.spawn(move || {
+                    for (color, pixel_taps) in out.iter_mut().zip(pixel_taps.chunks(TAPS.len() * TAPS.len())) {
+                        let mut sum = [0.0_f32; 3];
+                        for &(column, row) in pixel_taps {
+                            let tap = at(f64::from(column) * columns as f64 + column_shift, f64::from(row) * rows as f64 + row_shift);
+                            for (total, channel) in sum.iter_mut().zip(tap) {
+                                *total += channel;
+                            }
+                        }
+                        let [red, green, blue] = sum.map(|total| (total / 4.0).round() as u8);
+                        *color = TrueColor::new(red, green, blue);
+                    }
+                });
+            }
+        });
+        frame
+    }
+}
+
+/// Where the taps of the pixels of frames `width` x `height` fall in an exponential map, worked out once for all the frames of a dive.
+///
+/// For each tap: its angle (in turns) and its distance from the center (in doublings below a pixel)
+pub struct FrameTaps {
+    width: usize,
+    height: usize,
+    taps: Vec<(f32, f32)>,
+}
+
+impl FrameTaps {
+    /// The taps of frames `width` x `height`
+    #[must_use]
+    pub fn new((width, height): (usize, usize)) -> FrameTaps {
+        let mut taps = Vec::with_capacity(width * height * TAPS.len() * TAPS.len());
+        for y in 0..height {
+            for x in 0..width {
+                for tap_y in TAPS {
+                    for tap_x in TAPS {
+                        let (right, up) = (x as f64 + tap_x - width as f64 / 2.0, height as f64 / 2.0 - y as f64 - tap_y);
+                        taps.push(((up.atan2(right) / std::f64::consts::TAU) as f32, (-right.hypot(up).log2()) as f32));
+                    }
+                }
+            }
+        }
+        FrameTaps { width, height, taps }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::rendering::deep::{bits_for_depth, render_layers_on, Fixed};
+
+    pub fn deep_place(power: usize) -> (MandelbrotSet, SharedOrbit) {
+        let bits = bits_for_depth(Depth::from_log2(-(power as f64) * std::f64::consts::LOG2_10 - 40.0), 4096);
+        let (real, imaginary) = (Fixed::parse(&format!("3e-{}", power + 1), bits).unwrap(), Fixed::parse(&format!("1.{}2", "0".repeat(power)), bits).unwrap());
+        (MandelbrotSet::new(3000, 2.0), SharedOrbit::new(&real, &imaginary))
+    }
+
+    fn mean_difference(a: &[TrueColor], b: &[TrueColor]) -> f64 {
+        a.iter().zip(b).map(|(a, b)| f64::from(a.red.abs_diff(b.red)) + f64::from(a.green.abs_diff(b.green)) + f64::from(a.blue.abs_diff(b.blue))).sum::<f64>() / (3 * a.len()) as f64
+    }
+
+    #[test]
+    fn a_map_is_as_fine_as_a_frame_at_its_corners() {
+        let size = MapSize::for_frames((1920, 1080), 1.0);
+        assert_eq!((size.columns, size.rows), (6921, 764));
+        assert_eq!(MapSize::doublings_below_the_corner((1920, 1080)), 14);
+    }
+
+    #[test]
+    fn frames_read_from_the_map_are_close_to_the_frames_rendered_directly_also_turned_and_past_64_bit_floats() {
+        //#287: frames between two doublings at 10^-400, read from the bands below them, against the same frames rendered directly by the deep renderer
+        let (width, height) = (96, 64);
+        let (m, orbit) = deep_place(400);
+        let color_of = |position: f64| m.interpolated_color(position, |count| m.color(TrueColor::new_from_bernstein_polynomials, count));
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let size = MapSize::for_frames((width, height), 1.0);
+        let shallowest = Depth::from_log2(-400.0 * std::f64::consts::LOG2_10);
+        //(The map starts at the corner of the shallowest frame: 2.5 · scale / width a pixel)
+        let top = shallowest.times(2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0));
+        let mut map = ExponentialMap { size, top, bands: std::collections::BTreeMap::new() };
+        for band in 0..MapSize::doublings_below_the_corner((width, height)) + 2 {
+            map.bands.insert(band, render_band(&m, &orbit, top.times((-(band as f64)).exp2()), size, 4, &color_of, false, None, &cancel).unwrap());
+        }
+        for (doublings, rotation) in [(0.0_f64, 0.0), (0.4, 0.0), (1.7, 0.0), (0.9, 1.0)] {
+            let scale = shallowest.times((-doublings).exp2());
+            let read = map.frame(&FrameTaps::new((width, height)), scale, rotation);
+            let mut direct = Vec::new();
+            assert!(render_layers_on(&m, (&orbit, (0.0, 0.0)), (scale, rotation), (width, height), 16, &color_of, false, None, &cancel, |layer, _| direct = layer.to_vec()));
+            let difference = mean_difference(&read, &direct);
+            assert!(difference < 12.0, "{doublings} doublings down, turned {rotation}: mean difference {difference}");
+        }
+    }
+
+    /// Times reading 1920 x 1080 frames from a map (of made-up colors), unturned and turned: compare `time_composing_deep_dive_frames` of Fast dives.
+    /// Run by hand with --release --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn time_reading_frames_from_a_map() {
+        let (width, height) = (1920, 1080);
+        let size = MapSize::for_frames((width, height), 1.0);
+        let band: Vec<TrueColor> = (0..size.band_pixels()).map(|index| TrueColor::new((index % 251) as u8, (index % 241) as u8, (index % 239) as u8)).collect();
+        let top = Depth::from_log2(-40.0);
+        let map = ExponentialMap { size, top, bands: (0..=MapSize::doublings_below_the_corner((width, height)) + 3).map(|k| (k, band.clone())).collect() };
+        let started = std::time::Instant::now();
+        let taps = FrameTaps::new((width, height));
+        println!("taps worked out in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+        let shallowest = top.times(width as f64 / 2.5 / (width as f64 / 2.0).hypot(height as f64 / 2.0));
+        for rotation in [0.0, 0.3] {
+            let started = std::time::Instant::now();
+            let frames = 60;
+            for frame in 0..frames {
+                std::hint::black_box(map.frame(&taps, shallowest.times((-3.0 * f64::from(frame) / f64::from(frames)).exp2()), rotation));
+            }
+            println!("rotation {rotation}: {:.1} ms a frame", started.elapsed().as_secs_f64() * 1000.0 / f64::from(frames));
+        }
+    }
+}
