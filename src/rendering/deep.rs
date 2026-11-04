@@ -112,6 +112,14 @@ impl Fixed {
         Fixed { value: &self.value + scaled, bits: self.bits }
     }
 
+    /// `(self - other) · 2^-power` as the nearest 64-bit float (how far apart two deep centers are, in units of a view's `2^exponent`, see `Depth`)
+    pub fn offset_from(&self, other: &Fixed, power: i32) -> f64 {
+        let bits = self.bits.max(other.bits);
+        let difference = Fixed { value: self.with_bits(bits).value - other.with_bits(bits).value, bits };
+        let (mantissa, scaled) = difference.to_scaled();
+        times_two_to(mantissa, (-i64::from(scaled) - i64::from(power)).clamp(-4000, 4000) as i32) //(Beyond ±4000 it is 0 or infinite anyway)
+    }
+
     /// The same number with `bits` bits after the binary point (more: exact; fewer: rounded down)
     pub fn with_bits(&self, bits: u32) -> Fixed {
         let value = if bits >= self.bits { &self.value << (bits - self.bits) } else { &self.value >> (self.bits - bits) };

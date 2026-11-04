@@ -123,6 +123,7 @@ impl MandelbrotApp {
         self.p = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(size.width, size.height));
         self.p.color_channel_mapping = mapping;
         self.shown_plane = self.c.clone();
+        self.shown_deep = self.deep_shown().map(super::deep_view::DeepView::exact);
         self.preview_block = 1;
         self.shown_scaled = None;
         self.texture_outdated = true;

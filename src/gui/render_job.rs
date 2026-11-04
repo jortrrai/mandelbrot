@@ -252,6 +252,7 @@ impl MandelbrotApp {
                         let replaced = std::mem::replace(&mut self.p.colors, colors);
                         self.spare_colors.put(replaced);
                         self.shown_plane = plane;
+                        self.shown_deep.clone_from(&self.job_deep);
                         self.texture_outdated = true;
                         self.layer_shown = pass > 0;
                         self.preview_block = preview_block;
@@ -314,6 +315,7 @@ impl MandelbrotApp {
                     if completed || self.frame_accepted {
                         if reported {
                             self.shown_plane = c.clone();
+                            self.shown_deep.clone_from(&self.job_deep);
                         }
                         self.p.update_pixels(); //The colors are those of the last frame shown, which arrived with its pass
                     }
@@ -518,6 +520,7 @@ impl MandelbrotApp {
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
         self.flight_queue.clear();
         self.job = Some(receiver);
+        self.job_deep = None;
         self.flight_job = false;
         self.flight_frame_job = matches!(kind, RenderKind::FlightFrame);
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });

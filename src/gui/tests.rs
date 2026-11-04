@@ -2685,6 +2685,32 @@ fn a_video_with_music_lasts_as_long_as_the_track_at_an_even_speed_and_has_its_so
 }
 
 #[test]
+fn while_a_deep_view_renders_its_old_image_follows_a_drag_and_a_zoom() {
+    //Review 9: past 64-bit floats the old image shrank and hardly moved, as it was placed by the 64-bit plane of the deep view
+    let mut app = manual_app(&Config::sized(64, 48, 200, 1));
+    app.go_to_exact(&(String::from("-0.7957429802875415"), String::from("0.18481461635741003")), crate::rendering::deep::Depth::parse("1e-400").unwrap());
+    app.render("Deep");
+    wait_for_job(&mut app);
+    assert!(app.deep_shown().is_some() && app.buffer_is_complete);
+    assert_eq!(app.drawn_fraction(), FULL_TEXTURE);
+    //Dragged 8 pixels to the right and 6 up: the old image moves 8 left and 6 down until the render of the new view arrives
+    app.pan_deep(8, 6);
+    app.render("Moved by dragging");
+    let fraction = app.drawn_fraction();
+    let expected = egui::Rect::from_min_max(egui::pos2(-8.0 / 64.0, 6.0 / 48.0), egui::pos2(1.0 - 8.0 / 64.0, 1.0 + 6.0 / 48.0));
+    assert!((fraction.min - expected.min).length() + (fraction.max - expected.max).length() < 1e-4, "{fraction:?} is not {expected:?}");
+    wait_for_job(&mut app);
+    assert_eq!(app.drawn_fraction(), FULL_TEXTURE);
+    //Zoomed in twice around the center: the old image is twice as large, around the center
+    app.zoom_deep(0.5, (32.0, 24.0));
+    app.render("Zoomed in with the wheel");
+    let fraction = app.drawn_fraction();
+    let expected = egui::Rect::from_min_max(egui::pos2(-0.5, -0.5), egui::pos2(1.5, 1.5));
+    assert!((fraction.min - expected.min).length() + (fraction.max - expected.max).length() < 1e-4, "{fraction:?} is not {expected:?}");
+    wait_for_job(&mut app);
+}
+
+#[test]
 fn zooming_past_64_bit_floats_switches_to_the_deep_view_and_back() {
     //Issue #141: around c = i, a point of the boundary, which has structure at every depth
     let mut app = manual_app(&Config::sized(64, 48, 200, 4));

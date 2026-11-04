@@ -360,6 +360,10 @@ pub struct MandelbrotApp {
     previews_received: usize,
     /// The view that the colors of `p` show. It differs from `c` while the render of a new view has not shown its first layer yet: the image is then drawn moved and scaled, see `transform`
     shown_plane: ComplexPlane,
+    /// The exact view of the colors of `p` when they are of a deep view (see `deep_view`), and the exact view of the running job's images: `shown_plane` alone
+    /// is too coarse to place them (the 64-bit plane of a deep view hardly moves or zooms), see `deep_view::exact_fraction`
+    shown_deep: Option<deep_view::ExactView>,
+    job_deep: Option<deep_view::ExactView>,
     /// The receiving end of the running background rendering job, if any. While a job runs, the controls are disabled.
     job: Option<Receiver<JobMessage>>,
     /// The colors of frames that the screen no longer shows, which the jobs fill with later frames: a big image is then not allocated (and its memory cleared by
@@ -561,6 +565,8 @@ impl MandelbrotApp {
             preview_levels: Vec::new(),
             previews_received: 0,
             shown_plane,
+            shown_deep: None,
+            job_deep: None,
             job: None,
             spare_colors: render_job::SparePool::default(),
             progress: None,
@@ -821,7 +827,7 @@ impl MandelbrotApp {
     /// Where the image is drawn, as a fraction of the image area: moved and scaled to the current view (best effort), or held where it is, so the screen never shows
     /// black where nothing is rendered: the view on the screen then is the view of the last frame that was complete enough, and it moves when the next one is
     pub(super) fn drawn_fraction(&self) -> egui::Rect {
-        if self.required_readiness() == Readiness::Any { transform::shown_fraction(&self.shown_plane, &self.c) } else { FULL_TEXTURE }
+        if self.required_readiness() == Readiness::Any { self.fraction_of(&self.shown_plane, self.shown_deep.as_ref()) } else { FULL_TEXTURE }
     }
 
     /// The view that the screen shows: the current view, or with a held view (see `drawn_fraction`) the view of the frame on the screen

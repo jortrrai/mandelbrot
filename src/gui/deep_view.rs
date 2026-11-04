@@ -14,8 +14,10 @@ use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use super::render_job::{JobMessage, Progress};
-use super::MandelbrotApp;
-use crate::complex_plane::{Precision, View};
+use eframe::egui;
+
+use super::{transform, MandelbrotApp};
+use crate::complex_plane::{ComplexPlane, Precision, View};
 use crate::rendering::deep::{self, Depth, Fixed};
 
 /// The exact view deeper than 64-bit floats: its center, its scale, and the view of the complex plane it left (to tell when something else moved it)
@@ -24,6 +26,44 @@ pub(super) struct DeepView {
     pub(super) imaginary: Fixed,
     pub(super) scale: Depth,
     plane: String,
+}
+
+/// An exact view: its center and its scale (of a deep view, or of a 64-bit plane, see `ExactView::of_plane`)
+#[derive(Clone, Debug)]
+pub(super) struct ExactView {
+    real: Fixed,
+    imaginary: Fixed,
+    scale: Depth,
+}
+
+impl ExactView {
+    /// The exact view of the 64-bit plane `plane`, with `bits` bits after the binary point
+    fn of_plane(plane: &ComplexPlane, bits: u32) -> ExactView {
+        let (center, zero) = (plane.center(), Fixed::parse("0", bits).expect("0 is a number"));
+        ExactView { real: zero.plus(center.x), imaginary: zero.plus(center.y), scale: Depth::from_f64(plane.get_scale()) }
+    }
+}
+
+impl DeepView {
+    /// Its exact view
+    pub(super) fn exact(&self) -> ExactView {
+        ExactView { real: self.real.clone(), imaginary: self.imaginary.clone(), scale: self.scale }
+    }
+}
+
+/// Where the image of the exact view `shown` belongs in the image of the exact view `wanted` (both turned by `rotation`), in fractions of the wanted image, as
+/// `transform::shown_fraction` gives it for 64-bit planes: also where the views are deeper than 64-bit floats can tell apart. `None` when the image would
+/// be far too large or small to draw
+fn exact_fraction(shown: &ExactView, wanted: &ExactView, rotation: f64, (width, height): (f64, f64)) -> Option<egui::Rect> {
+    //In units of `2^exponent` of the wanted view: the view is `2.5 · mantissa` wide (see `Depth`)
+    let power = wanted.scale.exponent;
+    let (right, up) = (shown.real.offset_from(&wanted.real, power), shown.imaginary.offset_from(&wanted.imaginary, power));
+    let (right, up) = deep::turned((right, up), -rotation); //(Back to the screen's directions)
+    let across = 2.5 * wanted.scale.mantissa;
+    let size = Depth { mantissa: shown.scale.mantissa, exponent: shown.scale.exponent.saturating_sub(power) }.to_f64() / wanted.scale.mantissa;
+    let (x, y) = (0.5 + right / across, 0.5 - up / (across * height / width));
+    let fraction = egui::Rect::from_center_size(egui::pos2(x as f32, y as f32), egui::vec2(size as f32, size as f32));
+    (size.is_finite() && (1e-4..1e4).contains(&size) && x.abs() < 1e4 && y.abs() < 1e4).then_some(fraction)
 }
 
 impl MandelbrotApp {
@@ -122,6 +162,22 @@ impl MandelbrotApp {
         self.deep.as_ref().filter(|deep| deep.plane == format!("{:?}", self.c.get_view()))
     }
 
+    /// Where the image of `plane` (exactly `exact`, when it is of a deep view) belongs in the image on the screen, see `transform::shown_fraction`: placed exactly
+    /// when either is a deep view, whose 64-bit planes cannot tell where it is
+    pub(super) fn fraction_of(&self, plane: &ComplexPlane, exact: Option<&ExactView>) -> egui::Rect {
+        let held = self.required_readiness() != super::Readiness::Any; //(Then the screen shows the view of its frame, see `drawn_fraction`)
+        let wanted = if held { self.shown_deep.clone() } else { self.deep_shown().map(DeepView::exact) };
+        let (wanted_plane, rotation) = (if held { &self.shown_plane } else { &self.c }, self.c.rotation());
+        if (exact.is_none() && wanted.is_none()) || plane.rotation().to_bits() != rotation.to_bits() {
+            return transform::shown_fraction(plane, wanted_plane);
+        }
+        let bits = exact.or(wanted.as_ref()).map_or(64, |view| view.real.bits());
+        let shown = exact.cloned().unwrap_or_else(|| ExactView::of_plane(plane, bits));
+        let wanted = wanted.unwrap_or_else(|| ExactView::of_plane(wanted_plane, bits));
+        let size = (self.p.pixel_plane.width as f64, self.p.pixel_plane.height as f64);
+        exact_fraction(&shown, &wanted, rotation, size).unwrap_or(egui::Rect::NOTHING)
+    }
+
     /// The scale of the view that is shown: the deep view's, or the complex plane's
     pub(super) fn shown_scale(&self) -> f64 {
         self.deep_shown().map_or_else(|| self.c.get_scale(), |deep| deep.scale.to_f64())
@@ -161,6 +217,7 @@ impl MandelbrotApp {
             let _ = sender.send(JobMessage::Done { c, m, message, elapsed: started.elapsed(), completed, reported: true });
         });
         self.job = Some(receiver);
+        self.job_deep = self.deep_shown().map(DeepView::exact);
         self.progress = Some(Progress { pass: 0, total: samples, cancel, stop: None });
     }
 
@@ -215,5 +272,42 @@ impl MandelbrotApp {
         });
         self.log("Saving the deep image...");
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(real: &str, imaginary: &str, scale: &str) -> ExactView {
+        let scale = Depth::parse(scale).expect("a depth");
+        let bits = deep::bits_for_depth(scale, 1000);
+        ExactView { real: Fixed::parse(real, bits).expect("a number"), imaginary: Fixed::parse(imaginary, bits).expect("a number"), scale }
+    }
+
+    fn assert_close(actual: egui::Rect, expected: egui::Rect) {
+        let error = (actual.min - expected.min).length() + (actual.max - expected.max).length();
+        assert!(error < 1e-4, "{actual:?} is not {expected:?}");
+    }
+
+    #[test]
+    fn the_old_image_of_a_deep_view_moves_with_a_pan_and_grows_with_a_zoom_far_beyond_64_bit_floats() {
+        let size = (1000.0, 500.0);
+        let old = view("-1.74", "0.01", "1e-400");
+        //A pixel is 2.5e-403: 100 pixels to the right and 50 up moves the old image 100 pixels left and 50 down
+        let pixel = Depth::parse("2.5e-403").expect("a depth");
+        let moved = ExactView { real: old.real.plus_scaled(100.0 * pixel.mantissa, pixel.exponent), imaginary: old.imaginary.plus_scaled(50.0 * pixel.mantissa, pixel.exponent), scale: old.scale };
+        let fraction = exact_fraction(&old, &moved, 0.0, size).expect("on the screen");
+        assert_close(fraction, egui::Rect::from_min_max(egui::pos2(-0.1, 0.1), egui::pos2(0.9, 1.1)));
+        //Zoomed in twice around the center: the old image is twice as large
+        let zoomed = ExactView { scale: old.scale.times(0.5), ..old.clone() };
+        assert_close(exact_fraction(&old, &zoomed, 0.0, size).expect("on the screen"), egui::Rect::from_min_max(egui::pos2(-0.5, -0.5), egui::pos2(1.5, 1.5)));
+        //Turned a quarter: the pan to the right of the screen is up in the plane, and the old image still goes left
+        let turned = std::f64::consts::FRAC_PI_2;
+        let (right, up) = deep::turned((100.0 * pixel.mantissa, 0.0), turned);
+        let moved = ExactView { real: old.real.plus_scaled(right, pixel.exponent), imaginary: old.imaginary.plus_scaled(up, pixel.exponent), scale: old.scale };
+        assert_close(exact_fraction(&old, &moved, turned, size).expect("on the screen"), egui::Rect::from_min_max(egui::pos2(-0.1, 0.0), egui::pos2(0.9, 1.0)));
+        //An image a million times larger is not drawn
+        assert!(exact_fraction(&view("-1.74", "0.01", "1e-394"), &old, 0.0, size).is_none());
     }
 }

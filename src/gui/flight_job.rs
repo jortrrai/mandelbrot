@@ -215,6 +215,7 @@ impl MandelbrotApp {
         self.flight_job = true;
         self.bars = None;
         self.job = Some(receiver);
+        self.job_deep = None;
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: Some(stop) });
     }
 }

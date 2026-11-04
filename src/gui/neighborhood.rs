@@ -109,7 +109,8 @@ impl MandelbrotApp {
             let texture = ctx.load_texture("neighborhood", image, TextureOptions::LINEAR);
             self.neighborhood = Some(Neighborhood { plane, around: job.around, texture, key: job.key, margin: job.margin });
         }
-        let idle = self.render_neighborhood && !self.is_busy() && self.flight.is_none() && !self.gesture_active && self.settle.is_none() && self.buffer_is_complete;
+        //(Not of a deep view: the 64-bit renderer would draw another place there, see `deep_view`)
+        let idle = self.render_neighborhood && self.deep_shown().is_none() && !self.is_busy() && self.flight.is_none() && !self.gesture_active && self.settle.is_none() && self.buffer_is_complete;
         if !idle || self.neighborhood_job.is_some() {
             return;
         }
@@ -148,7 +149,7 @@ impl MandelbrotApp {
     pub(super) fn draw_neighborhood(&self, painter: &egui::Painter, rect: egui::Rect) {
         let key = NeighborhoodKey::new(&self.m, self.coloring_function, self.p.color_channel_mapping);
         if let Some(neighborhood) = self.neighborhood.as_ref().filter(|neighborhood| self.render_neighborhood && neighborhood.key == key) {
-            let target = transform::rect_of(transform::shown_fraction(&neighborhood.plane, self.displayed_plane()), rect);
+            let target = transform::rect_of(self.fraction_of(&neighborhood.plane, None), rect);
             painter.image(neighborhood.texture.id(), target, FULL_TEXTURE, Color32::WHITE);
         }
     }
