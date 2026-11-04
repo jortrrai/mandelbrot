@@ -219,16 +219,37 @@ impl<'a> DeepDive<'a> {
         Some((image, on_gpu))
     }
 
+    /// The keyframe that serves the scale `e^ln_scale`: the deepest whose scale is at least the frame's
+    fn index_of(&self, ln_scale: f64) -> usize {
+        let log2 = ln_scale / std::f64::consts::LN_2;
+        ((self.shallowest.log2() - log2 + 1e-9).floor().max(0.0) as usize).min(self.count - 1)
+    }
+
+    /// Renders the keyframe after the deepest of `moments` if it is not kept and no keyframe is being rendered (a frame's thread does this after sending its
+    /// frame, while the other threads compose the next frames: else they all wait for it when the first of its frames comes). The same keyframe, rendered
+    /// earlier: the frames are the same, bit for bit
+    pub(super) fn prefetch_after(&self, moments: &[(f64, f64)]) {
+        let Some(next) = moments.iter().map(|&(ln_scale, _)| self.index_of(ln_scale) + 1).max().filter(|next| *next < self.count) else {
+            return;
+        };
+        if self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|(kept, _)| *kept == next) {
+            return;
+        }
+        if let Ok(rendering) = self.rendering.try_lock() {
+            drop(rendering);
+            let _ = self.keyframe(next);
+        }
+    }
+
     /// The frame that averages the frames at the moments `(ln_scale, rotation)` (the natural logarithm of the scale), each composed from the keyframe of its
     /// depth, as `DiveKeyframes::compose_moments` composes them on the CPU (`None`: cancelled while a keyframe was rendered)
     pub(super) fn compose_moments(&self, moments: &[(f64, f64)]) -> Option<Vec<TrueColor>> {
-        let shallowest = self.shallowest.log2();
         let mut images = Vec::with_capacity(moments.len());
         let mut placed = Vec::with_capacity(moments.len());
         for &(ln_scale, rotation) in moments {
             let log2 = ln_scale / std::f64::consts::LN_2;
-            //The keyframe that serves this scale: the deepest whose scale is at least the frame's, and a pixel of the frame in its pixels (1 to 2)
-            let index = ((shallowest - log2 + 1e-9).floor().max(0.0) as usize).min(self.count - 1);
+            //The keyframe that serves this scale, and a pixel of the frame in its pixels (1 to 2)
+            let index = self.index_of(ln_scale);
             let footprint = (log2 - self.depth(index).log2() + 1.0).exp2();
             images.push(self.keyframe(index)?);
             placed.push((index, footprint, rotation));
@@ -505,6 +526,35 @@ mod tests {
             let composed = fresh.compose_moments(&moments.iter().map(|&(scale, rotation)| (scale.ln(), rotation)).collect::<Vec<_>>()).unwrap();
             assert!(composed.iter().zip(&expected).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue)), "{moments:?}");
         }
+    }
+
+    #[test]
+    fn a_deep_dive_renders_the_next_keyframe_ahead_once_and_its_frames_are_the_same() {
+        //#263: after a frame, the keyframe after it is rendered ahead (while other threads compose), once; the frames are the ones without it
+        let (width, height) = (20, 12);
+        let image_of = |depth: crate::rendering::deep::Depth| -> Vec<TrueColor> {
+            let seed = depth.exponent.unsigned_abs();
+            (0..width * height * 4).map(|index| TrueColor::new((index as u32 * 7 + seed * 31) as u8, (index as u32 * 13 + seed) as u8, (seed * 5) as u8)).collect()
+        };
+        let renders = std::sync::atomic::AtomicUsize::new(0);
+        let (ahead, plain) = (DeepDive::new((width, height), (-3.0, -13.0), |depth| {
+            renders.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(image_of(depth))
+        }), DeepDive::new((width, height), (-3.0, -13.0), |depth| Some(image_of(depth))));
+        let ln = |log2: f64| log2 * std::f64::consts::LN_2;
+        let moments = [(ln(-3.2), 0.0)];
+        let first = ahead.compose_moments(&moments).unwrap();
+        ahead.prefetch_after(&moments);
+        assert_eq!(renders.load(std::sync::atomic::Ordering::Relaxed), 2, "the keyframe of the frame and the next one");
+        assert!(ahead.kept.lock().unwrap().iter().any(|(index, _)| *index == 1));
+        ahead.prefetch_after(&moments);
+        let next = ahead.compose_moments(&[(ln(-4.5), 0.0)]).unwrap();
+        assert_eq!(renders.load(std::sync::atomic::Ordering::Relaxed), 2, "neither rendered again");
+        let same = |a: &[TrueColor], b: &[TrueColor]| a.iter().zip(b).all(|(a, b)| (a.red, a.green, a.blue) == (b.red, b.green, b.blue));
+        assert!(same(&first, &plain.compose_moments(&moments).unwrap()) && same(&next, &plain.compose_moments(&[(ln(-4.5), 0.0)]).unwrap()));
+        //(The last keyframe has none after it)
+        ahead.prefetch_after(&[(ln(-13.0), 0.0)]);
+        assert!(renders.load(std::sync::atomic::Ordering::Relaxed) <= ahead.count());
     }
 
     #[test]

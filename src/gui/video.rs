@@ -1111,6 +1111,8 @@ impl MandelbrotApp {
                                 if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
                                     return;
                                 }
+                                //(The next keyframe while the other threads compose: see `DeepDive::prefetch_after`)
+                                deep_dive.prefetch_after(&moments);
                                 continue;
                             }
                             //A dive: the frame composed from its keyframe (with motion blur: from the moments of its shutter)
