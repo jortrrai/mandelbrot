@@ -37,12 +37,22 @@ impl MapSize {
         self.columns * self.rows
     }
 
+    /// The size of the band `below` doublings below the band of the last frame's corner: frames read it only nearer their center, at most
+    /// `1 / 2^below` of the way to the corner, so it needs that share of the columns (the tail of a dive then costs about one band)
+    #[must_use]
+    pub fn below_the_last(self, below: usize) -> MapSize {
+        MapSize { columns: (self.columns >> below.min(usize::BITS as usize - 1)).max(MIN_COLUMNS), ..self }
+    }
+
     /// The doublings below a frame's corner that its pixels read, down to a tenth of a pixel from its center (the deepest bands a frame needs)
     #[must_use]
     pub fn doublings_below_the_corner((width, height): (usize, usize)) -> usize {
         ((width as f64 / 2.0).hypot(height as f64 / 2.0) / 0.1).log2().ceil() as usize
     }
 }
+
+/// The fewest columns of a band (see `MapSize::below_the_last`)
+const MIN_COLUMNS: usize = 64;
 
 /// The band of an exponential map whose first row is the ring at the radius `top`: one doubling, `size.rows` rows of `size.columns`.
 ///
@@ -86,32 +96,40 @@ impl ExponentialMap {
     #[must_use]
     pub fn frame(&self, taps: &FrameTaps, scale: Depth, rotation: f64) -> Vec<TrueColor> {
         let (width, height) = (taps.width, taps.height);
-        let MapSize { columns, rows } = self.size;
+        let rows = self.size.rows;
         //The row of a tap is its row in a map whose first row is at the frame's pixel, moved down by the doublings from the map's top to the pixel; its
-        //column moves back by the turn (as `deep::turned` turns the offsets of a frame: by -rotation in the plane)
+        //angle moves back by the turn (as `deep::turned` turns the offsets of a frame: by -rotation in the plane)
         let log2_pixel = scale.log2() + (2.5 / width as f64).log2();
         let row_shift = (self.top.log2() - log2_pixel) * rows as f64 - 0.5;
-        let column_shift = -rotation * columns as f64 / std::f64::consts::TAU - 0.5;
-        //(The rows there are: a row outside them is the nearest row in them)
+        let turn_shift = -rotation / std::f64::consts::TAU;
+        //(The rows there are: a row outside them is the nearest row in them. A band has the columns it was rendered with, see `MapSize::below_the_last`)
         let first_band = self.bands.keys().next().copied().unwrap_or(0);
-        let bands: Vec<&[TrueColor]> = self.bands.range(first_band..).map(|(_, band)| band.as_slice()).collect();
-        let (first, last) = (first_band * rows, (first_band + bands.len()) * rows - 1);
-        let pixel = |column: usize, row: usize| -> [f32; 3] {
-            let (band, row) = ((row - first) / rows, (row - first) % rows);
-            let color = bands[band][row * columns + column];
-            [f32::from(color.red), f32::from(color.green), f32::from(color.blue)]
+        let map_rows: Vec<&[TrueColor]> = self.bands.range(first_band..).flat_map(|(_, band)| band.chunks(band.len() / rows)).collect();
+        let (first, last) = (first_band * rows, first_band * rows + map_rows.len() - 1);
+        //The color of row `row` at the angle `turns` (in turns; pixel centers at half columns, wrapping around), between the two columns around it
+        let along = |row: usize, turns: f64| -> [f32; 3] {
+            let colors = map_rows[row - first];
+            let columns = colors.len();
+            //(`turns` is within one turn, see `at`)
+            let u = turns.mul_add(columns as f64, -0.5);
+            let u = if u < 0.0 { u + columns as f64 } else { u };
+            let column = u.floor();
+            let fx = (u - column) as f32;
+            let column = (column as usize).min(columns - 1);
+            let next = if column + 1 == columns { 0 } else { column + 1 };
+            let (a, b) = (colors[column], colors[next]);
+            [(a.red, b.red), (a.green, b.green), (a.blue, b.blue)].map(|(a, b)| f32::from(a) * (1.0 - fx) + f32::from(b) * fx)
         };
-        //The color at the column `u` and the row `v` (continuous, pixel centers at whole numbers; the columns wrap around), from the four map pixels
-        //around it as `bilinear` in `dive_keyframes`
-        let at = |u: f64, v: f64| -> [f32; 3] {
+        //The color at the angle `turns` and the row `v` (continuous, row centers at whole numbers), from the two rows around it as `bilinear` in
+        //`dive_keyframes`
+        let at = |turns: f64, v: f64| -> [f32; 3] {
             let v = v.clamp(first as f64, last as f64);
-            let u = u.rem_euclid(columns as f64);
-            let (row, column) = (v.floor(), u.floor());
-            let (fy, fx) = ((v - row) as f32, (u - column) as f32);
-            let (row, column) = (row as usize, (column as usize).min(columns - 1));
-            let (below, next) = ((row + 1).min(last), if column + 1 == columns { 0 } else { column + 1 });
-            let (a, b, c, d) = (pixel(column, row), pixel(next, row), pixel(column, below), pixel(next, below));
-            std::array::from_fn(|channel| (a[channel] * (1.0 - fx) + b[channel] * fx) * (1.0 - fy) + (c[channel] * (1.0 - fx) + d[channel] * fx) * fy)
+            let turns = turns - turns.floor();
+            let row = v.floor();
+            let fy = (v - row) as f32;
+            let row = row as usize;
+            let (above, below) = (along(row, turns), along((row + 1).min(last), turns));
+            std::array::from_fn(|channel| above[channel] * (1.0 - fy) + below[channel] * fy)
         };
         let mut frame = vec![TrueColor::new(0, 0, 0); width * height];
         let threads = super::render_thread_count().max(1);
@@ -123,7 +141,7 @@ impl ExponentialMap {
                     for (color, pixel_taps) in out.iter_mut().zip(pixel_taps.chunks(TAPS.len() * TAPS.len())) {
                         let mut sum = [0.0_f32; 3];
                         for &(column, row) in pixel_taps {
-                            let tap = at(f64::from(column) * columns as f64 + column_shift, f64::from(row) * rows as f64 + row_shift);
+                            let tap = at(f64::from(column) + turn_shift, f64::from(row) * rows as f64 + row_shift);
                             for (total, channel) in sum.iter_mut().zip(tap) {
                                 *total += channel;
                             }

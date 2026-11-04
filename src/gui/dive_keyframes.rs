@@ -553,6 +553,31 @@ mod tests {
             println!("map, fineness {fineness:.2}: {} x {} a doubling ({} pixels, keyframes {}), {:.0} ms a doubling (keyframes {:.0} ms), {:.1} ms to read a frame; PSNR {:.2} dB (Fast dives {:.2} dB)",
                 size.columns, size.rows, size.band_pixels(), width * height * 4, band_time * 1000.0, keyframe_time * 1000.0, compose * 1000.0, mean(&read), mean(&fast));
         }
+        //The tail: the bands below the last frame's with fewer columns (`MapSize::below_the_last`), against the full bands
+        let size = crate::rendering::exponential_map::MapSize::for_frames((width, height), 1.0);
+        let top = shallowest.times(2.5 / width as f64 * (width as f64 / 2.0).hypot(height as f64 / 2.0));
+        let render_map = |tail: bool| {
+            let mut map = crate::rendering::exponential_map::ExponentialMap { size, top, bands: std::collections::BTreeMap::new() };
+            let mut tail_time = 0.0;
+            for band in 0..=doublings + crate::rendering::exponential_map::MapSize::doublings_below_the_corner((width, height)) {
+                let band_size = if tail && band > doublings { size.below_the_last(band - doublings) } else { size };
+                let started = std::time::Instant::now();
+                map.bands.insert(band, crate::rendering::exponential_map::render_band(&m, &orbit, top.times((-(band as f64)).exp2()), band_size, samples, &color_of, false, None, &cancel).unwrap());
+                if band > doublings {
+                    tail_time += started.elapsed().as_secs_f64();
+                }
+            }
+            (map, tail_time)
+        };
+        let ((full, full_time), (tailed, tail_time)) = (render_map(false), render_map(true));
+        let taps = crate::rendering::exponential_map::FrameTaps::new((width, height));
+        let last_frames: Vec<crate::rendering::deep::Depth> = scales.iter().rev().take(30).copied().collect();
+        let worst = last_frames.iter().map(|scale| psnr(&full.frame(&taps, *scale, 0.0), &tailed.frame(&taps, *scale, 0.0))).fold(f64::INFINITY, f64::min);
+        println!("tail below the last frame: {:.0} ms with full bands, {:.0} ms with fewer columns; the last doubling's frames differ at worst by PSNR {worst:.2} dB", full_time * 1000.0, tail_time * 1000.0);
+        //(Which is closer to the frames rendered one by one, in the last doubling)
+        let last_doubling: Vec<(usize, &Vec<TrueColor>)> = (0..scales.len()).step_by(7).zip(&references).filter(|(frame, _)| *frame >= (doublings - 1) * 30).collect();
+        let against = |map: &crate::rendering::exponential_map::ExponentialMap| last_doubling.iter().map(|(frame, reference)| psnr(&map.frame(&taps, scales[*frame], 0.0), reference)).sum::<f64>() / last_doubling.len() as f64;
+        println!("  the last doubling against frame by frame: PSNR {:.2} dB with full bands, {:.2} dB with fewer columns", against(&full), against(&tailed));
     }
 
     #[test]
