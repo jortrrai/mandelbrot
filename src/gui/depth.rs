@@ -9,9 +9,28 @@ use eframe::egui;
 use super::MandelbrotApp;
 use crate::complex_plane::{Precision, View};
 
-/// The range of the depth slider, in zoom (1 / scale): from ten times further out than the reset view to deeper than the 64-bit floats reach (the view stops
-/// where their precision ends, see `Precision`)
-pub(super) const DEPTH_ZOOMS: std::ops::RangeInclusive<f64> = 0.1..=1e15;
+/// The range of the depth controls, in zoom (1 / scale), within 64-bit floats: from ten times further out than the reset view to 10^300, past where 64-bit
+/// coordinates end and the deep view takes over (see `deep_view`)
+pub(super) const DEPTH_ZOOMS: std::ops::RangeInclusive<f64> = 0.1..=1e300;
+
+/// The range of the depth slider, in powers of ten of the zoom: beyond the 64-bit floats of `DEPTH_ZOOMS`, to 10^1000 in the deep view (issue #263)
+pub(super) const DEPTH_POWERS: std::ops::RangeInclusive<f64> = -1.0..=1000.0;
+
+/// The radius of the center marker at first, and the radii its slider offers, in points (issue #223)
+pub(super) const CENTER_MARKER_RADIUS: f32 = 24.0;
+pub(super) const CENTER_MARKER_RADII: std::ops::RangeInclusive<f32> = 3.0..=400.0;
+
+/// Draws the center marker (issue #223): a circle of `radius` points around `center`, the center of the view, with a small cross on the exact center. White with
+/// a dark edge, so it shows on every color. It is only drawn on the screen, never in saved images or videos
+pub(super) fn draw_center_marker(painter: &egui::Painter, center: egui::Pos2, radius: f32) {
+    let arm = radius.min(6.0) * 0.5;
+    //The dark edge first, the white line on it
+    for stroke in [egui::Stroke::new(3.0, egui::Color32::from_black_alpha(170)), egui::Stroke::new(1.2, egui::Color32::from_white_alpha(230))] {
+        painter.circle_stroke(center, radius, stroke);
+        painter.line_segment([center - egui::vec2(arm, 0.0), center + egui::vec2(arm, 0.0)], stroke);
+        painter.line_segment([center - egui::vec2(0.0, arm), center + egui::vec2(0.0, arm)], stroke);
+    }
+}
 
 impl MandelbrotApp {
     /// The center of the view exactly as the depth control keeps it: the plane stores its edges, so its center read back can differ in the last bits, and
@@ -19,7 +38,9 @@ impl MandelbrotApp {
     pub(super) fn exact_center(&self) -> crate::complex::Complex {
         let center = self.c.center();
         match &self.depth_center {
-            Some(kept) if (kept.x - center.x).abs() <= self.c.get_scale() * 1e-6 && (kept.y - center.y).abs() <= self.c.get_scale() * 1e-6 => crate::complex::Complex::new(kept.x, kept.y),
+            //(Within a millionth of the view, or a few steps of a 64-bit number: what reading the center back from the edges can change)
+            Some(kept) if (kept.x - center.x).abs() <= (self.c.get_scale() * 1e-6).max(center.x.abs() * 4.0 * f64::EPSILON)
+                && (kept.y - center.y).abs() <= (self.c.get_scale() * 1e-6).max(center.y.abs() * 4.0 * f64::EPSILON) => crate::complex::Complex::new(kept.x, kept.y),
             _ => center,
         }
     }
@@ -30,12 +51,32 @@ impl MandelbrotApp {
         let center = self.exact_center();
         let mut deeper = self.c.clone();
         deeper.set_view(&View::new(center.x, center.y, 1.0 / zoom));
-        let zooming_in = deeper.get_scale() < self.c.get_scale();
-        if zooming_in && (deeper.precision() == Precision::Exhausted || self.zoom_refused(&deeper)) {
+        let zooming_in = deeper.get_scale() < self.shown_scale();
+        if zooming_in && self.zoom_refused(&deeper) {
             return false;
+        }
+        if deeper.precision() == Precision::Exhausted || self.deep_view().is_some() {
+            self.set_deep_zoom(zoom); //Deeper than 64-bit floats (or back out of it): the deep view, exactly (see `deep_view`)
+            return true;
         }
         self.c = deeper;
         self.depth_center = Some(crate::complex::Complex::new(center.x, center.y));
+        true
+    }
+
+    /// Sets the zoom of the view to `10^power`, keeping its center exactly: `set_depth` within 64-bit floats, beyond them the deep view (refused, false, for a
+    /// Julia set, which has no deep view, and with the zoom limit on)
+    pub(super) fn set_depth_power(&mut self, power: f64) -> bool {
+        let power = power.clamp(*DEPTH_POWERS.start(), *DEPTH_POWERS.end());
+        if power <= DEPTH_ZOOMS.end().log10() {
+            return self.set_depth(10f64.powf(power));
+        }
+        let mut deepest = self.c.clone();
+        deepest.set_view(&View::new(self.c.center().x, self.c.center().y, f64::MIN_POSITIVE));
+        if self.m.julia.is_some() || self.zoom_refused(&deepest) {
+            return false;
+        }
+        self.set_deep_depth(crate::rendering::deep::Depth::from_log2(-power * std::f64::consts::LOG2_10));
         true
     }
 
@@ -58,8 +99,27 @@ impl MandelbrotApp {
             if ui.add_enabled(self.c.rotation() != 0.0, egui::Button::new("Reset")).on_hover_text("Turns the view back to unturned (0°)").clicked() {
                 self.turn_to(0.0);
             }
+        });
+        ui.horizontal(|ui| {
+            if ui.button(if self.rotation_cycling { "Stop turning" } else { "Turn by itself" }).on_hover_text("Turns the view by itself around the center of the screen, without end, until you stop it; the image shows one sample per pixel (blurred with Auto blur) until then. Put a feature in the center first to spin it in place").clicked() {
+                self.toggle_rotation_cycle();
+            }
+            ui.add(egui::DragValue::new(&mut self.rotation_speed).range(super::cycle::ROTATION_SPEEDS).speed(0.5).max_decimals(1).suffix(" °/s"))
+                .on_hover_text("How fast the view turns, in degrees per second (type a value; negative: clockwise; 360 is a whole turn)");
+        });
+        ui.horizontal(|ui| {
             ui.selectable_value(&mut self.rotation_in_degrees, true, "degrees").on_hover_text("Show and type the rotation in degrees (the angle stays the same)");
             ui.selectable_value(&mut self.rotation_in_degrees, false, "radians").on_hover_text("Show and type the rotation in radians (the angle stays the same)");
+        });
+    }
+
+    /// *Center marker* and its size: a circle on the screen only
+    pub(super) fn center_marker_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.center_marker, "Center marker").on_hover_text("Draws a circle around the exact center of the view, to put a feature right in the middle before turning or diving around it. Only on the screen: saved images and videos do not show it");
+            if self.center_marker {
+                ui.add(egui::Slider::new(&mut self.center_marker_radius, CENTER_MARKER_RADII).logarithmic(true).integer().suffix(" px").text("size")).on_hover_text("The radius of the circle on the screen");
+            }
         });
     }
 
@@ -103,18 +163,39 @@ impl MandelbrotApp {
     /// The depth slider and *Lock center*
     pub(super) fn depth_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let mut zoom = 1.0 / self.c.get_scale();
+            //(In powers of ten of the zoom, which go beyond 64-bit floats: ×1e400 is 400)
+            let mut power = -self.shown_depth().log10();
             //(Only what is dragged or typed is clamped: a view beyond the range of the slider, zoomed out further with the wheel, stays where it is)
-            let response = ui.add(egui::Slider::new(&mut zoom, DEPTH_ZOOMS).clamping(egui::SliderClamping::Edits).logarithmic(true).text("depth").custom_formatter(|zoom, _| format!("×{zoom:.3e}")).custom_parser(|text| text.trim().trim_start_matches(['×', 'x']).trim().parse().ok()))
+            let response = ui.add(egui::Slider::new(&mut power, DEPTH_POWERS).clamping(egui::SliderClamping::Edits).text("depth").custom_formatter(|power, _| format_power(power))
+                .custom_parser(|text| crate::rendering::deep::Depth::parse(text.trim().trim_start_matches(['×', 'x'])).map(crate::rendering::deep::Depth::log10)))
                 .on_hover_text("Zooms in and out around the center of the view, without ever moving it: explore a dive up and down its exact path, and tune its colors at chosen depths");
             self.depth_dragging = response.dragged();
             if response.changed() {
                 self.gesture_active = self.depth_dragging; //A frame of a gesture while the slider moves; the full quality when it stops (see `settle_gesture`)
-                if self.set_depth(zoom) {
-                    self.render(&format!("Set the depth to ×{:.3e} around the center", 1.0 / self.c.get_scale()));
+                if self.set_depth_power(power) {
+                    self.render(&format!("Set the depth to {} around the center", super::status::format_depth_zoom(self.shown_depth())));
                 }
             }
             ui.checkbox(&mut self.lock_center, "Lock center").on_hover_text("The mouse keeps the center of the view too: the wheel zooms around the center instead of the cursor, and dragging and right-clicking do not move the view");
         });
     }
+
+    /// The speed of views deeper than 64-bit floats: *Fast deep zoom* and *Fast deep GPU math* (both off at first, they change some pixels)
+    pub(super) fn deep_performance_controls(&mut self, ui: &mut egui::Ui) {
+        let response = ui.checkbox(&mut self.fast_deep, "Fast deep zoom (BLA)").on_hover_text("Off by default. Deeper than ×10¹³, where 64-bit numbers run out and the deep renderer takes over, skip most of the iterations by bilinear approximation: several times as fast, up to 40 times inside the set, while about 1 pixel in 100 gets another color in the most chaotic parts (fewer than a move of a thousandth of a pixel changes). Also for saved images and videos.");
+        if response.changed() && self.deep_shown().is_some() {
+            self.render(&format!("Turned fast deep zoom {}", if self.fast_deep { "on" } else { "off" }));
+        }
+        let available = self.gpu.as_ref().is_some_and(|gpu| gpu.has_deep32()) && self.use_gpu;
+        let response = ui.add_enabled(available, egui::Checkbox::new(&mut self.deep_f32, "Fast deep GPU math (32-bit)")).on_hover_text("Off by default, an experiment (issue #288). The GPU's share of views deeper than ×10¹³ in 32-bit floats instead of 64: much faster on a GPU whose 64-bit math is slow, while chaotic pixels can get other colors. Also for saved images and videos.")
+            .on_disabled_hover_text("Needs the GPU");
+        if response.changed() && self.deep_shown().is_some() {
+            self.render(&format!("Turned fast deep GPU math {}", if self.deep_f32 { "on" } else { "off" }));
+        }
+    }
+}
+
+/// The zoom `10^power` as the depth slider shows it, `×1.000e400`
+fn format_power(power: f64) -> String {
+    format!("×{}", crate::rendering::deep::Depth::scientific(power, 3))
 }

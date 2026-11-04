@@ -29,6 +29,13 @@ pub(super) fn zoom_around(plane: &mut ComplexPlane, anchor: &Complex, factor: f6
 impl MandelbrotApp {
     /// Zooms in twice around the pixel (`x`, `y`) of the image, which stays where it is (with Lock center: around the center), for a double click or tap
     pub(super) fn zoom_in_at(&mut self, x: f32, y: f32) {
+        if self.zooms_deep(0.5) {
+            //Deeper than 64-bit floats: the deep view zooms around the point (see `deep_view`)
+            let (x, y) = if self.lock_center { (self.p.pixel_plane.width as f32 / 2.0, self.p.pixel_plane.height as f32 / 2.0) } else { (x, y) };
+            self.zoom_deep(0.5, (f64::from(x), f64::from(y)));
+            self.render("Zoomed in with a double click");
+            return;
+        }
         let anchor = if self.lock_center { self.c.center() } else { self.displayed_plane().complex_from_pixel_plane(f64::from(x), f64::from(y)) };
         let mut zoomed = self.c.clone();
         zoom_around(&mut zoomed, &anchor, 0.5);
@@ -41,6 +48,24 @@ impl MandelbrotApp {
     /// A frame of a two-finger gesture: its middle at the pixel `center` (x, y) of the image, the fingers spread by `zoom` (above 1: apart, zooming in),
     /// turned by `twist` radians (clockwise on the screen) and moved by `moved` pixels. The point between the fingers stays under them while zooming
     pub(super) fn touch_gesture(&mut self, center: (f32, f32), zoom: f32, twist: f32, moved: egui::Vec2) {
+        let pinched = (zoom - 1.0).abs() > 1e-4 && zoom > 0.0;
+        let factor = if pinched { 1.0 / f64::from(zoom) } else { 1.0 };
+        if self.zooms_deep(factor) {
+            //Deeper than 64-bit floats: the pinch and the move in the deep view, by exact steps (twisting needs the 64-bit plane: not there, see `deep_view`)
+            let (width, height) = (self.p.pixel_plane.width as f32, self.p.pixel_plane.height as f32);
+            let at = if self.lock_center { (width / 2.0, height / 2.0) } else { center };
+            if pinched {
+                self.zoom_deep(factor, (f64::from(at.0), f64::from(at.1)));
+            }
+            let (columns, rows_up) = ((-moved.x).round() as i64, moved.y.round() as i64);
+            if !self.lock_center && (columns != 0 || rows_up != 0) {
+                self.pan_deep(columns, rows_up);
+            }
+            if pinched || columns != 0 || rows_up != 0 {
+                self.render("Moved with two fingers");
+            }
+            return;
+        }
         let mut changed = self.c.clone();
         if (zoom - 1.0).abs() > 1e-4 && zoom > 0.0 {
             let factor = 1.0 / f64::from(zoom);
@@ -113,14 +138,25 @@ impl MandelbrotApp {
             let points_per_pixel = size.x / width;
             let columns = whole_pixels(-drag.x, &mut self.drag_remainder.0, points_per_pixel);
             let rows_up = whole_pixels(drag.y, &mut self.drag_remainder.1, points_per_pixel);
-            if columns != 0 || rows_up != 0 {
+            if (columns != 0 || rows_up != 0) && self.deep_view().is_some() {
+                self.pan_deep(columns, rows_up); //Deeper than 64-bit floats: by exact steps (see `deep_view`)
+                self.render("Moved by dragging");
+            } else if columns != 0 || rows_up != 0 {
                 rendering::move_complex_plane_by_pixels(&mut self.c, rows_up, columns);
                 self.render_moved("Moved by dragging");
             }
         } else {
             self.drag_remainder = (0.0, 0.0);
         }
-        if scroll.abs() >= 1.0 {
+        if scroll.abs() >= 1.0 && self.zooms_deep(wheel_zoom_factor(scroll)) {
+            //Deeper than 64-bit floats can show: the deep view zooms around the cursor (or the center, with Lock center) by exact steps (see `deep_view`)
+            if let Some(position) = ui.input(|input| input.pointer.hover_pos()) {
+                let (x, y) = if self.lock_center { (width / 2.0, height / 2.0) } else { to_buffer(position) };
+                let factor = wheel_zoom_factor(scroll);
+                self.zoom_deep(factor, (f64::from(x), f64::from(y)));
+                self.render(if factor < 1.0 { "Zoomed in with the wheel" } else { "Zoomed out with the wheel" });
+            }
+        } else if scroll.abs() >= 1.0 {
             let factor = wheel_zoom_factor(scroll);
             let zooming_in = factor < 1.0;
             if !(zooming_in && self.c.precision() == Precision::Exhausted) {

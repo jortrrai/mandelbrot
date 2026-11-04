@@ -88,10 +88,23 @@ pub(super) fn wanted_resolution(width: f32, height: f32, pixels_per_point: f32) 
     Resolution::new(width as usize, height as usize).validate().ok()
 }
 
+/// The largest area of the shape of `shape` that fits in `available` (issue #226: the image in the shape of the saved image size)
+pub(super) fn locked_area(available: egui::Vec2, shape: Resolution) -> egui::Vec2 {
+    let ratio = shape.width as f32 / shape.height as f32;
+    if available.x > available.y * ratio { egui::vec2(available.y * ratio, available.y) } else { egui::vec2(available.x, available.x / ratio) }
+}
+
 impl MandelbrotApp {
+    /// The size whose shape the image takes with *Same shape as the saved image* (issue #226): the saved image size, unless that is the size of the view
+    pub(super) fn locked_shape(&self) -> Option<Resolution> {
+        let locked = self.lock_aspect && self.save_size.choice != super::save_size::SaveSizeChoice::View;
+        locked.then(|| self.save_size.resolve(self.default_save_resolution(), self.view_resolution()).ok()).flatten()
+    }
+
     /// Resizes the buffer to the area for the image (`available`, in points) when that has been the size of the area for a while, see `Fit`, and renders the view again at the new size.
     /// The view keeps its center and its zoom; a wider area shows the same part of the real axis, a taller area shows more of the imaginary axis.
     pub(super) fn fit_to_window(&mut self, ctx: &egui::Context, available: egui::Vec2) {
+        let available = self.locked_shape().map_or(available, |shape| locked_area(available, shape));
         let wanted = wanted_resolution(available.x, available.y, ctx.pixels_per_point());
         match self.fit.step(self.view_resolution(), wanted, Instant::now()) {
             FitStep::Idle => {}
@@ -110,6 +123,7 @@ impl MandelbrotApp {
         self.p = crate::pixel_buffer::PixelBuffer::new(crate::pixel_buffer::pixel_plane::PixelPlane::new(size.width, size.height));
         self.p.color_channel_mapping = mapping;
         self.shown_plane = self.c.clone();
+        self.shown_deep = self.deep_shown().map(super::deep_view::DeepView::exact);
         self.preview_block = 1;
         self.shown_scaled = None;
         self.texture_outdated = true;

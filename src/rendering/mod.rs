@@ -9,6 +9,8 @@
 
 mod adaptive;
 mod buffer;
+pub mod deep;
+pub mod exponential_map;
 pub mod gpu;
 mod jitter;
 mod progressive;

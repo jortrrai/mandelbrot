@@ -65,7 +65,7 @@ impl LogLevel {
             LogLevel::Error
         } else if lower.contains("not allowed") || lower.contains("is skipped") || lower.contains("refused") || lower.contains("cannot be read") || message.starts_with("Warning") {
             LogLevel::Warning
-        } else if message.starts_with("Rendering") || message.starts_with("Rendered") || message.starts_with("Cancelled the rendering") || message.starts_with("Moved by dragging")
+        } else if message.starts_with("Rendering") || message.starts_with("Rendered") || message.starts_with("Cancelled the rendering") || message.starts_with("Moved by dragging") || message.starts_with("Samples started over")
             || message.starts_with("Zoomed in with the wheel") || message.starts_with("Zoomed in with a double click") || message.starts_with("Zoomed out with the wheel") || message.starts_with("Set the depth to") || message.starts_with("Clicked pixel") {
             LogLevel::Debug
         } else {
@@ -92,7 +92,7 @@ pub(super) fn minimap_view(julia: Option<(f64, f64)>, (width, height): (usize, u
 }
 
 /// The texts of the current view: the center and the zoom, formatted for reading, without losing the precision of the numbers
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentView {
     /// The real part of the center, all digits (the shortest text that reads back as the same number)
     pub real: String,
@@ -109,6 +109,20 @@ impl CurrentView {
     pub fn new(center: &Complex, scale: f64) -> CurrentView {
         CurrentView { real: format!("{}", center.x), imaginary: format!("{}", center.y), scale: format!("{scale}"), zoom: format_zoom(1.0 / scale) }
     }
+}
+
+/// The scale `depth` as text: all digits within 64-bit floats, beyond them (issue #263) seven, `1.250000e-400`
+pub fn format_depth(depth: crate::rendering::deep::Depth) -> String {
+    if depth.to_f64().is_normal() { format!("{}", depth.to_f64()) } else { depth.to_text() }
+}
+
+/// The zoom of the scale `depth` as text: `format_zoom` within 64-bit floats, beyond them in the same scientific notation, `×1.25e400`
+pub fn format_depth_zoom(depth: crate::rendering::deep::Depth) -> String {
+    let magnification = 1.0 / depth.to_f64();
+    if depth.to_f64().is_normal() && magnification.is_finite() {
+        return format_zoom(magnification);
+    }
+    format!("\u{d7}{}", crate::rendering::deep::Depth::scientific(depth.reciprocal().log10(), 2))
 }
 
 /// The zoom as text, "x" and the magnification: ordinary decimal numbers from 0.001 up to a billion (at most two decimals, none for a whole number, thousands separated by commas:
@@ -248,7 +262,8 @@ impl MandelbrotApp {
 
     /// The center and zoom of the view that is shown, read from the complex plane every frame, so it follows every move, zoom and jump at once
     pub(super) fn current_view_ui(&self, ui: &mut egui::Ui) {
-        let view = CurrentView::new(&self.c.center(), self.c.get_scale());
+        let deep = self.deep_shown().map(|deep| CurrentView { real: deep.real.to_decimal(), imaginary: deep.imaginary.to_decimal(), scale: format_depth(deep.scale), zoom: format_depth_zoom(deep.scale) });
+        let view = deep.clone().unwrap_or_else(|| CurrentView::new(&self.c.center(), self.c.get_scale()));
         ui.horizontal(|ui| {
             ui.heading("Current view");
             if ui.button("Copy").on_hover_text("Copies the center and the scale with all their digits").clicked() {
@@ -273,6 +288,9 @@ impl MandelbrotApp {
             ui.end_row();
         });
         match self.c.precision() {
+            _ if deep.is_some() => {
+                ui.colored_label(Color32::from_rgb(120, 190, 255), "Deep zoom (prototype): beyond 64-bit floats, by perturbation; one sample per pixel, on the CPU");
+            }
             Precision::Full => {}
             Precision::Degrading => {
                 ui.colored_label(Color32::from_rgb(230, 160, 40), PRECISION_DEGRADING_TEXT);

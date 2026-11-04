@@ -85,10 +85,23 @@ pub struct Location {
     pub scale: f64,
     /// The most iterations of the escape-time iteration
     pub max_iterations: u32,
+    /// The center as decimal text with more digits than 64-bit floats hold, for a view deeper than they can show (`real_text` and `imaginary_text` in the
+    /// file, see `rendering::deep`); `real` and `imaginary` are then the nearest 64-bit numbers
+    pub exact: Option<(String, String)>,
+    /// The scale of a view deeper than 64-bit floats reach (beyond 10⁻³⁰⁸, issue #263; `scale_text` in the file, decimal text like `1.5e-400`): `scale` is then
+    /// the smallest normal 64-bit float
+    pub deep_scale: Option<crate::rendering::deep::Depth>,
     /// How far the view is turned counterclockwise around its center, in degrees (issue #217; a file without it is not turned)
     pub rotation: f64,
     /// The parameter `c` of a Julia set, if the view is of one (issue #202, see `MandelbrotSet::julia`; a file without it is of the Mandelbrot set)
     pub julia: Option<(f64, f64)>,
+}
+
+impl Location {
+    /// The base-2 logarithm of the scale, also of a deep scale (for sorting by zoom)
+    pub fn depth_log2(&self) -> f64 {
+        self.deep_scale.map_or_else(|| self.scale.log2(), crate::rendering::deep::Depth::log2)
+    }
 }
 
 /// How it looks: the parts that are not given are not changed when the appearance is restored
@@ -132,12 +145,18 @@ pub struct PointOfInterest {
 struct RawCenter {
     real: f64,
     imaginary: f64,
+    #[serde(default)]
+    real_text: Option<String>,
+    #[serde(default)]
+    imaginary_text: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RawLocation {
     center: RawCenter,
     scale: f64,
+    #[serde(default)]
+    scale_text: Option<String>,
     max_iterations: u32,
     #[serde(default)]
     rotation: f64,
@@ -225,8 +244,12 @@ pub fn parse(text: &str, file_name: &str) -> Result<(PointOfInterest, Vec<String
         appearance.stretch_palette = raw.stretch_palette;
         appearance
     });
+    //A center given as text too (a view deeper than 64-bit floats) is kept as text, when both parts are numbers
+    let exact = location.center.real_text.zip(location.center.imaginary_text).filter(|(real, imaginary)| [real, imaginary].iter().all(|text| crate::rendering::deep::Fixed::parse(text, 64).is_some()));
     let location = Location { real: location.center.real, imaginary: location.center.imaginary, scale: location.scale, max_iterations: location.max_iterations, rotation: if location.rotation.is_finite() { location.rotation } else { 0.0 },
-        julia: location.julia.map(|c| (c.real, c.imaginary)).filter(|(x, y)| x.is_finite() && y.is_finite()) };
+        julia: location.julia.map(|c| (c.real, c.imaginary)).filter(|(x, y)| x.is_finite() && y.is_finite()),
+        //(A deep scale is only for an exact center, beyond the range of 64-bit floats)
+        deep_scale: location.scale_text.as_deref().and_then(crate::rendering::deep::Depth::parse).filter(|depth| exact.is_some() && !depth.to_f64().is_normal()), exact };
     Ok((PointOfInterest { name, description: raw.description, location, appearance, file_name: file_name.to_string() }, warnings))
 }
 
@@ -258,7 +281,7 @@ pub const SHIPPED: [(&str, &str); 11] = [
 /// The places of `SHIPPED`, shallowest first
 pub fn shipped() -> Vec<PointOfInterest> {
     let mut points: Vec<PointOfInterest> = SHIPPED.iter().filter_map(|(name, text)| parse(text, name).ok().map(|(point, _)| point)).collect();
-    points.sort_by(|a, b| b.location.scale.total_cmp(&a.location.scale));
+    points.sort_by(|a, b| b.location.scale.total_cmp(&a.location.scale).then_with(|| b.location.depth_log2().total_cmp(&a.location.depth_log2())));
     points
 }
 
@@ -291,7 +314,7 @@ pub fn load_folder(folder: &Path) -> LoadReport {
     }
     report.points.sort_by(|a, b| {
         //Zoom ascending is scale descending: the shallowest place first
-        b.location.scale.total_cmp(&a.location.scale).then_with(|| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())).then_with(|| a.file_name.cmp(&b.file_name))
+        b.location.scale.total_cmp(&a.location.scale).then_with(|| b.location.depth_log2().total_cmp(&a.location.depth_log2())).then_with(|| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())).then_with(|| a.file_name.cmp(&b.file_name))
     });
     report
 }
@@ -326,6 +349,13 @@ pub fn to_json(point: &PointOfInterest) -> String {
             "max_iterations": location.max_iterations,
         },
     });
+    if let Some((real, imaginary)) = &location.exact {
+        file["location"]["center"]["real_text"] = serde_json::Value::from(real.clone());
+        file["location"]["center"]["imaginary_text"] = serde_json::Value::from(imaginary.clone());
+    }
+    if let Some(depth) = location.deep_scale {
+        file["location"]["scale_text"] = serde_json::Value::from(depth.to_exact_text());
+    }
     //(Only a turned view has a rotation: the files of the others are as before)
     if location.rotation != 0.0 {
         file["location"]["rotation"] = serde_json::Value::from(location.rotation);
@@ -427,7 +457,7 @@ mod tests {
         let (point, warnings) = parse(VALID, "test.json").unwrap();
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(point.name, "Test Place");
-        assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200, rotation: 0.0, julia: None });
+        assert_eq!(point.location, Location { real: -0.75, imaginary: 0.1, scale: 0.5, max_iterations: 200, rotation: 0.0, julia: None, exact: None, deep_scale: None });
         let appearance = point.appearance.unwrap();
         assert_eq!(appearance.coloring, Some(Coloring::Hsv));
         assert_eq!(format!("{:?}", appearance.color_channels.unwrap()), "BGR");
@@ -581,7 +611,7 @@ mod tests {
             let point = PointOfInterest {
                 name: String::from("Comet's Crown"),
                 description: String::from(description),
-                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376, rotation: 0.0, julia: None },
+                location: Location { real: -1.7862581627050718, imaginary: 0.00005198056959995248, scale: 0.000006039797760000003, max_iterations: 65_376, rotation: 0.0, julia: None, exact: None, deep_scale: None },
                 appearance,
                 file_name: String::new(),
             };

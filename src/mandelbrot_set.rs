@@ -181,7 +181,7 @@ impl MandelbrotSet {
     }
 
     /// The number of steps at the end of the block of `CHECK_INTERVAL` steps of the lockstep loop that contains step `step` (1-based), or `max_iterations` for the last block
-    fn block_end(&self, step: u32) -> u32 {
+    pub(crate) fn block_end(&self, step: u32) -> u32 {
         (step.div_ceil(CHECK_INTERVAL) * CHECK_INTERVAL).min(self.max_iterations)
     }
 
@@ -197,6 +197,12 @@ impl MandelbrotSet {
             (zx, zy) = (zx * zx - zy * zy + c.x, 2.0 * zx * zy + c.y);
             steps += 1;
         }
+        self.smooth_position_at(steps, (zx, zy))
+    }
+
+    /// The end of `smooth_position` once the orbit is continued: `z` the value after `steps` steps (the GPU's exact loop for pixels continues the orbit itself,
+    /// see `gpu::Outcome::position_continued`)
+    pub(crate) fn smooth_position_at(&self, steps: u32, (zx, zy): (f64, f64)) -> f64 {
         let modulus_squared = zx * zx + zy * zy;
         if modulus_squared <= 1.0 {
             return f64::from(steps - 1).min(f64::from(self.max_iterations.saturating_sub(1))); //The formula needs |z| > 1; only possible with an orbit radius below 1.5 that was left again
@@ -204,6 +210,12 @@ impl MandelbrotSet {
         let log_modulus = 0.5 * modulus_squared.ln();
         let position = f64::from(steps - 1) - log_modulus.ln() / std::f64::consts::LN_2;
         position.clamp(0.0, f64::from(self.max_iterations.saturating_sub(1)))
+    }
+
+    /// The smooth position of a point `c` that escaped after `steps` steps at `z` (see `smooth_position`), for renderers that iterate it another way (deep zoom,
+    /// see `rendering::deep`)
+    pub(crate) fn smooth_position_of(&self, steps: u32, z: (f64, f64), c: (f64, f64)) -> f64 {
+        if self.smooth_coloring { self.smooth_position(steps, z, &Complex::new(c.0, c.1)) } else { f64::from(steps) }
     }
 
     /// The color at a (fractional) table position: the colors of the two nearest integer iteration counts, mixed by the fraction in 1/256 steps (integer arithmetic).

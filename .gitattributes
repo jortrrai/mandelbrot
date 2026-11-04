@@ -1,0 +1,2 @@
+# The shaders are cut into parts at their line ends (see `rendering::gpu::exact_pixels_source`): LF on every system, also in Windows checkouts
+*.wgsl text eol=lf

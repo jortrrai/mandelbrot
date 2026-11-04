@@ -36,9 +36,20 @@ pub(super) struct Keyframe {
     /// The Julia set of the keyframe, by its parameter c (issue #229); none: the Mandelbrot set. All keyframes of a sequence are in the same set
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) julia: Option<(f64, f64)>,
+    /// The exact center of a keyframe in a deep view, as decimal text (see `deep_view`; then `real` and `imaginary` are the nearest 64-bit numbers)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) exact: Option<(String, String)>,
+    /// The scale of a keyframe deeper than 64-bit floats reach (issue #263; then `scale` is the smallest normal 64-bit float)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) depth: Option<crate::rendering::deep::Depth>,
 }
 
 impl Keyframe {
+    /// The scale, also beyond 64-bit floats
+    pub(super) fn depth(&self) -> crate::rendering::deep::Depth {
+        self.depth.unwrap_or_else(|| crate::rendering::deep::Depth::from_f64(self.scale))
+    }
+
     pub(super) const fn camera(&self) -> Camera {
         Camera { x: self.real, y: self.imaginary, scale: self.scale }
     }
@@ -56,6 +67,24 @@ pub(super) struct Sequence {
 }
 
 impl Sequence {
+    /// The exact center of a sequence that dives along one (issue #263): its keyframes in deep views all at this center, and the others (above 64-bit
+    /// floats' depth) at its nearest 64-bit point, as the depth control keeps them (see `depth`). `None` for any other sequence, also one without deep
+    /// keyframes
+    pub(super) fn shared_exact(&self) -> Option<(String, String)> {
+        let first = self.keyframes.iter().find_map(|keyframe| keyframe.exact.clone())?;
+        let deepest = self.keyframes.iter().map(Keyframe::depth).min_by(|a, b| a.log2().total_cmp(&b.log2()))?;
+        let bits = crate::rendering::deep::bits_for_depth(deepest, 1) + 64;
+        let parse = |exact: &(String, String)| crate::rendering::deep::Fixed::parse(&exact.0, bits).zip(crate::rendering::deep::Fixed::parse(&exact.1, bits));
+        let center = parse(&first)?;
+        let nearest = (center.0.to_f64(), center.1.to_f64());
+        self.keyframes.iter().all(|keyframe| keyframe.exact.as_ref().map_or_else(|| (keyframe.real.to_bits(), keyframe.imaginary.to_bits()) == (nearest.0.to_bits(), nearest.1.to_bits()), |exact| parse(exact).is_some_and(|other| other == center))).then_some(first)
+    }
+
+    /// The scale of its deepest keyframe
+    pub(super) fn deepest(&self) -> Option<crate::rendering::deep::Depth> {
+        self.keyframes.iter().map(Keyframe::depth).min_by(|a, b| a.log2().total_cmp(&b.log2()))
+    }
+
     /// Whether it can be flown: at least two keyframes, and a positive time for every transition
     pub(super) fn is_complete(&self) -> bool {
         self.keyframes.len() >= 2 && self.seconds.len() == self.keyframes.len() - 1 && self.seconds.iter().all(|seconds| seconds.is_finite() && *seconds > 0.0)
@@ -80,7 +109,7 @@ impl MandelbrotApp {
     /// The current view as a keyframe: its exact center (see `depth`), scale, iteration limit and colors
     fn current_keyframe(&self) -> Keyframe {
         let location = self.current_point(String::new(), String::new()).location;
-        Keyframe { real: location.real, imaginary: location.imaginary, scale: location.scale, max_iterations: location.max_iterations, divide: self.m.palette.divide, offset: self.m.palette.offset, stretch: self.m.palette.stretch, rotation: self.c.rotation(), julia: location.julia }
+        Keyframe { real: location.real, imaginary: location.imaginary, scale: location.scale, max_iterations: location.max_iterations, divide: self.m.palette.divide, offset: self.m.palette.offset, stretch: self.m.palette.stretch, rotation: self.c.rotation(), julia: location.julia, exact: location.exact, depth: location.deep_scale }
     }
 
     /// The sequence of the keyframes and the typed times (a time that is not a positive number makes it incomplete)
@@ -107,6 +136,10 @@ impl MandelbrotApp {
         self.c.set_view(&crate::complex_plane::View::new(keyframe.real, keyframe.imaginary, keyframe.scale));
         self.c.set_rotation(keyframe.rotation);
         self.depth_center = Some(crate::complex::Complex::new(keyframe.real, keyframe.imaginary));
+        //(A keyframe in a deep view: there again, exactly)
+        if let Some(exact) = &keyframe.exact {
+            self.go_to_exact(exact, keyframe.depth());
+        }
         (self.m.max_iterations, self.max_iterations_input, self.m.palette) = (keyframe.max_iterations, keyframe.max_iterations, keyframe.palette());
         self.render(&format!("Went to keyframe {}", index + 1));
     }
@@ -123,6 +156,7 @@ impl MandelbrotApp {
             self.log("A sequence stays in one set: its keyframes are partly in a Julia set and partly elsewhere (or in different Julia sets); make them all in the same set");
             return;
         }
+        let (sequence_exact, sequence_deepest) = (sequence.shared_exact(), sequence.deepest());
         let flight = super::video::VideoFlight {
             from: first.camera(),
             to: last.camera(),
@@ -137,35 +171,11 @@ impl MandelbrotApp {
             rotations: (first.rotation, last.rotation),
             julia: first.julia,
             sequence: Some(sequence),
+            //(A dive along one exact center, also deeper than 64-bit floats: its deep frames there, see `Sequence::shared_exact`)
+            to_exact: sequence_exact.clone(),
+            to_depth: sequence_exact.as_ref().and(sequence_deepest).filter(|depth| !depth.to_f64().is_normal()),
         };
         self.fly_video_flight(&flight);
-    }
-
-    /// Times the transitions so the keyframes land on the swells of the music of *Follow the music* (issue #185): the first keyframe at its start, the last at its
-    /// end, the ones between on its most prominent swells (see `music::swells_of_levels`; the longest gaps are split evenly when it has fewer). Videos then
-    /// follow the track at an even speed per transition (strength 0), so the keyframes stay on their swells; the times can be changed afterwards
-    pub(super) fn fit_sequence_to_music(&mut self) {
-        let path = self.music_path.trim().to_string();
-        if self.sequence_keyframes.len() < 2 || path.is_empty() {
-            self.log("Fitting a sequence to music needs two keyframes or more, and an audio file in Follow the music");
-            return;
-        }
-        let between = self.sequence_keyframes.len() - 2;
-        match super::music::swells_of_track(std::path::Path::new(&path), between) {
-            Ok((swells, length)) => {
-                let mut times: Vec<f64> = std::iter::once(0.0).chain(swells).chain(std::iter::once(length)).collect();
-                while times.len() < between + 2 {
-                    //Fewer swells than keyframes between: the longest gap is split
-                    let longest = (0..times.len() - 1).max_by(|a, b| (times[a + 1] - times[*a]).total_cmp(&(times[b + 1] - times[*b]))).unwrap_or(0);
-                    times.insert(longest + 1, f64::midpoint(times[longest], times[longest + 1]));
-                }
-                self.sequence_seconds = times.windows(2).map(|pair| format!("{:.2}", (pair[1] - pair[0]).max(0.01))).collect();
-                (self.follow_music, self.music_strength) = (true, 0.0);
-                let at: Vec<String> = times.iter().skip(1).take(between).map(|seconds| format!("{}:{:04.1}", (*seconds / 60.0).floor(), seconds % 60.0)).collect();
-                self.log(format!("The keyframes land on the swells of the music at {} (the last at its end, {length:.1} s); videos follow the track at an even speed per transition", if at.is_empty() { String::from("its start and end") } else { at.join(", ") }));
-            }
-            Err(reason) => self.log(reason),
-        }
     }
 
     /// The keyframes with their times, and the buttons to add, show, move and remove them and to fly the sequence
@@ -177,9 +187,6 @@ impl MandelbrotApp {
             }
             if ui.add_enabled(self.sequence_keyframes.len() >= 2, egui::Button::new("Fly the sequence")).on_hover_text("Flies through the keyframes in order, the colors changing from one keyframe's to the next, and makes it the last flight: Render video, Add to queue and Save flight take it").clicked() {
                 self.fly_sequence();
-            }
-            if ui.add_enabled(self.sequence_keyframes.len() >= 2 && !self.music_path.trim().is_empty(), egui::Button::new("Fit to the music")).on_hover_text("Times the transitions so the keyframes land on the biggest swells of the track of Follow the music, the last one at its end (the times can be changed afterwards)").clicked() {
-                self.fit_sequence_to_music();
             }
             if ui.add_enabled(!self.sequence_keyframes.is_empty(), egui::Button::new("Clear")).clicked() {
                 (self.sequence_keyframes, self.sequence_seconds) = (Vec::new(), Vec::new());

@@ -198,6 +198,25 @@ impl MandelbrotApp {
         }
     }
 
+    /// Takes the GPU that was opened in the background (see `gpu_opening`), or logs why there is none
+    fn gpu_opened(&mut self, opened: Result<rendering::gpu::GpuIterator, String>) {
+        self.gpu_opening = None;
+        match opened {
+            Ok(gpu) => {
+                self.log(format!("GPU: {}, checked against the CPU: it computes the same samples, bit for bit", gpu.name()));
+                self.gpu = Some(Arc::new(gpu));
+            }
+            Err(reason) => self.log(format!("GPU not used: {reason}")),
+        }
+    }
+
+    /// Waits until the GPU that opens in the background is open (or known not to work): for the command line, whose video would otherwise start without it
+    pub(super) fn wait_for_gpu(&mut self) {
+        if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.recv().ok()) {
+            self.gpu_opened(opened);
+        }
+    }
+
     /// Takes the messages of the background job: intermediate images and the final result
     #[allow(clippy::too_many_lines)] // One match over every message of a job
     pub(super) fn poll_job(&mut self) {
@@ -210,14 +229,7 @@ impl MandelbrotApp {
             Self::release_free_memory();
         }
         if let Some(opened) = self.gpu_opening.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
-            self.gpu_opening = None;
-            match opened {
-                Ok(gpu) => {
-                    self.log(format!("GPU: {}, checked against the CPU: it computes the same samples, bit for bit", gpu.name()));
-                    self.gpu = Some(Arc::new(gpu));
-                }
-                Err(reason) => self.log(format!("GPU not used: {reason}")),
-            }
+            self.gpu_opened(opened);
         }
         loop {
             let Some(next) = self.next_job_message() else { return };
@@ -240,6 +252,7 @@ impl MandelbrotApp {
                         let replaced = std::mem::replace(&mut self.p.colors, colors);
                         self.spare_colors.put(replaced);
                         self.shown_plane = plane;
+                        self.shown_deep.clone_from(&self.job_deep);
                         self.texture_outdated = true;
                         self.layer_shown = pass > 0;
                         self.preview_block = preview_block;
@@ -254,8 +267,9 @@ impl MandelbrotApp {
                         progress.total = total;
                     }
                     if let Some(bars) = &mut self.bars {
-                        if pass == 1 && whole {
-                            //Only a render of the whole view tells the time per pixel: a continued render only computes the pixels that miss samples
+                        if pass == 1 && whole && self.job_deep.is_none() {
+                            //Only a render of the whole view tells the time per pixel: a continued render only computes the pixels that miss samples (and a deep
+                            //render's time says nothing about the 64-bit renderer's)
                             self.first_layer_per_pixel = Some(layer_time / u32::try_from(bars.pixels_total.max(1)).unwrap_or(u32::MAX));
                         }
                         bars.layer_times.push(layer_time);
@@ -302,6 +316,7 @@ impl MandelbrotApp {
                     if completed || self.frame_accepted {
                         if reported {
                             self.shown_plane = c.clone();
+                            self.shown_deep.clone_from(&self.job_deep);
                         }
                         self.p.update_pixels(); //The colors are those of the last frame shown, which arrived with its pass
                     }
@@ -391,6 +406,14 @@ impl MandelbrotApp {
         }
         self.buffer_is_complete = false;
         self.settle = during_gesture.then(|| (message.to_string(), Instant::now(), moved));
+        //A view deeper than 64-bit floats is rendered by the deep renderer (see `deep_view`)
+        if !matches!(kind, RenderKind::FlightFrame) && self.deep_view().is_some() {
+            (self.layer_shown, self.flight_job, self.flight_frame_job) = (false, false, false);
+            self.flight_queue.clear();
+            self.bars = None;
+            self.start_deep_render(message);
+            return;
+        }
         //The samples of the last render, handed from job to job; this job hands its own on when it stops, finished or not
         let previous_samples = self.samples.take();
         let (samples_sender, samples_receiver) = mpsc::channel();
@@ -403,6 +426,7 @@ impl MandelbrotApp {
         self.preview_levels.clone_from(&levels);
         let (sender, receiver) = mpsc::channel();
         let spare_colors = self.spare_colors.clone();
+        let notices = self.notice_sender.clone();
         //The job only needs the view: the window keeps the image (every frame it shows arrives as a `Pass`), so a big image is not copied for every render
         let c = self.c.clone();
         //A move keeps the iteration limit once it is settled; while the probes of the last render had not chosen it yet, the move chooses it like any render
@@ -464,9 +488,13 @@ impl MandelbrotApp {
             //A frame of a drag that keeps exact samples (every layer of the view it moves) computes its exposed strip with them instead of the f32 loop: samples of
             //the f32 loop make a render start over, so the frame would discard every layer, and the render the drag settles on would discard the frame
             samples.keep_around(keep_around);
+            let started_over = samples.why_started_over(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), false);
             let f32_frames = f32_frames && !samples.would_keep(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), false);
             let kept = samples.prepare_for(&c, width, height, &m, coloring_function, fast_gpu && gpu.is_some(), f32_frames && fast_gpu && gpu.is_some());
             let whole = kept == 0;
+            if let Some(reason) = started_over.filter(|_| whole) {
+                let _ = notices.send(format!("Samples started over: {reason}"));
+            }
             if kept > 0 {
                 message = format!("{message} (continued the samples of {kept} pixels)");
             }
@@ -493,6 +521,7 @@ impl MandelbrotApp {
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
         self.flight_queue.clear();
         self.job = Some(receiver);
+        self.job_deep = None;
         self.flight_job = false;
         self.flight_frame_job = matches!(kind, RenderKind::FlightFrame);
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });

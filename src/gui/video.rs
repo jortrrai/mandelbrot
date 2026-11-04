@@ -11,7 +11,7 @@
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -270,13 +270,23 @@ pub(super) const fn extension(quality: VideoQuality) -> &'static str {
 /// 528 Mbit/s 4K60 video both played smoothly on Jort's PC, without a visible difference)
 pub(super) const DEFAULT_MAX_MBPS: u32 = 180;
 
-/// The arguments of ffmpeg that encode RGB frames at `fps` in `quality` for `playback` (with `nvenc`: on the GPU's HEVC encoder), at most `max_mbps` megabits
+/// Where a video is encoded: on the GPU's HEVC encoder (NVENC), on the CPU, or on the CPU because NVENC could not start for a video that was to use it: then
+/// in 10-bit HEVC like NVENC also for *Maximum* (where the CPU otherwise uses 10-bit H.264), at the same quality factor
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Encoder {
+    Gpu,
+    Cpu,
+    CpuInsteadOfGpu,
+}
+
+/// The arguments of ffmpeg that encode RGB frames at `fps` in `quality` for `playback` with `encoder`, at most `max_mbps` megabits
 /// per second on average over half a second when given (the quality level stays the target; only busier frames than the limit allows get fewer bits). The colors are converted
 /// with the BT.709 matrix and tagged so, so players show them as they were rendered; half-resolution color is made with a sharp filter. A keyframe every
 /// half second, B-frames and the index at the start of the file, as video sites ask for
-fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32, max_mbps: Option<u32>) -> Vec<String> {
+fn arguments(quality: VideoQuality, playback: Playback, encoder: Encoder, fps: u32, max_mbps: Option<u32>) -> Vec<String> {
     const FULL: &str = "scale=out_color_matrix=bt709:out_range=tv,format=";
     const HALF: &str = "scale=out_color_matrix=bt709:out_range=tv:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=";
+    let nvenc = encoder == Encoder::Gpu;
     if quality == VideoQuality::Lossless {
         return ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"].map(String::from).to_vec();
     }
@@ -285,6 +295,7 @@ fn arguments(quality: VideoQuality, playback: Playback, nvenc: bool, fps: u32, m
     let mut arguments = vec![String::from("-vf")];
     arguments.extend(match playback {
         Playback::Maximum if nvenc => nvenc_hevc(&format!("{FULL}yuv444p16le")),
+        Playback::Maximum if encoder == Encoder::CpuInsteadOfGpu => vec![format!("{FULL}yuv444p10le"), "-c:v".into(), "libx265".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-tag:v".into(), "hvc1".into(), "-x265-params".into(), "log-level=error".into()],
         Playback::Maximum => vec![format!("{FULL}yuv444p10le"), "-c:v".into(), "libx264".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into()],
         Playback::HighQuality if nvenc => [nvenc_hevc(&format!("{HALF}p010le")), vec!["-profile:v".into(), "main10".into()]].concat(),
         Playback::HighQuality => vec![format!("{HALF}yuv420p10le"), "-c:v".into(), "libx265".into(), "-crf".into(), crf.into(), "-preset".into(), "medium".into(), "-tag:v".into(), "hvc1".into(), "-x265-params".into(), "log-level=error".into()],
@@ -311,16 +322,49 @@ pub(super) fn estimate(duration: Duration, fps: u32, speed: f64, (width, height)
     (frames, Duration::from_secs_f64(frames as f64 / f64::from(fps)), bytes)
 }
 
+/// The renderers of a video that render whole frames on the GPU alone (see `start_video_of`): two keep it busy while each waits for the end of its passes
+const GPU_RENDERERS: usize = 2;
+
 /// The smallest video the GPU's HEVC encoder takes (NVENC needs at least about 129 x 33 pixels); a smaller one is encoded on the CPU
 const NVENC_SMALLEST: (usize, usize) = (160, 64);
 
-/// Whether ffmpeg can encode with the GPU's HEVC encoder in 10-bit 4:4:4 (an NVIDIA GPU with NVENC), found out once by encoding a tiny clip
-fn nvenc_works() -> bool {
-    static WORKS: OnceLock<bool> = OnceLock::new();
-    *WORKS.get_or_init(|| {
-        Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.04", "-vf", "format=yuv444p16le", "-c:v", "hevc_nvenc", "-f", "null", "-"])
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
-    })
+/// The warning of a video that the CPU encodes because the GPU's encoder is busy (see `Encoder::CpuInsteadOfGpu`)
+const CPU_INSTEAD_OF_GPU: &str = "Warning: the GPU's video encoder (NVENC) could not start (is another program using the GPU's memory?), so this video is encoded on the CPU: 10-bit HEVC at the same quality, slower to encode";
+
+/// How often, and how long apart, a chunk after the first tries the GPU's encoder again when it does not start (see `nvenc_state`)
+const NVENC_RETRIES: usize = 10;
+const NVENC_RETRY_PAUSE: Duration = Duration::from_secs(3);
+
+/// Whether the GPU's HEVC encoder works, see `nvenc_state`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Nvenc {
+    Works,
+    /// There is one, but it does not start now: other programs hold the GPU's memory (CUDA out of memory) or its encoding sessions
+    Busy,
+    /// No NVIDIA GPU or no ffmpeg with NVENC
+    Missing,
+}
+
+/// Whether the GPU's HEVC encoder starts now for a `width` x `height` video for `playback` (its pixel format), found out by encoding one black frame: it can
+/// be busy although it worked before. `path` is the file it is for (tests make it busy by name)
+fn nvenc_state((width, height): (usize, usize), playback: Playback, path: &str) -> Nvenc {
+    if cfg!(test) && path.contains("nvenc-fails") {
+        return Nvenc::Busy;
+    }
+    if width < NVENC_SMALLEST.0 || height < NVENC_SMALLEST.1 {
+        return Nvenc::Missing;
+    }
+    let format = if playback == Playback::Maximum { "yuv444p16le" } else { "p010le" };
+    let output = Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", &format!("color=black:s={width}x{height}:d=0.04"), "-vf", &format!("format={format}"), "-c:v", "hevc_nvenc", "-f", "null", "-"])
+        .stdin(Stdio::null()).stdout(Stdio::null()).output();
+    match output {
+        Ok(output) if output.status.success() => Nvenc::Works,
+        Ok(output) => {
+            let error = String::from_utf8_lossy(&output.stderr).to_lowercase();
+            if error.contains("out of memory") || error.contains("openencodesessionex failed") || error.contains("incompatible client key") { Nvenc::Busy } else { Nvenc::Missing }
+        }
+        Err(_) => Nvenc::Missing,
+    }
 }
 
 /// The time along the flight of frame `frame` of a video at `fps` and `speed` percent of the flight's speed
@@ -334,25 +378,25 @@ fn frame_count(duration: Duration, fps: u32, speed: f64) -> usize {
     (duration.as_secs_f64() * 100.0 / speed.max(1.0) * f64::from(fps) - 1e-6).ceil().max(0.0) as usize + 1
 }
 
-/// The time along the flight of every frame of a video: at `fps` and `speed` percent of the flight's speed, or following the `music` (see `music`), when the
-/// flight of `duration` lasts as long as the track
+/// The time along the flight of every frame of a video: at `fps` and `speed` percent of the flight's speed, or evenly over the length of the `music` (see
+/// `music`), when the flight of `duration` lasts as long as the track
 #[derive(Clone, Debug)]
 pub(super) struct FrameClock {
     fps: u32,
     speed: f64,
-    music: Option<Arc<super::music::MusicClock>>,
+    music: Option<Duration>,
     duration: Duration,
 }
 
 impl FrameClock {
     /// The time along the flight of frame `frame`
     fn time(&self, frame: usize) -> Duration {
-        self.music.as_ref().map_or_else(|| frame_time(frame, self.fps, self.speed), |music| self.duration.mul_f64(music.share_at(frame as f64 / f64::from(self.fps))))
+        self.music.map_or_else(|| frame_time(frame, self.fps, self.speed), |music| self.duration.mul_f64((frame as f64 / f64::from(self.fps) / music.as_secs_f64().max(1e-9)).clamp(0.0, 1.0)))
     }
 
     /// The frames of the video, from the start to the place, both included
     fn frames(&self) -> usize {
-        self.music.as_ref().map_or_else(|| frame_count(self.duration, self.fps, self.speed), |music| (music.length().as_secs_f64() * f64::from(self.fps) - 1e-6).ceil().max(0.0) as usize + 1)
+        self.music.map_or_else(|| frame_count(self.duration, self.fps, self.speed), |music| (music.as_secs_f64() * f64::from(self.fps) - 1e-6).ceil().max(0.0) as usize + 1)
     }
 }
 
@@ -370,24 +414,6 @@ pub(super) fn sample_times(samples: u8, time: Duration, interval: Duration, shut
 
 /// The moments a frame of a dive composed from keyframes averages with motion blur (composing is cheap, see `dive_keyframes`)
 const DIVE_MOMENTS: u8 = 8;
-
-/// The average of the colors of `frames` (all the same size)
-fn average_frames(frames: &[Vec<crate::coloring::TrueColor>]) -> Vec<crate::coloring::TrueColor> {
-    if frames.len() == 1 {
-        return frames[0].clone();
-    }
-    let count = frames.len() as f32;
-    (0..frames[0].len()).map(|index| {
-        let mut sum = [0.0_f32; 3];
-        for frame in frames {
-            let color = frame[index];
-            sum[0] += f32::from(color.red);
-            sum[1] += f32::from(color.green);
-            sum[2] += f32::from(color.blue);
-        }
-        crate::coloring::TrueColor::new((sum[0] / count).round() as u8, (sum[1] / count).round() as u8, (sum[2] / count).round() as u8)
-    }).collect()
-}
 
 /// The shutters of the *Motion blur* list: off, then quarter to whole frames
 pub(super) const SHUTTERS: [f64; 5] = [0.0, 90.0, 180.0, 270.0, 360.0];
@@ -423,6 +449,14 @@ pub(super) struct VideoFlight {
     /// A flight through keyframes instead (see `sequence`): then `from` and `to` are its first and last keyframes
     #[serde(default)]
     pub(super) sequence: Option<super::sequence::Sequence>,
+    /// The exact center of the destination as decimal text, when it is deeper than 64-bit floats (see `deep_view`): frames that deep are rendered there by the
+    /// deep renderer
+    #[serde(default)]
+    pub(super) to_exact: Option<(String, String)>,
+    /// The scale of the destination when it is deeper than 64-bit floats reach (issue #263; `to.scale` is then the smallest normal 64-bit float), see
+    /// `Flight::deeper`
+    #[serde(default)]
+    pub(super) to_depth: Option<crate::rendering::deep::Depth>,
     /// The rotation at the start and at the place, in radians, turned the short way on the way (issue #217)
     #[serde(default)]
     pub(super) rotations: (f64, f64),
@@ -435,7 +469,15 @@ impl VideoFlight {
     /// The path of the flight: through its keyframes, or from `from` to `to` at its pace along its route
     pub(super) fn path(&self) -> Flight {
         self.sequence.as_ref().map_or_else(
-            || Flight::with(self.from, self.to, self.pace, self.route, self.constant_speed, self.speed, self.dive_zoom),
+            || {
+                let flight = Flight::with(self.from, self.to, self.pace, self.route, self.constant_speed, self.speed, self.dive_zoom);
+                //(A flight to an exact center: in logarithms, whose deep frames have exact offsets from it, see `Flight::deeper`)
+                match (self.to_depth, &self.to_exact) {
+                    (Some(depth), _) => flight.deeper(depth.log2() * std::f64::consts::LN_2),
+                    (None, Some(_)) => flight.deeper(self.to.scale.ln()),
+                    (None, None) => flight,
+                }
+            },
             |sequence| Flight::of_sequence(sequence.clone(), (self.constant_speed, self.speed)),
         )
     }
@@ -494,6 +536,12 @@ pub(super) struct VideoSpec {
     pub(super) auto: Option<crate::auto_iterations::AutoIterationSettings>,
     pub(super) use_gpu: bool,
     pub(super) fast_gpu: bool,
+    /// Whether frames deeper than 64-bit floats skip steps by bilinear approximation, see `rendering::deep::Reference`
+    #[serde(default)]
+    pub(super) fast_deep: bool,
+    /// Whether the GPU's share of deep frames is iterated in 32-bit floats, see `MandelbrotApp::deep_f32`
+    #[serde(default)]
+    pub(super) deep_f32: bool,
     /// The name of the video file (without extension), given when it is first started: a resumed video keeps its name (see `chunks`)
     #[serde(default)]
     pub(super) output: Option<String>,
@@ -506,6 +554,9 @@ pub(super) struct VideoSpec {
     /// Whether a dive into a fixed center is composed from keyframe images (see `dive_keyframes`, issue #209)
     #[serde(default)]
     pub(super) keyframe_dives: bool,
+    /// Whether a dive into an exact center is read from an exponential map instead of its keyframes (see `dive_keyframes::ExponentialDive`, issue #287)
+    #[serde(default)]
+    pub(super) exponential_dives: bool,
 }
 
 /// The name of a new video of `flight` in `folder` (without extension): the time and the name of the place, with a number when a video of that name (or its
@@ -552,6 +603,29 @@ pub(super) struct VideoJob {
 
 /// The iteration limit of a frame at `scale`: the limits at the ends scaled like the zoom rule of auto iterations (`initial_limit`), blended by the zoom, as a
 /// flight with auto iterations does (see `points::FlightLimits`)
+/// `limit_at` for a flight to a destination deeper than 64-bit floats (see `VideoFlight::to_depth`), for the frame at the scale `e^ln_scale`: the same rule in
+/// logarithms
+fn deep_limit_at(ln_scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations::AutoIterationSettings) -> u32 {
+    let doublings = |ln_scale: f64| -ln_scale / std::f64::consts::LN_2;
+    let factor = |limit: u32, ln_scale: f64| f64::from(limit) / f64::from(settings.initial_limit_at(doublings(ln_scale)).max(1));
+    let (ln_from, ln_to) = (flight.from.scale.ln(), flight.to_depth.map_or_else(|| flight.to.scale.ln(), |depth| depth.log2() * std::f64::consts::LN_2));
+    let (from, to) = (factor(flight.limits.0, ln_from), factor(flight.limits.1, ln_to));
+    let t = if (ln_to - ln_from).abs() < 1e-12 { 1.0 } else { ((ln_scale - ln_from) / (ln_to - ln_from)).clamp(0.0, 1.0) };
+    let limit = f64::from(settings.initial_limit_at(doublings(ln_scale))) * from.powf(1.0 - t) * to.powf(t);
+    (limit.round() as u32).clamp(1, 1_000_000)
+}
+
+/// The exact center and the scale of the frame of a flight to a destination deeper than 64-bit floats (see `VideoFlight::to_depth`) whose camera is `camera`:
+/// the exact center of the destination moved by the camera's offset, with the bits the scale needs (`None` if the flight has no exact destination)
+fn deep_frame_view(flight: &VideoFlight, camera: super::flight::DeepCamera, width: usize) -> Option<(crate::rendering::deep::Fixed, crate::rendering::deep::Fixed, crate::rendering::deep::Depth)> {
+    use crate::rendering::deep::{bits_for_depth, Depth, Fixed};
+    let exact = flight.to_exact.as_ref()?;
+    let depth = Depth::from_log2(camera.ln_scale / std::f64::consts::LN_2);
+    let bits = bits_for_depth(depth, width);
+    let (real, imaginary) = (Fixed::parse(&exact.0, bits)?, Fixed::parse(&exact.1, bits)?);
+    Some((real.plus_scaled(camera.right * depth.mantissa, depth.exponent), imaginary.plus_scaled(camera.up * depth.mantissa, depth.exponent), depth))
+}
+
 fn limit_at(scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations::AutoIterationSettings) -> u32 {
     let factor = |limit: u32, scale: f64| f64::from(limit) / f64::from(settings.initial_limit(scale).max(1));
     let (from, to) = (factor(flight.limits.0, flight.from.scale), factor(flight.limits.1, flight.to.scale));
@@ -562,10 +636,10 @@ fn limit_at(scale: f64, flight: &VideoFlight, settings: &crate::auto_iterations:
 
 /// `ffmpeg` encoding raw RGB frames of `width` x `height` at `fps` from its standard input into `path` in `quality` for `playback` (with `nvenc` on the GPU's
 /// encoder), if `ffmpeg` can be started
-fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, (quality, playback, max_mbps): (VideoQuality, Playback, Option<u32>), nvenc: bool) -> Option<Child> {
+fn start_ffmpeg((width, height): (usize, usize), fps: u32, path: &str, (quality, playback, max_mbps): (VideoQuality, Playback, Option<u32>), encoder: Encoder) -> Option<Child> {
     let (size, rate) = (format!("{width}x{height}"), fps.to_string());
     let mut command = Command::new("ffmpeg");
-    let mut arguments = arguments(quality, playback, nvenc, fps, max_mbps);
+    let mut arguments = arguments(quality, playback, encoder, fps, max_mbps);
     if std::path::Path::new(path).extension().is_some_and(|extension| extension == "mkv") {
         //Options of MP4 files only: a chunk is Matroska, and the joined file gets them (see `chunks::join_chunks`)
         for option in ["-tag:v", "-movflags"] {
@@ -608,8 +682,13 @@ impl MandelbrotApp {
         let julia = flight.julia;
         let resolution = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution())?;
         let path = flight.path();
-        let music = self.followed_music();
-        let speed = if music.is_some() { 100.0 } else { self.video_speed_for(path.duration())? }; //(A video that follows music lasts as long as the track)
+        //A length typed in Fit to length that is not the track's wins (#274): the video lasts that long, and the track is cut there or repeated until then
+        let typed = self.video_fit_length.then(|| self.target_length()).flatten();
+        let music = self.followed_music().map(|music| {
+            let other_length = typed.zip(super::music::track_length(std::path::Path::new(&music.path))).is_some_and(|(typed, track)| (typed.as_secs_f64() - track.as_secs_f64()).abs() > 0.5);
+            super::music::Music { follows: !other_length, ..music }
+        });
+        let speed = if music.as_ref().is_some_and(|music| music.follows) { 100.0 } else { self.video_speed_for(path.duration())? }; //(A video that follows music lasts as long as the track)
         Ok(VideoSpec {
             flight,
             width: resolution.width,
@@ -631,10 +710,13 @@ impl MandelbrotApp {
             auto: self.auto_iterations.then(|| self.auto_settings.clone()),
             use_gpu: self.use_gpu,
             fast_gpu: self.fast_gpu,
+            fast_deep: self.fast_deep,
+            deep_f32: self.deep_f32,
             output: None,
             music,
             shutter: self.video_shutter,
             keyframe_dives: self.video_keyframe_dives,
+            exponential_dives: self.video_exponential_dives,
         })
     }
 
@@ -656,21 +738,21 @@ impl MandelbrotApp {
         let job_name = name.clone();
         let spec = VideoSpec { output: Some(name.clone()), ..spec };
         let manifest_spec = spec.clone();
-        let VideoSpec { flight, width, height, fps, speed, quality, playback, max_mbps, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, output: _, music, shutter, keyframe_dives } = spec;
+        let VideoSpec { flight, width, height, fps, speed, quality, playback, max_mbps, pngs, blend, samples, adaptive, blur, coloring_index, mapping, set: m, auto, use_gpu, fast_gpu, fast_deep, deep_f32, output: _, music, shutter, keyframe_dives, exponential_dives } = spec;
         let chunk_frames = self.video_chunk_frames.unwrap_or(fps as usize * super::chunks::CHUNK_SECONDS).max(1);
         let most_at_once = self.video_at_once_fixed.unwrap_or_else(|| frames_memory_allows(width * height));
         let scheduler = Arc::new(FrameScheduler::new(self.video_at_once_fixed.unwrap_or(2).min(most_at_once)));
         let thread_scheduler = Arc::clone(&scheduler);
         let path = flight.path();
-        //The clock of the frames: at the video speed, or following the music (see `music`)
-        let music_clock = match music.as_ref().map(|music| super::music::clock_of_track(std::path::Path::new(&music.path), music.strength)).transpose() {
-            Ok(clock) => clock.map(Arc::new),
+        //The clock of the frames: at the video speed, or evenly over the length of the music (see `music`)
+        let music_length = match music.as_ref().filter(|music| music.follows).map(|music| super::music::track_length(std::path::Path::new(&music.path)).ok_or_else(|| format!("the music {} cannot be read", music.path))).transpose() {
+            Ok(length) => length,
             Err(reason) => {
                 self.log(format!("Could not render the video: {reason}"));
                 return false;
             }
         };
-        let clock = FrameClock { fps, speed, music: music_clock, duration: path.duration() };
+        let clock = FrameClock { fps, speed, music: music_length, duration: path.duration() };
         let total = clock.frames();
         let coloring_function = super::COLORING_FUNCTIONS[coloring_index.min(super::COLORING_FUNCTIONS.len() - 1)].1;
         let adaptive = adaptive.then(rendering::AdaptiveSampling::default);
@@ -678,19 +760,53 @@ impl MandelbrotApp {
         let gpu = self.gpu.clone().filter(|_| use_gpu);
         //With a GPU, one more renderer renders whole frames on the GPU alone (see the renderers below)
         //A dive into a fixed center with the same colors all the way, at most 4K: composed from keyframe images (see `dive_keyframes`)
-        let dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1)
+        //(Not a dive to an exact center: its deep frames are rendered by the deep renderer, see `deep_view`)
+        let dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1 && flight.to_exact.is_none())
             .then(|| super::dive_keyframes::DivePlan::of((0..total).map(|frame| clock.time(frame)), |time| {
                 let camera = path.camera_at(time);
                 ((camera.x, camera.y), camera.scale)
             }))
             .flatten();
-        if keyframe_dives && dive.is_none() {
+        //A frame deeper than 64-bit floats, of a flight to an exact center, is rendered there by the deep renderer (see `deep_view`): every such frame perturbs
+        //from one orbit of the destination, computed once with the bits of the deepest frame (see `rendering::deep::SharedOrbit`, issue #263)
+        let shared_orbit = flight.to_exact.as_ref().and_then(|exact| {
+            use crate::rendering::deep::{bits_for_depth, Depth, Fixed, SharedOrbit};
+            //(With the bits of the deepest frame: of a sequence, its deepest keyframe)
+            let deepest = flight.sequence.as_ref().and_then(super::sequence::Sequence::deepest).or(flight.to_depth).unwrap_or_else(|| Depth::from_f64(flight.to.scale));
+            let bits = bits_for_depth(deepest, width);
+            Some(SharedOrbit::new(&Fixed::parse(&exact.0, bits)?, &Fixed::parse(&exact.1, bits)?))
+        });
+        //A dive into an exact center, also deeper than 64-bit floats: its keyframes rendered when the frames reach their depth (see `dive_keyframes::DeepDive`)
+        let deep_dive = (keyframe_dives && !blend && width * height <= super::dive_keyframes::LARGEST_FRAME && flight.sequence.is_none() && flight.palettes.0 == flight.palettes.1 && shared_orbit.is_some())
+            .then(|| super::dive_keyframes::DeepDive::plan((0..total).map(|frame| clock.time(frame)), |time| path.deep_at(time)))
+            .flatten();
+        //An exponential map's band is read by frames 14 doublings apart: their colors may not depend on their limits (a cycling palette, or one limit)
+        let exponential_dives = exponential_dives && deep_dive.is_some() && {
+            let fits = !flight.palettes.0.stretch || auto_settings.is_none();
+            if !fits {
+                self.log("Exponential map: the palette is stretched over a limit that changes with the depth, so a ring would have other colors in every frame: keyframes instead (a cycling palette, Stretch off, or a fixed limit lets the map be used)");
+            }
+            fits
+        };
+        if let Some((shallowest, deepest)) = deep_dive {
+            if exponential_dives {
+                self.log(format!("Fast dive to an exact center from an exponential map (an experiment): {} bands of rings, each rendered when the frames reach its depth, and every frame read from them", (shallowest - deepest).max(0.0).floor() as usize + 1 + crate::rendering::exponential_map::MapSize::doublings_below_the_corner((width, height))));
+            } else {
+                self.log(format!("Fast dive to an exact center: {} keyframe images, each rendered when the frames reach its depth, and every frame composed from them", (shallowest - deepest).ceil() as usize + 1));
+            }
+        }
+        if keyframe_dives && dive.is_none() && deep_dive.is_none() {
             self.log("This flight is not a dive into a fixed center with the same colors all the way (at most 4K, without Blend frames): its frames are rendered one by one");
         }
-        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none();
+        if let Some(plan) = &dive {
+            //(Frame 0 waits for them: say so, the progress shows no frames until then)
+            self.log(format!("Fast dive: {} keyframe images are rendered first, then every frame is composed from them{}", plan.scales().len(), if gpu.is_some() { " on the GPU" } else { "" }));
+        }
+        let gpu_renderer = gpu.is_some() && self.video_gpu_renderer && dive.is_none() && deep_dive.is_none();
         let (done, cancel) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
         let (thread_done, thread_cancel) = (Arc::clone(&done), Arc::clone(&cancel));
         let (sender, result) = mpsc::channel();
+        let notices = self.notice_sender.clone();
         let destination = flight.name.clone();
         let saved = self.video_folder.clone();
         std::thread::spawn(move || {
@@ -705,8 +821,17 @@ impl MandelbrotApp {
             let video = saved.join(format!("{name}.{}", extension(quality)));
             //The chunks so far, when the video was started before (see `chunks`), or a new manifest; ffmpeg is needed for the video file
             let encoding = Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success());
-            let nvenc_now = width >= NVENC_SMALLEST.0 && height >= NVENC_SMALLEST.1 && nvenc_works();
-            let mut manifest = chunks::read_manifest(&parts).filter(|manifest| manifest.total == total).unwrap_or_else(|| chunks::Manifest::new(manifest_spec, total, chunk_frames, nvenc_now));
+            let nvenc = nvenc_state((width, height), playback, &parts.display().to_string());
+            let nvenc_now = nvenc == Nvenc::Works;
+            let mut manifest = chunks::read_manifest(&parts).filter(|manifest| manifest.total == total).unwrap_or_else(|| {
+                let mut manifest = chunks::Manifest::new(manifest_spec, total, chunk_frames, nvenc_now);
+                //A busy GPU encoder: the CPU encodes as it would (see `Encoder`)
+                manifest.cpu_instead_of_gpu = nvenc == Nvenc::Busy && quality != VideoQuality::Lossless && playback != Playback::MostCompatible;
+                if manifest.cpu_instead_of_gpu {
+                    let _ = notices.send(String::from(CPU_INSTEAD_OF_GPU));
+                }
+                manifest
+            });
             if encoding {
                 if manifest.nvenc && !nvenc_now {
                     let _ = sender.send(format!("Could not resume the video: it was started with the GPU's encoder (NVENC), which does not work now; its chunks are kept in {}", parts.display()));
@@ -737,10 +862,14 @@ impl MandelbrotApp {
                         let time = png_clock.time(frame);
                         let camera = path.camera_at(time);
                         let palette = flight.palette_at(&path, time);
+                        //(A frame of a flight to a deep destination keeps its exact center and its depth, see `deep_frame_view`)
+                        let deep_camera = deep_frame_view(&flight, path.deep_at(time), width).filter(|(_, _, depth)| depth.to_f64() < 1e-13);
+                        let limit = path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| if flight.to_depth.is_some() { deep_limit_at(path.deep_at(time).ln_scale, &flight, settings) } else { limit_at(camera.scale, &flight, settings) }));
                         let place = crate::points_of_interest::to_json(&crate::points_of_interest::PointOfInterest {
                             name: format!("{} frame {}", flight.name, frame + 1),
                             description: format!("Frame {} of {total} of the video {name}", frame + 1),
-                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: path.limit_at(time).unwrap_or_else(|| auto_settings.as_ref().map_or(limit, |settings| limit_at(camera.scale, &flight, settings))), rotation: flight.rotation_at(&path, time).to_degrees(), julia: flight.julia },
+                            location: crate::points_of_interest::Location { real: camera.x, imaginary: camera.y, scale: camera.scale, max_iterations: limit, rotation: flight.rotation_at(&path, time).to_degrees(), julia: flight.julia,
+                                exact: deep_camera.as_ref().map(|(real, imaginary, _)| (real.to_decimal(), imaginary.to_decimal())), deep_scale: deep_camera.map(|(_, _, depth)| depth).filter(|depth| !depth.to_f64().is_normal()) },
                             appearance: Some(crate::points_of_interest::Appearance { coloring: Some(coloring), color_channels: Some(mapping), iteration_divide: Some(palette.divide), color_offset: Some(palette.offset), stretch_palette: Some(palette.stretch) }),
                             file_name: String::new(),
                         });
@@ -776,7 +905,34 @@ impl MandelbrotApp {
                         let number = manifest.chunks_done;
                         if chunk.is_none() {
                             let path = chunks::chunk_path(&parts, number, chunks::CHUNK_EXTENSION).display().to_string();
-                            match start_ffmpeg((width, height), fps, &path, (quality, playback, max_mbps), manifest.nvenc) {
+                            //The GPU's encoder can stop working while the program runs (another program takes the GPU's memory): before the first chunk the
+                            //whole video goes to the CPU then; later the chunks so far need it (chunks of two encoders do not join), so it is waited for
+                            if manifest.nvenc && quality != VideoQuality::Lossless {
+                                let mut starts = nvenc_state((width, height), playback, &path) == Nvenc::Works;
+                                if !starts && manifest.chunks_done == 0 {
+                                    (manifest.nvenc, manifest.cpu_instead_of_gpu) = (false, playback != Playback::MostCompatible);
+                                    let _ = notices.send(String::from(CPU_INSTEAD_OF_GPU));
+                                    if let Err(err) = chunks::write_manifest(&parts, &manifest) {
+                                        *failure.lock().unwrap() = Some(format!("Could not save the progress of the video: {err}"));
+                                        cancel.store(true, Ordering::Relaxed);
+                                        return;
+                                    }
+                                    starts = true;
+                                }
+                                for _ in 0..NVENC_RETRIES {
+                                    if starts || cancel.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    std::thread::sleep(NVENC_RETRY_PAUSE);
+                                    starts = nvenc_state((width, height), playback, &path) == Nvenc::Works;
+                                }
+                                if !starts {
+                                    *failure.lock().unwrap() = Some(format!("The GPU's video encoder (NVENC) could not start for chunk {} of the video (is another program using the GPU's memory?)", number + 1));
+                                    cancel.store(true, Ordering::Relaxed);
+                                    return;
+                                }
+                            }
+                            match start_ffmpeg((width, height), fps, &path, (quality, playback, max_mbps), manifest.encoder()) {
                                 Some(child) => chunk = Some((child, 0)),
                                 None => {
                                     *failure.lock().unwrap() = Some(String::from("Could not start ffmpeg for the video"));
@@ -817,6 +973,7 @@ impl MandelbrotApp {
             //Renderers take the next frame as soon as the scheduler lets them (each with all the CPU threads and the GPU, so one fills the gaps the other leaves:
             //the end of a layer, the GPU's batches); the frames go to the writers in their order
             let scheduler = &thread_scheduler;
+            let shared_orbit = &shared_orbit;
             let (next, (frames_sender, frames_receiver)) = (AtomicUsize::new(first - warm_up), mpsc::sync_channel::<(usize, Option<RenderedFrame>)>(most_at_once));
             let mut rendered = first - warm_up;
             //The frames in order so far: no renderer starts a frame more than `ahead` after it, so finished frames waiting for a slow one (on the
@@ -845,6 +1002,52 @@ impl MandelbrotApp {
                 None => None,
             };
             let keyframes = &keyframes;
+            //A dive into an exact center: a keyframe in 64-bit floats where they suffice (as `DiveKeyframes` renders them), deeper by the deep renderer from the
+            //orbit of the center (see `dive_keyframes::DeepDive`)
+            //(Or from an exponential map: its bands of rings with the deep renderer, see `dive_keyframes::ExponentialDive`)
+            let exponential_dive = deep_dive.filter(|_| exponential_dives).map(|range| super::dive_keyframes::ExponentialDive::new((width, height), range, |top, size, ln_scale| {
+                let mut set = m.clone();
+                set.palette = flight.palettes.0;
+                if let Some(settings) = &auto_settings {
+                    set.max_iterations = deep_limit_at(ln_scale, &flight, settings);
+                }
+                let orbit = shared_orbit.as_ref().expect("a deep dive has the orbit of its center");
+                let color_of = |position: f64| set.interpolated_color(position, |count| set.color(coloring_function, count));
+                crate::rendering::exponential_map::render_band(&set, orbit, top, size, samples, &color_of, fast_deep, gpu.as_deref().map(|gpu| (gpu, deep_f32)), &thread_cancel)
+            }));
+            let exponential_dive = &exponential_dive;
+            let deep_dive = deep_dive.filter(|_| !exponential_dives).map(|range| super::dive_keyframes::DeepDive::new((width, height), range, |depth: crate::rendering::deep::Depth| {
+                let (big_width, big_height) = (width * 2, height * 2);
+                let mut set = m.clone();
+                set.palette = flight.palettes.0;
+                //(The limit of the deepest frame this keyframe serves)
+                if let Some(settings) = &auto_settings {
+                    set.max_iterations = if flight.to_depth.is_some() { deep_limit_at(depth.log2() * std::f64::consts::LN_2 - std::f64::consts::LN_2, &flight, settings) } else { limit_at(depth.to_f64() / 2.0, &flight, settings) };
+                }
+                let mut plane = ComplexPlane::new(big_width, big_height);
+                plane.set_view(&crate::complex_plane::View::new(flight.to.x, flight.to.y, depth.to_f64().max(f64::MIN_POSITIVE)));
+                let mut colors = Vec::new();
+                let completed = if depth.to_f64().is_normal() && plane.precision() != crate::complex_plane::Precision::Exhausted {
+                    Render::new(&plane, &set, big_width, big_height, coloring_function).supersampling(samples).adaptive(adaptive)
+                        .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(&thread_cancel)
+                        .run(|layer, pass| {
+                            if pass >= samples.clamp(1, 64) {
+                                colors = layer.to_vec();
+                            }
+                        })
+                } else {
+                    let orbit = shared_orbit.as_ref().expect("a deep dive has the orbit of its center");
+                    let color_of = |position: f64| set.interpolated_color(position, |count| set.color(coloring_function, count));
+                    crate::rendering::deep::render_layers_on(&set, (orbit, (0.0, 0.0)), (depth, 0.0), (big_width, big_height), samples, &color_of, fast_deep, gpu.as_deref().map(|gpu| (gpu, deep_f32)), &thread_cancel, |layer, number| {
+                        if number == samples.max(1) {
+                            colors = layer.to_vec();
+                        }
+                    })
+                };
+                completed.then_some(colors)
+            }));
+            //(Its unturned frames composed on the GPU, bit for bit those of the CPU)
+            let deep_dive = &deep_dive.map(|dive| dive.with_gpu(gpu.as_deref()));
             std::thread::scope(|scope| {
                 //Measures the frame rate and keeps the number of frames at once that renders fastest (see `Climber`), and the CPU use for the progress line
                 let (next_ref, steering_cancel) = (&next, &thread_cancel);
@@ -874,10 +1077,12 @@ impl MandelbrotApp {
                         scheduler.set_allowed(climber.measured(rate));
                     }
                 });
-                //The renderers that the scheduler lets start frames (with all the CPU threads, handing rows to the GPU), and with a GPU one more that renders whole
-                //frames on the GPU alone: the CPU threads take most rows of a frame they share with the GPU, so the GPU would otherwise be idle much of the time
-                for renderer in 0..most_at_once + usize::from(gpu_renderer) {
-                    let on_the_gpu = renderer == most_at_once;
+                //The renderers that the scheduler lets start frames, with all the CPU threads, and with a GPU `GPU_RENDERERS` more that render whole frames on
+                //the GPU alone. The CPU's frames do not hand rows to the GPU: two renderers of the GPU's own keep it busier than rows handed to it (where they and
+                //the GPU-only frames contended for it), and the CPU's frames keep exact samples only (#253: a 4K 32x flight 25.4-26.7 s → 23.9 s, as close to
+                //the exact render as before with the fast GPU math; with the exact math every frame is the same)
+                for renderer in 0..most_at_once + if gpu_renderer { GPU_RENDERERS } else { 0 } {
+                    let on_the_gpu = renderer >= most_at_once;
                     let (frames_sender, next, thread_cancel, m, path, flight, auto_settings, gpu, clock, written) = (frames_sender.clone(), &next, &thread_cancel, m.clone(), &path, &flight, &auto_settings, &gpu, &clock, &written);
                     scope.spawn(move || {
                         let (mut plane, mut m) = (ComplexPlane::new(width, height), m);
@@ -899,6 +1104,30 @@ impl MandelbrotApp {
                             let camera = path.camera_at(time);
                             plane.set_view(&camera.view());
                             plane.set_rotation(flight.rotation_at(path, time));
+                            //A dive into an exact center: the same, from keyframes rendered as the frames reach them (with the camera in logarithms)
+                            if deep_dive.is_some() || exponential_dive.is_some() {
+                                let moments = if shutter > 0.0 {
+                                    let interval = clock.time(frame + 1).saturating_sub(time).max(time.saturating_sub(clock.time(frame.saturating_sub(1))));
+                                    sample_times(DIVE_MOMENTS, time, interval, shutter, path.duration())
+                                } else {
+                                    vec![time]
+                                };
+                                let moments: Vec<(f64, f64)> = moments.iter().map(|moment| (path.deep_at(*moment).ln_scale, flight.rotation_at(path, *moment))).collect();
+                                let colors = deep_dive.as_ref().map_or_else(|| exponential_dive.as_ref().and_then(|dive| dive.compose_moments(&moments)), |deep_dive| deep_dive.compose_moments(&moments));
+                                let Some(colors) = colors else {
+                                    scheduler.finish_frame(false);
+                                    return;
+                                };
+                                scheduler.finish_frame(true);
+                                if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
+                                    return;
+                                }
+                                //(The next keyframe while the other threads compose: see `DeepDive::prefetch_after`)
+                                if let Some(deep_dive) = deep_dive {
+                                    deep_dive.prefetch_after(&moments);
+                                }
+                                continue;
+                            }
                             //A dive: the frame composed from its keyframe (with motion blur: from the moments of its shutter)
                             if let Some(keyframes) = keyframes {
                                 let moments = if shutter > 0.0 {
@@ -907,8 +1136,8 @@ impl MandelbrotApp {
                                 } else {
                                     vec![time]
                                 };
-                                let composed: Vec<Vec<crate::coloring::TrueColor>> = moments.iter().map(|moment| keyframes.compose(path.camera_at(*moment).scale, flight.rotation_at(path, *moment))).collect();
-                                let colors = average_frames(&composed);
+                                let moments: Vec<(f64, f64)> = moments.iter().map(|moment| (path.camera_at(*moment).scale, flight.rotation_at(path, *moment))).collect();
+                                let colors = keyframes.compose_moments(&moments, gpu.as_deref());
                                 scheduler.finish_frame(true);
                                 if frames_sender.send((frame, Some(RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))))).is_err() {
                                     return;
@@ -918,7 +1147,7 @@ impl MandelbrotApp {
                             if let Some(limit) = path.limit_at(time) {
                                 m.max_iterations = limit; //The limits of the keyframes
                             } else if let Some(settings) = auto_settings {
-                                m.max_iterations = limit_at(camera.scale, flight, settings);
+                                m.max_iterations = if flight.to_depth.is_some() { deep_limit_at(path.deep_at(time).ln_scale, flight, settings) } else { limit_at(camera.scale, flight, settings) };
                             }
                             m.palette = flight.palette_at(path, time);
                             //Motion blur: every sample in the view of its own moment within the shutter (the limit and the colors stay those of the frame)
@@ -934,20 +1163,34 @@ impl MandelbrotApp {
                                 Vec::new()
                             };
                             let mut colors = Vec::new();
-                            let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
-                                .gpu(gpu.as_deref().map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
-                            let render = if planes.is_empty() { render } else { render.sample_planes(&planes) };
-                            //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
-                            let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
-                            //(The CPU workers below the threads that feed the GPU, see `Render::in_the_background`)
-                            let render = if on_the_gpu { render.on_the_gpu_only() } else { render.in_the_background() };
-                            //Only the last pass is kept: copying the whole frame after each of its passes cost 64 copies of 25 MB per 4K frame at 64x (#212)
-                            let last_pass = if blend && samples <= 1 { 1 } else { samples.clamp(1, 64) };
-                            let completed = render.run(|layer, pass| {
-                                if pass >= last_pass {
-                                    colors = layer.to_vec();
-                                }
-                            });
+                            //A frame deeper than 64-bit floats, of a flight to an exact center: rendered there by the deep renderer (see `deep_view`)
+                            //(The camera of the flight in logarithms, see `Flight::deeper`, perturbing from the orbit of the destination that every frame shares)
+                            let deep = shared_orbit.as_ref().filter(|_| m.julia.is_none() && plane.precision() == crate::complex_plane::Precision::Exhausted);
+                            let completed = if let Some(orbit) = deep {
+                                let camera = path.deep_at(time);
+                                let depth = crate::rendering::deep::Depth::from_log2(camera.ln_scale / std::f64::consts::LN_2);
+                                let color_of = |position: f64| m.interpolated_color(position, |count| m.color(coloring_function, count));
+                                crate::rendering::deep::render_layers_on(&m, (orbit, (camera.right, camera.up)), (depth, plane.rotation()), (width, height), samples, &color_of, fast_deep, gpu.as_deref().map(|gpu| (gpu, deep_f32)), thread_cancel, |layer, number| {
+                                    if number == samples.max(1) {
+                                        colors = layer.to_vec();
+                                    }
+                                })
+                            } else {
+                                let render = Render::new(&plane, &m, width, height, coloring_function).supersampling(samples).adaptive(adaptive)
+                                    .gpu(gpu.as_deref().filter(|_| on_the_gpu || !gpu_renderer).map(|gpu| (gpu, Duration::ZERO))).fast_gpu(fast_gpu).cancel_with(thread_cancel);
+                                let render = if planes.is_empty() { render } else { render.sample_planes(&planes) };
+                                //Blended one-sample frames each take another sample (jitter), so the blend gathers samples over the frames, as in a flight
+                                let render = if blend && samples <= 1 { render.colors_only_of_sample((frame % 64) as u8) } else { render };
+                                //(The CPU workers below the threads that feed the GPU, see `Render::in_the_background`)
+                                let render = if on_the_gpu { render.on_the_gpu_only() } else { render.in_the_background() };
+                                //Only the last pass is kept: copying the whole frame after each of its passes cost 64 copies of 25 MB per 4K frame at 64x (#212)
+                                let last_pass = if blend && samples <= 1 { 1 } else { samples.clamp(1, 64) };
+                                render.run(|layer, pass| {
+                                    if pass >= last_pass {
+                                        colors = layer.to_vec();
+                                    }
+                                })
+                            };
                             if on_the_gpu {
                                 scheduler.finished.fetch_add(usize::from(completed), Ordering::Relaxed);
                             } else {
@@ -957,7 +1200,8 @@ impl MandelbrotApp {
                                 let _ = frames_sender.send((frame, None));
                                 return;
                             }
-                            let rendered = if blend {
+                            //(A deep frame is not blended: moving the frames before to its view needs 64-bit coordinates, which are all the same that deep)
+                            let rendered = if blend && deep.is_none() {
                                 RenderedFrame::Colors(colors, plane.clone()) //Blended in order, see below
                             } else {
                                 RenderedFrame::Rgb(colors_to_rgb_bytes(&finish(colors, blur, width, height, samples), mapping))
@@ -1026,7 +1270,7 @@ impl MandelbrotApp {
                 let _ = sender.send(message);
                 return;
             }
-            let hevc = arguments(quality, playback, manifest.nvenc, fps, max_mbps).iter().any(|argument| argument == "hevc_nvenc" || argument == "libx265");
+            let hevc = arguments(quality, playback, manifest.encoder(), fps, max_mbps).iter().any(|argument| argument == "hevc_nvenc" || argument == "libx265");
             if !chunks::join_chunks(&parts, manifest.chunks(), &video, hevc) {
                 let _ = sender.send(format!("Could not join the chunks of the video into {}; they are kept in {}", video.display(), parts.display()));
                 return;
@@ -1034,7 +1278,7 @@ impl MandelbrotApp {
             let _ = std::fs::remove_dir_all(&parts);
             let mut with_music = String::new();
             if let Some(music) = &music {
-                match super::music::add_track(&video, std::path::Path::new(&music.path)) {
+                match super::music::add_track(&video, std::path::Path::new(&music.path), !music.follows) {
                     Ok(()) => with_music = format!(", with the music of {}", music.path),
                     Err(reason) => with_music = format!(" ({reason})"),
                 }
@@ -1049,6 +1293,10 @@ impl MandelbrotApp {
 
     /// Takes the final message of the video job
     pub(super) fn poll_video(&mut self, ctx: &egui::Context) {
+        //(Its notices, such as the encoder it falls back to; the window also takes them in `poll_job`, the command line only here)
+        while let Ok(notice) = self.notices.try_recv() {
+            self.log(notice);
+        }
         let Some(job) = &self.video_job else { return };
         ctx.request_repaint_after(Duration::from_millis(200));
         if let Ok(message) = job.result.try_recv() {
@@ -1258,6 +1506,7 @@ impl MandelbrotApp {
                 }
             }).response.on_hover_text("Motion blur: every sample of a pixel is taken at its own moment while the shutter is open, as a film camera does, so motion blurs along its direction and fine detail shimmers less, at no extra cost (the same samples). 180° is the shutter of film; more is smoother and softer at the edges of a fast zoom, whose center stays sharp. Needs 2 samples or more, without Blend frames");
             ui.checkbox(&mut self.video_keyframe_dives, "Fast dives").on_hover_text("A dive into a fixed center (the same colors all the way, at most 4K, without Blend frames) is rendered as one large image per doubling of the zoom, and every frame is composed from the image of its depth: many times faster, a slightly different picture (each frame averages 1 to 4 keyframe pixels per pixel). Other flights render frame by frame");
+            ui.add_enabled(self.video_keyframe_dives, egui::Checkbox::new(&mut self.video_exponential_dives, "Exponential map")).on_hover_text("Off by default, an experiment (issue #287). With Fast dives, a dive into an exact center (a deep place) is rendered as rings around its center, one band a doubling of the zoom, instead of one large image a doubling, and every frame is read from them: measured about 1.5 to 2 times as fast per doubling, a little closer to frames rendered one by one overall but a little softer at the frame's edges, and turning costs nothing extra. Only for dives into deep places; other dives keep their keyframes");
             ui.checkbox(&mut self.video_pngs, "PNG frames").on_hover_text("Also write every frame as a PNG file to a folder in saved/ (exact pixels, for editing; large). Off by default: only the video file");
         });
         ui.horizontal(|ui| {
@@ -1309,8 +1558,12 @@ impl MandelbrotApp {
             let path = flight.path();
             let size = self.save_size.resolve_for_video(self.default_save_resolution(), self.view_resolution()).map(|resolution| (resolution.width, resolution.height));
             let music_length = self.followed_music_length();
+            //(A typed length that is not the track's wins, see `video_spec`)
+            let typed = self.video_fit_length.then(|| self.target_length()).flatten();
+            let music_length = music_length.filter(|track| typed.is_none_or(|typed| (typed.as_secs_f64() - track.as_secs_f64()).abs() <= 0.5));
             let speed = size.clone().and_then(|_| match (self.followed_music(), music_length) {
                 (Some(_), Some(length)) => Ok(path.duration().as_secs_f64() * 100.0 / length.as_secs_f64()), //(The average speed: the video lasts as long as the track)
+                (Some(_), None) if typed.is_some() => self.video_speed_for(path.duration()),
                 (Some(music), None) => Err(format!("The music {} cannot be read", music.path)),
                 (None, _) => self.video_speed_for(path.duration()),
             });
@@ -1356,7 +1609,7 @@ mod tests {
     #[test]
     fn the_limit_of_a_video_frame_goes_from_the_limit_at_the_start_to_that_of_the_place() {
         let settings = crate::auto_iterations::AutoPreset::Balanced.settings();
-        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, rotations: (0.0, 0.0), julia: None };
+        let flight = VideoFlight { from: Camera { x: -0.75, y: 0.0, scale: 1.0 }, to: Camera { x: -0.7498, y: 0.0203, scale: 6.4e-5 }, pace: Pace::Fast, route: Route::Shortest, constant_speed: 3.0, speed: 1.0, dive_zoom: 1.0, name: String::from("Seahorse"), limits: (300, 5000), palettes: (crate::mandelbrot_set::ColorCycle::CYCLE, crate::mandelbrot_set::ColorCycle::CYCLE), sequence: None, rotations: (0.0, 0.0), to_exact: None, to_depth: None, julia: None };
         assert_eq!(limit_at(1.0, &flight, &settings), 300);
         assert_eq!(limit_at(6.4e-5, &flight, &settings), 5000);
         let middle = limit_at(8e-3, &flight, &settings);
@@ -1379,21 +1632,24 @@ mod tests {
     fn the_tiers_keep_a_fixed_quality_for_the_player_they_are_for() {
         let has = |arguments: &[String], wanted: &[&str]| wanted.iter().all(|wanted| arguments.iter().any(|argument| argument.contains(wanted)));
         //Maximum: full color in 10 bits, on the GPU or the CPU; a fixed quantizer that follows the tier
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, true, 60, None), &["hevc_nvenc", "yuv444p16le", "constqp", "20", "bt709"]));
-        assert!(has(&arguments(VideoQuality::UltraHigh, Playback::Maximum, true, 60, None), &["16"]));
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, false, 60, None), &["libx264", "yuv444p10le", "14"]));
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, Encoder::Gpu, 60, None), &["hevc_nvenc", "yuv444p16le", "constqp", "20", "bt709"]));
+        assert!(has(&arguments(VideoQuality::UltraHigh, Playback::Maximum, Encoder::Gpu, 60, None), &["16"]));
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, Encoder::Cpu, 60, None), &["libx264", "yuv444p10le", "14"]));
+        //Instead of the GPU's encoder: 10-bit HEVC as it would be, at the quality factor of the CPU's encoders
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::Maximum, Encoder::CpuInsteadOfGpu, 60, None), &["libx265", "yuv444p10le", "14", "hvc1"]));
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::HighQuality, Encoder::CpuInsteadOfGpu, 60, None), &["libx265", "yuv420p10le", "14", "hvc1"]));
         //High quality: HEVC Main 10, half the color resolution made with a sharp filter; Most compatible: 8-bit H.264
-        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, true, 60, None), &["hevc_nvenc", "p010le", "main10", "lanczos"]));
-        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, false, 60, None), &["libx265", "yuv420p10le"]));
-        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60, None), &["libx264", "yuv420p", "18"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, Encoder::Gpu, 60, None), &["hevc_nvenc", "p010le", "main10", "lanczos"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::HighQuality, Encoder::Cpu, 60, None), &["libx265", "yuv420p10le"]));
+        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, Encoder::Gpu, 60, None), &["libx264", "yuv420p", "18"]));
         //A keyframe every half second and the index at the start; lossless is FFV1 whatever the player
-        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, true, 60, None), &["-g", "30", "+faststart"]));
-        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60, None), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
+        assert!(has(&arguments(VideoQuality::High, Playback::MostCompatible, Encoder::Gpu, 60, None), &["-g", "30", "+faststart"]));
+        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, Encoder::Gpu, 60, None), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]);
         //Max bitrate (issue #224): the GPU's encoder keeps its quality target under a variable rate, the CPU's keep their factor, both within a buffer of half a second
-        let capped = arguments(VideoQuality::VeryHigh, Playback::HighQuality, true, 60, Some(180));
+        let capped = arguments(VideoQuality::VeryHigh, Playback::HighQuality, Encoder::Gpu, 60, Some(180));
         assert!(has(&capped, &["hevc_nvenc", "vbr", "-cq", "20", "-b:v", "180M", "-maxrate", "-bufsize", "90000k"]) && !capped.iter().any(|argument| argument == "constqp"), "{capped:?}");
-        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::HighQuality, false, 60, Some(180)), &["libx265", "-crf", "14", "-maxrate", "180M", "-bufsize", "90000k"]));
-        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, true, 60, Some(180)), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"], "no limit for lossless");
+        assert!(has(&arguments(VideoQuality::VeryHigh, Playback::HighQuality, Encoder::Cpu, 60, Some(180)), &["libx265", "-crf", "14", "-maxrate", "180M", "-bufsize", "90000k"]));
+        assert_eq!(arguments(VideoQuality::Lossless, Playback::HighQuality, Encoder::Gpu, 60, Some(180)), ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"], "no limit for lossless");
         assert_eq!((extension(VideoQuality::Lossless), extension(VideoQuality::NearLossless)), ("mkv", "mp4"));
     }
 

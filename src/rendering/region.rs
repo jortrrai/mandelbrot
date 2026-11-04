@@ -58,6 +58,23 @@ pub fn move_complex_plane_by_pixels(c: &mut ComplexPlane, rows_up: i64, columns_
     c.translate(right, -up);
 }
 
+/// Why `wanted` is not `shown` moved by whole pixels within `reach` columns and rows (see `pixel_shift`), for the log (issue #238)
+pub(super) fn why_not_a_shift(shown: &ComplexPlane, wanted: &ComplexPlane, reach_x: usize, reach_y: usize) -> String {
+    if shown.rotation().to_bits() != wanted.rotation().to_bits() {
+        return format!("another rotation ({} → {})", shown.rotation(), wanted.rotation());
+    }
+    let (shown, wanted) = (shown.unturned(), wanted.unturned());
+    if shown.increment_x.to_bits() != wanted.increment_x.to_bits() || shown.increment_y.to_bits() != wanted.increment_y.to_bits() || shown.length_x.to_bits() != wanted.length_x.to_bits() || shown.length_y.to_bits() != wanted.length_y.to_bits() {
+        return format!("another zoom (pixel {:e} → {:e}, width {:e} → {:e})", shown.increment_x, wanted.increment_x, shown.length_x, wanted.length_x);
+    }
+    let columns = (wanted.min_x - shown.min_x) / wanted.increment_x;
+    let rows = (shown.min_y - wanted.min_y) / wanted.increment_y;
+    match pixel_shift(&shown, &wanted) {
+        Some((rows_up, columns_right)) => format!("moved too far ({columns_right} columns, {rows_up} rows; samples are kept within {reach_x} x {reach_y})"),
+        None => format!("not a move by whole pixels ({columns:.4} columns, {rows:.4} rows)"),
+    }
+}
+
 /// The shift of the buffer that turns the image of `shown` into the image of `wanted`, if `wanted` is `shown` moved by whole pixels.
 ///
 /// The shift is `(rows_up, columns_right)` for [`crate::pixel_buffer::PixelBuffer::translate_buffer`]; `None` if the views differ in size or zoom. Unlike the move of one frame, this also covers several moves whose renders were interrupted.

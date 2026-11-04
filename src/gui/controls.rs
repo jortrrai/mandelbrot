@@ -27,13 +27,18 @@ impl MandelbrotApp {
         self.progress_controls(ui);
         self.video_progress_ui(ui);
         //The sections: the ones used most are open at first; a click on a title opens or closes it
-        self.section(ui, "Navigation", true, |app, ui| {
+        self.section(ui, "View", true, |app, ui| {
             app.move_controls(ui);
             ui.separator();
             app.zoom_controls(ui);
             app.go_to_view_controls(ui);
         });
         self.section(ui, "Places", true, Self::places_controls);
+        //(The View section only changes the center, the scale and the rotation: what is drawn over the view, and the Julia sets, are here)
+        self.section(ui, "Julia sets and overlays", false, |app, ui| {
+            app.julia_controls(ui);
+            app.center_marker_controls(ui);
+        });
         self.section(ui, "Image quality", true, Self::quality_controls);
         self.section(ui, "Colors", false, Self::color_controls);
         self.section(ui, "Flights", false, |app, ui| {
@@ -89,7 +94,6 @@ impl MandelbrotApp {
         self.sharing_controls(ui);
         self.depth_controls(ui);
         self.rotation_controls(ui);
-        self.julia_controls(ui);
     }
 
     /// How flights fly: the pace, the route and the rendering of their frames, frames ahead, and blending and blurring their frames
@@ -180,6 +184,9 @@ impl MandelbrotApp {
             ui.add_enabled(self.render_neighborhood, egui::DragValue::new(&mut self.neighborhood_margin).range(10..=5000).speed(5).suffix("% per side"))
                 .on_hover_text("How far the neighborhood reaches past every side, in percent of the view (type a value; 100% is one view to every side). A large neighborhood takes longer and gets a lower resolution, so it stays within 8192 pixels on a side");
         });
+        ui.separator();
+        self.deep_performance_controls(ui);
+        ui.separator();
         ui.checkbox(&mut self.immersion, "Immersion").on_hover_text("Never shows black where nothing is rendered yet: while you move the view, and during flights, the view only moves once the new view has at least a complete low-resolution frame. Off: the view follows at once and fills in as the render goes (best effort).");
     }
 
@@ -298,10 +305,8 @@ impl MandelbrotApp {
             let current = Quality { samples: self.supersampling_amount, blurred: self.quality_blur };
             let mut chosen = current;
             egui::ComboBox::from_id_salt("quality").selected_text(current.name()).show_ui(ui, |ui| {
-                for preset in Quality::PRESETS.into_iter().filter(|preset| !preset.blurred || self.blur.is_some()) {
-                    ui.selectable_value(&mut chosen, preset, preset.name());
-                }
-            }).response.on_hover_text("Samples per pixel (supersampling): more is smoother and sharper at the edges of the set, and takes longer. The blur preset takes one sample per pixel and blurs the image a little (σ 0.8 pixel), which comes close to 4x for the time of 1x.");
+                Quality::menu(ui, &mut chosen, |preset| !preset.blurred || self.blur.is_some());
+            }).response.on_hover_text("Samples per pixel (supersampling): more is smoother and sharper at the edges of the set, and takes longer. The recommended tiers go from Performance (1x + blur: one sample, blurred a little) to Ultra (32x); past 32x the difference hardly shows, so 64x and the other presets are under Advanced.");
             if chosen != current {
                 (self.supersampling_amount, self.supersampling_input, self.quality_blur) = (chosen.samples, chosen.samples, chosen.blurred);
                 (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
@@ -320,6 +325,9 @@ impl MandelbrotApp {
             }
             ui.label(format!("({})", self.view_resolution()));
         });
+        ui.add_enabled(self.fit.enabled, egui::Checkbox::new(&mut self.lock_aspect, "Same shape as the saved image"))
+            .on_hover_text("The image on the screen takes the shape of the Saved image size (and video size), as large as fits, so what you compose is exactly what you save. Only the shape: the screen keeps its own resolution, and the zoom and center stay. Not with Same as the view")
+            .on_disabled_hover_text("Needs Match the window size");
         ui.horizontal(|ui| {
             ui.label("Max. iterations:");
             let response = ui.add_enabled(!self.auto_iterations, egui::DragValue::new(&mut self.max_iterations_input).range(1..=1_000_000).speed(10.0));
@@ -467,9 +475,7 @@ impl MandelbrotApp {
             let current = Quality { samples: self.image_supersampling_amount, blurred: self.image_quality_blur };
             let mut chosen = current;
             egui::ComboBox::from_id_salt("saved_quality").selected_text(current.name()).show_ui(ui, |ui| {
-                for preset in Quality::PRESETS {
-                    ui.selectable_value(&mut chosen, preset, preset.name());
-                }
+                Quality::menu(ui, &mut chosen, |_| true);
             });
             (self.image_supersampling_amount, self.image_quality_blur) = (chosen.samples, chosen.blurred);
         });
@@ -516,7 +522,9 @@ impl MandelbrotApp {
         });
         match self.save_size.resolve(default_size, view) {
             Ok(resolution) => {
-                ui.label(format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6));
+                //(A PNG of a detailed view can take up to its 3 bytes a pixel: say so for the images that need gigabytes, issue #225)
+                let gigabytes = resolution.pixels() as f64 * 3.0 / 1e9;
+                ui.label(if gigabytes >= 1.0 { format!("{:.1} megapixels, up to {gigabytes:.1} GB on disk", resolution.pixels() as f64 / 1e6) } else { format!("{:.1} megapixels", resolution.pixels() as f64 / 1e6) });
                 if resolution.pixels() > resolution::LARGE_IMAGE_PIXELS {
                     ui.weak("A large image: rendered in strips, so it needs little memory, but slow at high quality. Many phone galleries and image viewers cannot open \
                         images this large: use a viewer for large images, or print it");
