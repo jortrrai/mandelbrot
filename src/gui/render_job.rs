@@ -252,6 +252,7 @@ impl MandelbrotApp {
                         let replaced = std::mem::replace(&mut self.p.colors, colors);
                         self.spare_colors.put(replaced);
                         self.shown_plane = plane;
+                        self.shown_deep.clone_from(&self.job_deep);
                         self.texture_outdated = true;
                         self.layer_shown = pass > 0;
                         self.preview_block = preview_block;
@@ -266,8 +267,9 @@ impl MandelbrotApp {
                         progress.total = total;
                     }
                     if let Some(bars) = &mut self.bars {
-                        if pass == 1 && whole {
-                            //Only a render of the whole view tells the time per pixel: a continued render only computes the pixels that miss samples
+                        if pass == 1 && whole && self.job_deep.is_none() {
+                            //Only a render of the whole view tells the time per pixel: a continued render only computes the pixels that miss samples (and a deep
+                            //render's time says nothing about the 64-bit renderer's)
                             self.first_layer_per_pixel = Some(layer_time / u32::try_from(bars.pixels_total.max(1)).unwrap_or(u32::MAX));
                         }
                         bars.layer_times.push(layer_time);
@@ -314,6 +316,7 @@ impl MandelbrotApp {
                     if completed || self.frame_accepted {
                         if reported {
                             self.shown_plane = c.clone();
+                            self.shown_deep.clone_from(&self.job_deep);
                         }
                         self.p.update_pixels(); //The colors are those of the last frame shown, which arrived with its pass
                     }
@@ -403,6 +406,14 @@ impl MandelbrotApp {
         }
         self.buffer_is_complete = false;
         self.settle = during_gesture.then(|| (message.to_string(), Instant::now(), moved));
+        //A view deeper than 64-bit floats is rendered by the deep renderer (see `deep_view`)
+        if !matches!(kind, RenderKind::FlightFrame) && self.deep_view().is_some() {
+            (self.layer_shown, self.flight_job, self.flight_frame_job) = (false, false, false);
+            self.flight_queue.clear();
+            self.bars = None;
+            self.start_deep_render(message);
+            return;
+        }
         //The samples of the last render, handed from job to job; this job hands its own on when it stops, finished or not
         let previous_samples = self.samples.take();
         let (samples_sender, samples_receiver) = mpsc::channel();
@@ -510,6 +521,7 @@ impl MandelbrotApp {
         self.bars = Some(RenderBars { total_layers: supersampling_amount.clamp(1, 64), layer_times: Vec::new(), started: now, layer_started: now, pixels_done, pixels_total, finished: None });
         self.flight_queue.clear();
         self.job = Some(receiver);
+        self.job_deep = None;
         self.flight_job = false;
         self.flight_frame_job = matches!(kind, RenderKind::FlightFrame);
         self.progress = Some(Progress { pass: 0, total: supersampling_amount, cancel, stop: None });

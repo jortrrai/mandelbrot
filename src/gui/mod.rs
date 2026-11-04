@@ -22,8 +22,11 @@ mod cli;
 mod youtube;
 pub use cli::command_line;
 mod cycle;
+mod deep_view;
 mod depth;
 mod dive_keyframes;
+#[cfg(test)]
+mod dive_quality;
 mod export;
 mod fit;
 mod flight;
@@ -222,6 +225,8 @@ pub struct MandelbrotApp {
     video_shutter: f64,
     /// Whether dives into a fixed center are composed from keyframe images (see `dive_keyframes`)
     video_keyframe_dives: bool,
+    /// Whether Fast dives into exact centers are read from an exponential map (an experiment, off by default, see `dive_keyframes::ExponentialDive`)
+    video_exponential_dives: bool,
     /// A fixed number of frames a video renders at once, for measurements (the window always lets the job choose, see `video::FrameScheduler`)
     video_at_once_fixed: Option<usize>,
     /// The saved flights (see `flight_files`): their folder (`flights`), the flights read from it (once the controls are first shown), the one chosen in the
@@ -274,17 +279,15 @@ pub struct MandelbrotApp {
     /// The keyframes of the sequence being made, and the times of its transitions as typed (see `sequence`)
     sequence_keyframes: Vec<sequence::Keyframe>,
     sequence_seconds: Vec<String>,
+    /// The exact view when it is deeper than 64-bit floats can show (see `deep_view`)
+    deep: Option<deep_view::DeepView>,
     /// The song to fit a video to, the search under way, and the recordings found (see `songs`)
     song_input: String,
     song_search: Option<std::sync::mpsc::Receiver<Result<Vec<songs::Recording>, String>>>,
     song_results: Vec<songs::Recording>,
-    /// The audio track a video follows (see `music`): its path, whether videos follow it, how strongly, and its length (read once per path)
+    /// The audio track of videos (see `music`): its path, whether videos have it, and its length (read once per path)
     music_path: String,
     follow_music: bool,
-    music_strength: f64,
-    /// Whether videos with music pulse on its kicks, and how far (see `music::BeatPulse`, issue #221)
-    beat_pulse: bool,
-    pulse_strength: f64,
     music_length: Option<(String, Option<std::time::Duration>)>,
     /// Where videos are written (`saved`)
     video_folder: std::path::PathBuf,
@@ -357,6 +360,10 @@ pub struct MandelbrotApp {
     previews_received: usize,
     /// The view that the colors of `p` show. It differs from `c` while the render of a new view has not shown its first layer yet: the image is then drawn moved and scaled, see `transform`
     shown_plane: ComplexPlane,
+    /// The exact view of the colors of `p` when they are of a deep view (see `deep_view`), and the exact view of the running job's images: `shown_plane` alone
+    /// is too coarse to place them (the 64-bit plane of a deep view hardly moves or zooms), see `deep_view::exact_fraction`
+    shown_deep: Option<deep_view::ExactView>,
+    job_deep: Option<deep_view::ExactView>,
     /// The receiving end of the running background rendering job, if any. While a job runs, the controls are disabled.
     job: Option<Receiver<JobMessage>>,
     /// The colors of frames that the screen no longer shows, which the jobs fill with later frames: a big image is then not allocated (and its memory cleared by
@@ -386,6 +393,12 @@ pub struct MandelbrotApp {
     fast_gpu: bool,
     /// Whether frames that move (flights, drags) at shallow zoom use the GPU's plain f32 loop (on by default), see `Render::f32_gpu`
     f32_frames: bool,
+    /// Whether views deeper than 64-bit floats skip steps by bilinear approximation (off by default: much faster, a few pixels differ), see
+    /// `rendering::deep::Reference`
+    fast_deep: bool,
+    /// Whether the GPU's share of views deeper than 64-bit floats is iterated in 32-bit floats (issue #288: off by default, an approximation, much faster on
+    /// GPUs with a low f64 rate), see `GpuIterator::deep_outcomes32`
+    deep_f32: bool,
     /// Whether nothing deeper than the fast GPU math is rendered (on by default: deeper views are left to the CPU and are slow), see `zoom_refused` and `keep_within_zoom_limit`
     limit_zoom: bool,
     gpu_opening: Option<Receiver<Result<rendering::gpu::GpuIterator, String>>>,
@@ -471,6 +484,7 @@ impl MandelbrotApp {
             video_blend: false,
             video_shutter: 0.0,
             video_keyframe_dives: false,
+            video_exponential_dives: false,
             video_at_once_fixed: None,
             flights_folder: std::path::PathBuf::from("flights"),
             saved_flights: Vec::new(),
@@ -503,14 +517,12 @@ impl MandelbrotApp {
             depth_center: None,
             sequence_keyframes: Vec::new(),
             sequence_seconds: Vec::new(),
+            deep: None,
             song_input: String::new(),
             song_search: None,
             song_results: Vec::new(),
             music_path: String::new(),
             follow_music: false,
-            music_strength: 0.5,
-            beat_pulse: false,
-            pulse_strength: music::PULSE_STRENGTH,
             music_length: None,
             video_folder: std::path::PathBuf::from("saved"),
             flight: None,
@@ -553,6 +565,8 @@ impl MandelbrotApp {
             preview_levels: Vec::new(),
             previews_received: 0,
             shown_plane,
+            shown_deep: None,
+            job_deep: None,
             job: None,
             spare_colors: render_job::SparePool::default(),
             progress: None,
@@ -567,6 +581,8 @@ impl MandelbrotApp {
             use_gpu: true,
             fast_gpu: true,
             f32_frames: true,
+            fast_deep: false,
+            deep_f32: false,
             limit_zoom: true,
             gpu_opening: config.gpu.then(|| {
                 //Opening the GPU and checking it against the CPU takes a moment: in the background, the first renders use the CPU
@@ -811,7 +827,7 @@ impl MandelbrotApp {
     /// Where the image is drawn, as a fraction of the image area: moved and scaled to the current view (best effort), or held where it is, so the screen never shows
     /// black where nothing is rendered: the view on the screen then is the view of the last frame that was complete enough, and it moves when the next one is
     pub(super) fn drawn_fraction(&self) -> egui::Rect {
-        if self.required_readiness() == Readiness::Any { transform::shown_fraction(&self.shown_plane, &self.c) } else { FULL_TEXTURE }
+        if self.required_readiness() == Readiness::Any { self.fraction_of(&self.shown_plane, self.shown_deep.as_ref()) } else { FULL_TEXTURE }
     }
 
     /// The view that the screen shows: the current view, or with a held view (see `drawn_fraction`) the view of the frame on the screen

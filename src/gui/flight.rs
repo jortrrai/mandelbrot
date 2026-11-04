@@ -86,7 +86,8 @@ impl Pace {
     /// of the zoom per second (a zoom by 2 is `ln 2 / RHO` of path length)
     fn speed(self, constant: f64) -> (f64, f64, f64) {
         match self {
-            Pace::Constant => (constant.clamp(*CONSTANT_SPEEDS.start(), *CONSTANT_SPEEDS.end()) * std::f64::consts::LN_2 / RHO, 0.1, 600.0),
+            //(At most a day: a dive to 10^-1000 at one doubling a second takes 55 minutes, issue #263)
+            Pace::Constant => (constant.clamp(*CONSTANT_SPEEDS.start(), *CONSTANT_SPEEDS.end()) * std::f64::consts::LN_2 / RHO, 0.1, 86_400.0),
             Pace::Fast => (4.0, 0.5, 3.0),
             Pace::Normal => (2.0, 1.0, 6.0),
             Pace::Cinematic => (1.0, 2.0, 12.0),
@@ -199,6 +200,38 @@ impl Camera {
     }
 }
 
+/// A camera that can be deeper than 64-bit floats reach (issue #263): the offset of its center from the destination's in units of its scale (which does not
+/// underflow), and the natural logarithm of its scale
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeepCamera {
+    pub right: f64,
+    pub up: f64,
+    pub ln_scale: f64,
+}
+
+/// `ln(cosh(x))`, also where `cosh(x)` overflows
+fn ln_cosh(x: f64) -> f64 {
+    let x = x.abs();
+    x + (-2.0 * x).exp().ln_1p() - std::f64::consts::LN_2
+}
+
+/// `ln(sinh(x))` for `x > 0` (minus infinity at 0), also where `sinh(x)` overflows
+fn ln_sinh(x: f64) -> f64 {
+    if x <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    x + (-(-2.0 * x).exp_m1()).ln() - std::f64::consts::LN_2
+}
+
+/// A leg to a destination deeper than 64-bit floats reach, see `Leg::deep_at`: the natural logarithms of the scales at its ends, and the parameter r1 of the
+/// path of van Wijk and Nuij at its end
+#[derive(Clone, Copy, Debug)]
+struct DeepLeg {
+    ln_from: f64,
+    ln_to: f64,
+    r1: f64,
+}
+
 /// One leg of a flight: the zoom-and-pan path from `from` to `to`
 #[derive(Clone, Debug)]
 struct Leg {
@@ -210,6 +243,8 @@ struct Leg {
     pan: Option<(f64, f64)>,
     /// A straight leg (see `Route::Straight`): the natural logarithm of the zoom, `ln(to.scale / from.scale)`
     straight: Option<f64>,
+    /// A leg in logarithms, to a destination that can be deeper than 64-bit floats (`to.scale` is then the smallest normal 64-bit float), see `deeper`
+    deep: Option<DeepLeg>,
 }
 
 impl Leg {
@@ -218,13 +253,68 @@ impl Leg {
         let u1 = (to.x - from.x).hypot(to.y - from.y);
         //Below a ten-thousandth of the smaller view, a pan is a pure zoom: the formulas of a pan divide by the distance
         if u1 <= 1e-4 * w0.min(w1) {
-            return Leg { from, to, length: (w1 / w0).ln().abs() / RHO, pan: None, straight: None };
+            return Leg { from, to, length: (w1 / w0).ln().abs() / RHO, pan: None, straight: None, deep: None };
         }
         let rho2 = RHO * RHO;
         let b = |w: f64, sign: f64| (w1 * w1 - w0 * w0 + sign * rho2 * rho2 * u1 * u1) / (2.0 * w * rho2 * u1);
         //r = ln(-b + sqrt(b² + 1)) = -asinh(b), without the cancellation of the logarithm for a large b
         let (r0, r1) = (-b(w0, 1.0).asinh(), -b(w1, -1.0).asinh());
-        Leg { from, to, length: (r1 - r0) / RHO, pan: Some((u1, r0)), straight: None }
+        Leg { from, to, length: (r1 - r0) / RHO, pan: Some((u1, r0)), straight: None, deep: None }
+    }
+
+    /// The pure zoom from keyframe `from` to keyframe `to` at one center, in logarithms (see `deep_at`), however deep they are
+    fn zoom_in_logarithms(from: &super::sequence::Keyframe, to: &super::sequence::Keyframe) -> Leg {
+        let (ln_from, ln_to) = (from.depth().log2() * std::f64::consts::LN_2, to.depth().log2() * std::f64::consts::LN_2);
+        let clamp = |camera: Camera| Camera { scale: camera.scale.max(f64::MIN_POSITIVE), ..camera };
+        Leg { from: clamp(from.camera()), to: clamp(to.camera()), length: (ln_to - ln_from).abs() / RHO, pan: None, straight: None, deep: Some(DeepLeg { ln_from, ln_to, r1: 0.0 }) }
+    }
+
+    /// This leg with its destination at the scale `e^ln_to` instead, deeper than 64-bit floats reach (issue #263): the same path, with its scales and the
+    /// part of the pan still to go computed as logarithms and in units of the scale, which do not underflow (see `deep_at`)
+    fn deeper(&self, ln_to: f64) -> Leg {
+        let (from, to) = (self.from, Camera { scale: ln_to.exp().max(f64::MIN_POSITIVE), ..self.to });
+        let (w0, ln_from) = (from.scale, from.scale.ln());
+        let u1 = (to.x - from.x).hypot(to.y - from.y);
+        if self.straight.is_some() {
+            let zoom = ln_to - ln_from;
+            let mean_scale = if zoom.abs() < 1e-12 { w0 } else { (ln_to.exp() - w0) / zoom };
+            let deep = DeepLeg { ln_from, ln_to, r1: 0.0 };
+            return Leg { from, to, length: (zoom / RHO).hypot(u1 / mean_scale), pan: None, straight: Some(zoom), deep: Some(deep) };
+        }
+        if u1 == 0.0 {
+            return Leg { from, to, length: (ln_to - ln_from).abs() / RHO, pan: None, straight: None, deep: Some(DeepLeg { ln_from, ln_to, r1: 0.0 }) };
+        }
+        //As in `new`, where w1 is negligible next to w0 (its square underflows): r1 = asinh(k / w1), which is ln(2 k / w1) for so small a w1
+        let rho2 = RHO * RHO;
+        let r0 = -((-(w0 * w0) + rho2 * rho2 * u1 * u1) / (2.0 * w0 * rho2 * u1)).asinh();
+        let ln_x = ((w0 * w0 + rho2 * rho2 * u1 * u1) / (2.0 * rho2 * u1)).ln() - ln_to;
+        let r1 = if ln_x > 30.0 { std::f64::consts::LN_2 + ln_x } else { ln_x.exp().asinh() };
+        Leg { from, to, length: (r1 - r0) / RHO, pan: Some((u1, r0)), straight: None, deep: Some(DeepLeg { ln_from, ln_to, r1 }) }
+    }
+
+    /// The camera at path length `s` of a leg to a deep destination (see `deeper`); of any other leg, the camera of `camera_at` in those terms
+    fn deep_at(&self, s: f64) -> DeepCamera {
+        let Some(deep) = self.deep else {
+            let camera = self.camera_at(s);
+            return DeepCamera { right: (camera.x - self.to.x) / camera.scale, up: (camera.y - self.to.y) / camera.scale, ln_scale: camera.scale.ln() };
+        };
+        let s = s.clamp(0.0, self.length);
+        let (dx, dy, w0) = (self.from.x - self.to.x, self.from.y - self.to.y, self.from.scale);
+        if let Some(zoom) = self.straight {
+            //The share of the way still to go is `e^(zoom·t)·(e^(zoom·(1-t)) - 1) / (e^zoom - 1)` (see `camera_at`), and the scale `w0·e^(zoom·t)`
+            let t = if self.length > 0.0 { s / self.length } else { 1.0 };
+            let remaining = if zoom.abs() < 1e-12 { 1.0 - t } else { (zoom * (1.0 - t)).exp_m1() / zoom.exp_m1() };
+            return DeepCamera { right: dx / w0 * remaining, up: dy / w0 * remaining, ln_scale: deep.ln_from + zoom * t };
+        }
+        match self.pan {
+            None => DeepCamera { right: 0.0, up: 0.0, ln_scale: deep.ln_from + (deep.ln_to - deep.ln_from) * if self.length > 0.0 { s / self.length } else { 1.0 } },
+            Some((u1, r0)) => {
+                //The scale is `w0·cosh(r0) / cosh(rs)`, and the distance still to go over it `sinh(r1 - rs) / (rho²·cosh(r1))` (see `camera_at`)
+                let rs = RHO * s + r0;
+                let remaining = (ln_sinh(deep.r1 - rs) - ln_cosh(deep.r1)).exp() / (RHO * RHO);
+                DeepCamera { right: dx / u1 * remaining, up: dy / u1 * remaining, ln_scale: deep.ln_from + ln_cosh(r0) - ln_cosh(rs) }
+            }
+        }
     }
 
     /// A straight leg from `from` to `to`, see `Route::Straight`. Along it the scale is `w0 · e^(zoom · τ)` (τ from 0 to 1) and the center has moved the share
@@ -234,7 +324,7 @@ impl Leg {
         let zoom = (to.scale / from.scale).ln();
         let distance = (to.x - from.x).hypot(to.y - from.y);
         let mean_scale = if zoom.abs() < 1e-12 { from.scale } else { (to.scale - from.scale) / zoom };
-        Leg { from, to, length: (zoom / RHO).hypot(distance / mean_scale), pan: None, straight: Some(zoom) }
+        Leg { from, to, length: (zoom / RHO).hypot(distance / mean_scale), pan: None, straight: Some(zoom), deep: None }
     }
 
     /// The camera at path length `s` (0 to `length`); exactly the start at 0 and the end at `length`
@@ -244,6 +334,12 @@ impl Leg {
         }
         if s >= self.length {
             return self.to;
+        }
+        if self.deep.is_some() {
+            //(As near as 64-bit floats get, for the window and the progress of a flight; the frames of a video use `deep_at`)
+            let camera = self.deep_at(s);
+            let scale = camera.ln_scale.exp().max(f64::MIN_POSITIVE);
+            return Camera { x: self.to.x + camera.right * scale, y: self.to.y + camera.up * scale, scale };
         }
         let (from, to, w0) = (self.from, self.to, self.from.scale);
         if let Some(zoom) = self.straight {
@@ -323,7 +419,9 @@ impl Flight {
             let first = sequence.keyframes.first().map_or(Camera { x: -0.75, y: 0.0, scale: 1.0 }, super::sequence::Keyframe::camera);
             return Flight { leg: Leg::new(first, first), pace: Pace::Constant, duration: Duration::from_millis(1), timing, sequence: None };
         }
-        let legs: Vec<Leg> = sequence.keyframes.windows(2).map(|pair| Leg::new(pair[0].camera(), pair[1].camera())).collect();
+        //A dive along one exact center (see `Sequence::shared_exact`): pure zooms in logarithms, also beyond 64-bit floats (issue #263)
+        let along_one_center = sequence.shared_exact().is_some();
+        let legs: Vec<Leg> = sequence.keyframes.windows(2).map(|pair| if along_one_center { Leg::zoom_in_logarithms(&pair[0], &pair[1]) } else { Leg::new(pair[0].camera(), pair[1].camera()) }).collect();
         let starts: Vec<f64> = sequence.seconds.iter().scan(0.0, |start, seconds| {
             let this = *start;
             *start += seconds;
@@ -355,6 +453,29 @@ impl Flight {
         let (index, share) = path.transition_at(elapsed.as_secs_f64());
         let keyframes = &path.sequence.keyframes;
         Some(super::sequence::blend_limits(keyframes[index].max_iterations, keyframes[index + 1].max_iterations, share))
+    }
+
+    /// This flight with its destination at the scale `e^ln_to`, deeper than 64-bit floats reach (issue #263, see `Leg::deeper`), timed for the whole zoom (a
+    /// flight through keyframes stays as it is)
+    #[must_use]
+    pub fn deeper(self, ln_to: f64) -> Flight {
+        if self.sequence.is_some() {
+            return self;
+        }
+        let leg = self.leg.deeper(ln_to);
+        let duration = Flight::duration_of(&leg, self.pace, self.timing.0, self.timing.1);
+        Flight { leg, duration, ..self }
+    }
+
+    /// The camera `elapsed` after the start, also deeper than 64-bit floats (see `DeepCamera`)
+    pub fn deep_at(&self, elapsed: Duration) -> DeepCamera {
+        if let Some(path) = &self.sequence {
+            //(From the leg's keyframe: for a dive along one exact center, its center)
+            let (index, share) = path.transition_at(elapsed.as_secs_f64());
+            let leg = &path.legs[index];
+            return leg.deep_at(share * leg.length);
+        }
+        self.leg.deep_at(self.pace.ease(elapsed.as_secs_f64() / self.duration.as_secs_f64()) * self.leg.length)
     }
 
     /// The duration of a flight along `leg` at `pace`, see `with`
@@ -410,7 +531,7 @@ mod tests {
     #[test]
     fn a_sequence_passes_every_keyframe_at_its_time_and_a_dive_never_moves_sideways() {
         use super::super::sequence::{Keyframe, Sequence};
-        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { julia: None, real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false, rotation: 0.0 };
+        let keyframe = |scale: f64, divide: f64, limit: u32| Keyframe { julia: None, exact: None, depth: None, real: -0.749_810_000_000_000_1, imaginary: -0.020_300_000_000_000_054, scale, max_iterations: limit, divide, offset: 100.0, stretch: false, rotation: 0.0 };
         let sequence = Sequence { keyframes: vec![keyframe(1.0, 1.0, 300), keyframe(1e-3, 0.5, 1000), keyframe(1e-6, 4.0, 5000)], seconds: vec![4.0, 6.0] };
         let flight = Flight::of_sequence(sequence.clone(), (3.0, 1.0));
         assert_eq!(flight.duration(), Duration::from_secs(10));
@@ -562,6 +683,39 @@ mod tests {
             assert_eq!(cameras[100], SEAHORSE);
             assert!(cameras.iter().all(|camera| (camera.x, camera.y) == (SEAHORSE.x, SEAHORSE.y)), "straight down, never sideways");
             assert!(cameras.windows(2).all(|pair| pair[1].scale < pair[0].scale), "zooming in all the way");
+        }
+    }
+
+    #[test]
+    fn a_flight_deeper_than_64_bit_floats_follows_the_same_path_in_logarithms() {
+        //Issue #263: within the range of 64-bit floats a deep leg is the same path as the ordinary one, at every moment
+        let to = Camera { x: -0.7436438870371587, y: 0.13182590420531198, scale: 1e-200 };
+        for (from, route) in [(RESET, Route::Shortest), (RESET, Route::Straight), (RESET, Route::Dive), (Camera { x: 0.3, y: -0.5, scale: 0.01 }, Route::Shortest)] {
+            let ordinary = Flight::with(from, to, Pace::Constant, route, 3.0, 1.0, DIVE_ZOOM);
+            let deep = Flight::with(from, to, Pace::Constant, route, 3.0, 1.0, DIVE_ZOOM).deeper(to.scale.ln());
+            let ratio = deep.duration().as_secs_f64() / ordinary.duration().as_secs_f64();
+            assert!((ratio - 1.0).abs() < 1e-9, "{route:?}: the same duration ({ratio})");
+            for i in 0..=200 {
+                let camera = ordinary.camera_at(ordinary.duration().mul_f64(f64::from(i) / 200.0));
+                let deep_camera = deep.deep_at(deep.duration().mul_f64(f64::from(i) / 200.0));
+                assert!((deep_camera.ln_scale - camera.scale.ln()).abs() < 1e-9, "{route:?} {i}: scale {} against {}", deep_camera.ln_scale.exp(), camera.scale);
+                //(In the plane: the ordinary camera's center is only as precise as a 64-bit number, a few steps of `f64::EPSILON`)
+                let (right, up) = (deep_camera.right * camera.scale, deep_camera.up * camera.scale);
+                let near = |deep: f64, ordinary: f64| (deep - ordinary).abs() <= 1e-9 * ordinary.abs() + 4.0 * f64::EPSILON;
+                assert!(near(right, camera.x - to.x) && near(up, camera.y - to.y), "{route:?} {i}: ({right}, {up}) against ({}, {})", camera.x - to.x, camera.y - to.y);
+            }
+        }
+        //To 10^-1000: the scale goes all the way down without a jump, and the center arrives
+        let ln_to = -1000.0 * std::f64::consts::LN_10;
+        for route in Route::ALL {
+            let flight = Flight::with(RESET, Camera { scale: f64::MIN_POSITIVE, ..to }, Pace::Constant, route, 3.0, 1.0, DIVE_ZOOM).deeper(ln_to);
+            let doublings = -ln_to / std::f64::consts::LN_2;
+            assert!(flight.duration().as_secs_f64() > doublings / 3.0 * 0.99, "{route:?}: timed for the whole zoom at 3 doublings a second: {:?}", flight.duration());
+            let cameras: Vec<DeepCamera> = (0..=1000).map(|i| flight.deep_at(flight.duration().mul_f64(f64::from(i) / 1000.0))).collect();
+            assert!((cameras[1000].ln_scale - ln_to).abs() < 1e-9 && cameras[1000].right == 0.0 && cameras[1000].up == 0.0, "{route:?}: arrived, {:?}", cameras[1000]);
+            assert!(cameras.windows(2).all(|pair| (pair[1].ln_scale - pair[0].ln_scale).abs() < 0.02 * -ln_to), "{route:?}: no jumps");
+            assert!(cameras.iter().all(|camera| camera.right.is_finite() && camera.up.is_finite() && camera.ln_scale.is_finite()));
+            assert!(cameras[500..].windows(2).all(|pair| pair[1].ln_scale < pair[0].ln_scale), "{route:?}: zooming in on the way down");
         }
     }
 }

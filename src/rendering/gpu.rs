@@ -195,6 +195,12 @@ pub struct GpuIterator {
     /// The adaptive mask on the GPU (`gpu_mask.wgsl`), used only when the self-test found it the CPU's bit for bit
     mask: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
     mask_works: std::sync::atomic::AtomicBool,
+    /// The perturbation loop of deep views (`gpu_deep.wgsl`, issue #263), used only when the self-test found its outcomes the CPU's bit for bit
+    deep: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
+    /// The same loop in 32-bit floats (`deep32_source`, issue #288: an approximation, off by default), with the bindings of `deep`
+    deep32: Option<wgpu::ComputePipeline>,
+    deep32_works: std::sync::atomic::AtomicBool,
+    deep_works: std::sync::atomic::AtomicBool,
     layout: wgpu::BindGroupLayout,
     /// The frames of dives composed from keyframes (`gpu_compose.wgsl`, see `compose`), with their own buffers
     compose: wgpu::ComputePipeline,
@@ -202,6 +208,8 @@ pub struct GpuIterator {
     name: String,
     /// The buffers of finished dispatches, for the next ones (several renders feed the GPU at once)
     spare: std::sync::Mutex<Vec<Buffers>>,
+    /// The sums and the read-back buffer of the last frame composed, for the next frames of its size (see `compose`)
+    compose_buffers: std::sync::Mutex<Option<(u64, wgpu::Buffer, wgpu::Buffer)>>,
 }
 
 impl GpuIterator {
@@ -259,6 +267,15 @@ impl GpuIterator {
         let compose = pipeline(include_str!("gpu_compose.wgsl"), &compose_pipeline_layout)?;
         //(Without it the CPU computes the points of the exact loop, as before)
         let exact_pixels = pipeline(&exact_pixels_source(), &pipeline_layout).ok();
+        //(Without it the CPU renders every deep view, as before)
+        let deep = {
+            let entries = [entry(0, true), entry(1, true), entry(2, true), entry(3, true), entry(4, false), entry(5, true)];
+            let deep_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("deep"), entries: &entries });
+            let deep_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("deep"), bind_group_layouts: &[Some(&deep_layout)], immediate_size: 0 });
+            let single = pipeline(&deep32_source(), &deep_pipeline_layout).ok();
+            pipeline(include_str!("gpu_deep.wgsl"), &deep_pipeline_layout).ok().map(|pipeline| ((pipeline, deep_layout), single))
+        };
+        let (deep, deep32) = deep.map_or((None, None), |(deep, single)| (Some(deep), single));
         //(Without it the CPU computes the adaptive mask, as before)
         let mask = {
             let entries = [entry(0, true), entry(1, true), entry(2, true), entry(3, false), entry(4, false)];
@@ -297,7 +314,7 @@ impl GpuIterator {
             })
         };
         let (device, queue) = (std::mem::ManuallyDrop::new(device), std::mem::ManuallyDrop::new(queue));
-        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), mask, mask_works: std::sync::atomic::AtomicBool::new(false), layout, compose, compose_layout, name, spare: std::sync::Mutex::new(Vec::new()) })
+        Ok(GpuIterator { device, queue, exact, fast, single, exact_pixels, exact_pixels_works: std::sync::atomic::AtomicBool::new(false), colored, colored_works: std::sync::atomic::AtomicBool::new(false), mask, mask_works: std::sync::atomic::AtomicBool::new(false), deep, deep32, deep32_works: std::sync::atomic::AtomicBool::new(false), deep_works: std::sync::atomic::AtomicBool::new(false), layout, compose, compose_layout, name, spare: std::sync::Mutex::new(Vec::new()), compose_buffers: std::sync::Mutex::new(None) })
     }
 
     /// Puts the keyframe images of a dive (each `width` x `height` pixels) on the GPU, for `compose`
@@ -321,13 +338,13 @@ impl GpuIterator {
         Ok(ComposeImages { buffer, width: u32::try_from(width).map_err(|_| String::from("too wide"))?, pixels: u32::try_from(pixels).map_err(|_| String::from("too large"))? })
     }
 
-    /// The `width` x `height` frame that averages the colors `moments` give its pixels (see `gpu_compose.wgsl`), as red | green << 8 | blue << 16. A moment is the
+    /// The `width` x `height` frame that averages the colors `moments` give its pixels (see `gpu_compose.wgsl`). A moment is the
     /// index of its keyframe in `images` and its taps: `2 * width` column taps (tap x 0.25, then 0.75), then `2 * height` row taps. The number of moments is
     /// a power of two (then the average is exact)
     ///
     /// # Errors
     /// A failure of the GPU, or a number of moments that is not a power of two: the CPU composes the frame then
-    pub fn compose(&self, images: &ComposeImages, (width, height): (usize, usize), moments: &[(usize, Vec<ComposeTap>)]) -> Result<Vec<u32>, String> {
+    pub fn compose(&self, images: &ComposeImages, (width, height): (usize, usize), moments: &[(usize, Vec<ComposeTap>)]) -> Result<Vec<TrueColor>, String> {
         if !moments.len().is_power_of_two() {
             return Err(String::from("the moments are not a power of two"));
         }
@@ -353,34 +370,49 @@ impl GpuIterator {
             buffer
         };
         let (params, moment_buffer, tap_buffer) = (with_data("compose params", bytemuck::cast_slice(&params)), with_data("compose moments", bytemuck::cast_slice(&moment_words)), with_data("compose taps", bytemuck::cast_slice(&taps)));
-        let sums = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose sums"), size: size.max(16), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-        let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose read"), size: size.max(16), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.compose_layout, entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: moment_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: tap_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: images.buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: sums.as_entire_binding() },
-        ] });
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&self.compose);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(pixels.div_ceil(64).clamp(1, COMPOSE_WORKGROUPS), 1, 1);
+        //(The two frame-sized buffers of the last frame again, if they fit: creating them for every frame, and wgpu clearing them, cost more than composing,
+        //as for the dispatches in #212. The shader writes every pixel's sum, so what they held does not matter)
+        let mut kept = self.compose_buffers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kept.as_ref().is_some_and(|(kept_size, _, _)| *kept_size != size) {
+            *kept = None;
         }
-        encoder.copy_buffer_to_buffer(&sums, 0, &read, 0, size);
-        let index = self.queue.submit([encoder.finish()]);
-        read.slice(..size).map_async(wgpu::MapMode::Read, |_| {});
-        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
-        errors.into_iter().flatten().next().map_or(Ok(()), |error| Err(format!("{}: {error}", self.name)))?;
-        self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
-        let out = {
-            let view = read.slice(..size).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
-            bytemuck::cast_slice::<u8, u32>(&view).to_vec()
-        };
-        read.unmap();
-        Ok(out)
+        let (_, sums, read) = &*kept.get_or_insert_with(|| (size, self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose sums"), size: size.max(16), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
+            self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("compose read"), size: size.max(16), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })));
+        let composed = (|| -> Result<Vec<TrueColor>, String> {
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.compose_layout, entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: moment_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tap_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: images.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: sums.as_entire_binding() },
+            ] });
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                pass.set_pipeline(&self.compose);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.dispatch_workgroups(pixels.div_ceil(64).clamp(1, COMPOSE_WORKGROUPS), 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(sums, 0, read, 0, size);
+            let index = self.queue.submit([encoder.finish()]);
+            read.slice(..size).map_async(wgpu::MapMode::Read, |_| {});
+            let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+            errors.into_iter().flatten().next().map_or(Ok(()), |error| Err(format!("{}: {error}", self.name)))?;
+            self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
+            let out = {
+                let view = read.slice(..size).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
+                //(8 bits each of red, green and blue in a word, straight to colors: one pass over the frame)
+                bytemuck::cast_slice::<u8, u32>(&view).iter().map(|color| TrueColor::new((color & 0xff) as u8, ((color >> 8) & 0xff) as u8, ((color >> 16) & 0xff) as u8)).collect()
+            };
+            read.unmap();
+            Ok(out)
+        })();
+        //(A failure may leave the read-back buffer mapped: new ones for the next frame)
+        if composed.is_err() {
+            *kept = None;
+        }
+        drop(kept);
+        composed
     }
 
     /// The name and the backend of the GPU
@@ -543,6 +575,118 @@ impl GpuIterator {
     #[cfg(test)]
     pub(crate) fn use_colored(&self, on: bool) {
         self.colored_works.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the GPU iterates deep views (`deep_outcomes`): when the self-test found its outcomes the CPU's, bit for bit
+    pub(crate) fn deep_works(&self) -> bool {
+        self.deep_works.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The outcome of the perturbation loop (`gpu_deep.wgsl`, `rendering::deep::position_from`) for every offset `offsets` from the center of the reference
+    /// orbit of `input`, scaled by `2^scaled` (0: plain offsets; see `rendering::deep::position_scaled`), in at most `BATCH` offsets a dispatch
+    ///
+    /// # Errors
+    /// The GPU failed, or there is no such shader
+    pub(crate) fn deep_outcomes(&self, m: &MandelbrotSet, input: &DeepInput, offsets: &[(f64, f64)], scaled: i32) -> Result<Vec<DeepOutcome>, String> {
+        self.deep_dispatches(m, input, offsets, scaled, false)
+    }
+
+    /// `deep_outcomes` in 32-bit floats (`deep32_source`, issue #288): an approximation of the f64 loop, much faster on GPUs whose f64 rate is low, for
+    /// offsets scaled by `2^scaled` with `scaled` beyond 100 (f32's range) and plain below
+    ///
+    /// # Errors
+    /// The GPU failed, or there is no such shader
+    pub(crate) fn deep_outcomes32(&self, m: &MandelbrotSet, input: &DeepInput, offsets: &[(f64, f64)], scaled: i32) -> Result<Vec<DeepOutcome>, String> {
+        self.deep_dispatches(m, input, offsets, scaled, true)
+    }
+
+    /// Whether the GPU has the 32-bit deep loop (see `deep_outcomes32`)
+    pub(crate) fn has_deep32(&self) -> bool {
+        self.deep_works() && self.deep32_works.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn deep_dispatches(&self, m: &MandelbrotSet, input: &DeepInput, offsets: &[(f64, f64)], scaled: i32, single: bool) -> Result<Vec<DeepOutcome>, String> {
+        let DeepInput { orbit, residuals, table, starts, lengths } = *input;
+        let (deep, layout) = self.deep.as_ref().ok_or_else(|| String::from("the deep shader did not compile"))?;
+        let pipeline = if single { self.deep32.as_ref().ok_or_else(|| String::from("the 32-bit deep shader did not compile"))? } else { deep };
+        //(In 32-bit floats every number of the input is rounded to f32, the residuals' mantissas too)
+        let floats = |values: &[f64]| -> Vec<u8> { if single { values.iter().flat_map(|value| (*value as f32).to_le_bytes()).collect() } else { values.iter().flat_map(|value| value.to_le_bytes()).collect() } };
+        if starts.len() > 32 || starts.len() != lengths.len() {
+            return Err(String::from("too many levels"));
+        }
+        let too_large = |_| String::from("too large");
+        let storage = wgpu::BufferUsages::STORAGE;
+        let _gate = gate();
+        let (out_of_memory, validation) = (self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory), self.device.push_error_scope(wgpu::ErrorFilter::Validation));
+        let buffer_with = |label: &str, bytes: &[u8]| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (bytes.len() as u64).max(16), usage: storage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            self.queue.write_buffer(&buffer, 0, bytes);
+            buffer
+        };
+        let flat_orbit: Vec<f64> = orbit.iter().flat_map(|(x, y)| [*x, *y]).collect();
+        let residual_bytes: Vec<u8> = if single {
+            residuals.iter().flat_map(|residual| [(residual.mx as f32).to_le_bytes(), (residual.my as f32).to_le_bytes(), residual.px.to_le_bytes(), residual.py.to_le_bytes()].concat()).collect()
+        } else {
+            bytemuck::cast_slice(residuals).to_vec()
+        };
+
+        let (orbit_buffer, table_buffer) = (buffer_with("deep orbit", &floats(&flat_orbit)), buffer_with("deep table", &floats(table)));
+        let residual_buffer = buffer_with("deep residuals", &residual_bytes);
+        let mut outcomes = Vec::with_capacity(offsets.len());
+        for batch in offsets.chunks(BATCH) {
+            let mut params: Vec<u8> = Vec::with_capacity(8 + 16 + 256);
+            params.extend(floats(&[m.orbit_radius * m.orbit_radius]));
+            for value in [m.max_iterations, u32::try_from(batch.len()).map_err(too_large)?, u32::try_from(starts.len()).map_err(too_large)?, u32::try_from(orbit.len()).map_err(too_large)?] {
+                params.extend(value.to_le_bytes());
+            }
+            for list in [starts, lengths] {
+                for level in 0..32 {
+                    params.extend(list.get(level).copied().unwrap_or(0).to_le_bytes());
+                }
+            }
+            params.extend(scaled.to_le_bytes());
+            params.extend(0_u32.to_le_bytes());
+            //(The struct is padded to a multiple of 8 bytes, of 4 in 32-bit floats)
+            let align = if single { 4 } else { 8 };
+            params.resize(params.len().div_ceil(align) * align, 0);
+            let flat: Vec<f64> = batch.iter().flat_map(|(x, y)| [*x, *y]).collect();
+            let (params_buffer, offsets_buffer) = (buffer_with("deep params", &params), buffer_with("deep offsets", &floats(&flat)));
+            let size = (batch.len() * if single { std::mem::size_of::<DeepOutcome32>() } else { std::mem::size_of::<DeepOutcome>() }) as u64;
+            let out = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("deep outcomes"), size: size.max(16), usage: storage | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+            let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("deep read"), size: size.max(16), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout, entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: orbit_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: table_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: offsets_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: residual_buffer.as_entire_binding() },
+            ] });
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.dispatch_workgroups(u32::try_from(batch.len().div_ceil(64)).unwrap_or(u32::MAX).clamp(1, DEEP_WORKGROUPS), 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(&out, 0, &read, 0, size.max(16));
+            let index = self.queue.submit([encoder.finish()]);
+            read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            //(One batch at a time: the buffers of a 4K keyframe's 33 M pixels at once would be gigabytes)
+            self.device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None }).map_err(|err| format!("{}: {err}", self.name))?;
+            {
+                let view = read.slice(..).get_mapped_range().map_err(|err| format!("{}: {err:?}", self.name))?;
+                if single {
+                    outcomes.extend(bytemuck::cast_slice::<u8, DeepOutcome32>(&view)[..batch.len()].iter().map(|outcome| DeepOutcome { zx: f64::from(outcome.zx), zy: f64::from(outcome.zy), steps: outcome.steps, escaped: outcome.escaped }));
+                } else {
+                    outcomes.extend_from_slice(&bytemuck::cast_slice::<u8, DeepOutcome>(&view)[..batch.len()]);
+                }
+            }
+            read.unmap();
+        }
+        let errors = [pollster::block_on(validation.pop()), pollster::block_on(out_of_memory.pop())];
+        errors.into_iter().flatten().next().map_or(Ok(()), |error| Err(format!("{}: {error}", self.name)))?;
+        Ok(outcomes)
     }
 
     /// Whether the GPU computes the adaptive mask (`adaptive_mask`): when the self-test found it the CPU's, bit for bit
@@ -752,6 +896,8 @@ impl GpuIterator {
             }
             if index == 0 {
                 self.mask_works.store(self.check_mask().unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
+                self.deep_works.store(super::deep::gpu_agrees(self), std::sync::atomic::Ordering::Relaxed);
+                self.deep32_works.store(self.deep32.is_some() && super::deep::gpu32_agrees(self) >= 0.9, std::sync::atomic::Ordering::Relaxed);
             }
             if index == 0 || self.colored_work() {
                 self.colored_works.store(self.check_colored(&plane, &m).unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
@@ -789,6 +935,74 @@ const EXACT_OUTCOME_CONTINUED: &str = "            var extra = 0u;
 
 /// The workgroups of 64 invocations of a pass of the mask: each invocation takes pixels a whole dispatch apart (see `gpu_mask.wgsl`)
 const MASK_WORKGROUPS: u32 = 4096;
+
+/// The workgroups of 64 invocations of a deep dispatch: each invocation iterates pixels a whole dispatch apart (see `gpu_deep.wgsl`)
+const DEEP_WORKGROUPS: u32 = 8192;
+
+/// The input of the deep loop besides the offsets (see `GpuIterator::deep_outcomes`): the reference orbit and the rounding residuals of its points, and the
+/// bilinear approximations (five numbers each: A, B and the square of the radius), whose level `l` starts at `starts[l]` and has `lengths[l]` of them
+#[derive(Clone, Copy)]
+pub(crate) struct DeepInput<'a> {
+    pub(crate) orbit: &'a [(f64, f64)],
+    pub(crate) residuals: &'a [DeepResidual],
+    pub(crate) table: &'a [f64],
+    pub(crate) starts: &'a [u32],
+    pub(crate) lengths: &'a [u32],
+}
+
+/// `DeepOutcome` of the 32-bit deep loop (`deep32_source`)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct DeepOutcome32 {
+    zx: f32,
+    zy: f32,
+    steps: u32,
+    escaped: u32,
+}
+
+/// The deep loop in 32-bit floats (issue #288), from `gpu_deep.wgsl`: the same steps in f32, the scaled phase below 2^-100 instead of 2^-1000 (f32's range
+/// ends at about 10⁻³⁸), powers of two from f32's exponent bits, and the split and the band of the escape test for f32's 24 bits. An approximation of the
+/// f64 loop (off by default); the residuals of the escape test next to the circle are those of the f64 orbit, so the tip c = -2 is only exact in f64
+fn deep32_source() -> String {
+    let mut source = include_str!("gpu_deep.wgsl").to_string();
+    for (from, to) in [
+        ("bitcast<f64>(u64(u32(1023 + step)) << 52u)", "bitcast<f32>(u32(127 + step) << 23u)"),
+        ("clamp(left, -1000, 1000)", "clamp(left, -100, 100)"),
+        ("134217729.0lf", "4097.0lf"),
+        ("1e-12lf", "1e-5lf"),
+        ("1e300lf", "1e30lf"),
+        ("-500)", "-50)"),
+        ("scaled - 500", "scaled - 50"),
+        ("scaled <= 1000", "scaled <= 100"),
+        ("params.scaled > 1000", "params.scaled > 100"),
+        ("f64", "f32"),
+        ("lf", "f"),
+    ] {
+        source = source.replace(from, to);
+    }
+    source
+}
+
+/// The rounding residual of a point of the reference orbit (`rendering::deep::Residual`): `mx · 2^-px` and `my · 2^-py`
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct DeepResidual {
+    pub(crate) mx: f64,
+    pub(crate) my: f64,
+    pub(crate) px: i32,
+    pub(crate) py: i32,
+}
+
+/// The outcome of the deep loop for one pixel (`gpu_deep.wgsl`): the pixel's orbit when it escaped (1; 2: in the scaled phase, where it is the center's),
+/// after `steps` steps
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct DeepOutcome {
+    pub(crate) zx: f64,
+    pub(crate) zy: f64,
+    pub(crate) steps: u32,
+    pub(crate) escaped: u32,
+}
 
 /// The sums of a frame on the GPU and the colors of the positions, see `GpuIterator::color_sums`
 pub(crate) struct ColorSums {
