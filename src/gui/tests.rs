@@ -17,7 +17,8 @@ use crate::thumbnails;
 fn wait_for_job(app: &mut MandelbrotApp) {
     let start = std::time::Instant::now();
     while app.is_busy() {
-        assert!(start.elapsed() < Duration::from_secs(60), "the background job did not finish");
+        //(A job that hangs: a render at 32 samples took nearly 60 s on CI's two cores in a debug build, next to the deep tests)
+        assert!(start.elapsed() < Duration::from_secs(300), "the background job did not finish");
         std::thread::sleep(Duration::from_millis(10));
         app.poll_job();
     }
