@@ -2045,7 +2045,12 @@ fn the_quality_presets_go_from_fastest_to_best_with_a_blurred_one_after_1x_4x_8x
     assert_eq!(samples, [1, 1, 2, 4, 4, 8, 8, 16, 16, 32, 64]);
     let blurred: Vec<u8> = Quality::PRESETS.iter().filter(|preset| preset.blurred).map(|preset| preset.samples).collect();
     assert_eq!(blurred, [1, 4, 8, 16], "issue #186");
-    assert_eq!((Quality::PRESETS[1].name(), Quality::PRESETS[4].name()), (String::from("1x + blur (smooth, fast)"), String::from("4x + blur (close to 8x)")));
+    //Issue #272: five recommended tiers, the rest under Advanced
+    let tiers: Vec<String> = Quality::RECOMMENDED.iter().map(|preset| preset.name()).collect();
+    assert_eq!(tiers, ["Performance (1x + blur)", "Medium (4x + blur)", "High (8x + blur)", "Very high (16x + blur)", "Ultra (32x)"]);
+    assert!(Quality::RECOMMENDED.iter().all(|preset| Quality::PRESETS.contains(preset)));
+    let advanced: Vec<String> = Quality::PRESETS.iter().filter(|preset| preset.tier().is_none()).map(|preset| preset.name()).collect();
+    assert_eq!(advanced, ["1x", "2x", "4x", "8x", "16x", "64x"], "64x is advanced, not recommended");
     assert_eq!(Quality { samples: 12, blurred: false }.name(), "12x", "a quality that is not a preset (from the configuration) is named too");
 }
 

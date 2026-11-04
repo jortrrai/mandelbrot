@@ -211,16 +211,45 @@ impl Quality {
         Quality { samples: 16, blurred: true }, Quality { samples: 32, blurred: false }, Quality { samples: 64, blurred: false },
     ];
 
-    /// The name in the list
-    pub(super) fn name(self) -> String {
+    /// The recommended presets, a tier each (issue #272, Jort in review 8): the steps that measured as visible improvements in #225 (Interesting Julia at 4K,
+    /// against 64x: 1x + blur 27.3 dB, 4x + blur 30.5, 16x + blur 35.2, 32x 39.4; 16x, 32x and 64x hard to tell apart in a 2x crop). The other presets, 64x
+    /// among them, are under Advanced
+    pub(super) const RECOMMENDED: [Quality; 5] = [
+        Quality { samples: 1, blurred: true }, Quality { samples: 4, blurred: true }, Quality { samples: 8, blurred: true }, Quality { samples: 16, blurred: true },
+        Quality { samples: 32, blurred: false },
+    ];
+
+    /// The tier of a recommended preset
+    pub(super) fn tier(self) -> Option<&'static str> {
         match (self.samples, self.blurred) {
-            (1, false) => String::from("1x (fastest)"),
-            (1, true) => String::from("1x + blur (smooth, fast)"),
-            (4, true) => String::from("4x + blur (close to 8x)"),
-            (8, true) => String::from("8x + blur (between 8x and 16x)"),
-            (_, true) => format!("{}x + blur", self.samples),
-            (64, false) => String::from("64x (best)"),
-            (samples, false) => format!("{samples}x"),
+            (1, true) => Some("Performance"),
+            (4, true) => Some("Medium"),
+            (8, true) => Some("High"),
+            (16, true) => Some("Very high"),
+            (32, false) => Some("Ultra"),
+            _ => None,
+        }
+    }
+
+    /// The name in the list: the tier and its samples for a recommended preset, the samples for the others
+    pub(super) fn name(self) -> String {
+        let samples = if self.blurred { format!("{}x + blur", self.samples) } else { format!("{}x", self.samples) };
+        match self.tier() {
+            Some(tier) => format!("{tier} ({samples})"),
+            None => samples,
+        }
+    }
+
+    /// The items of a quality list for `chosen`: the recommended presets, then the others under Advanced; `offered` leaves presets out (the blurred ones
+    /// without the blur)
+    pub(super) fn menu(ui: &mut eframe::egui::Ui, chosen: &mut Quality, offered: impl Fn(Quality) -> bool) {
+        for preset in Quality::RECOMMENDED.into_iter().filter(|preset| offered(*preset)) {
+            ui.selectable_value(chosen, preset, preset.name());
+        }
+        ui.separator();
+        ui.weak("Advanced");
+        for preset in Quality::PRESETS.into_iter().filter(|preset| offered(*preset) && preset.tier().is_none()) {
+            ui.selectable_value(chosen, preset, preset.name());
         }
     }
 }
