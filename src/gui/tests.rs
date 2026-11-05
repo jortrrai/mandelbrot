@@ -2218,7 +2218,8 @@ fn chunked_video_app(blend: bool) -> (MandelbrotApp, std::path::PathBuf) {
 fn wait_for_video(app: &mut MandelbrotApp) -> String {
     let (ctx, started) = (egui::Context::default(), std::time::Instant::now());
     while app.video_job.is_some() {
-        assert!(started.elapsed() < Duration::from_secs(120), "the video did not end");
+        //(Only against a hang: the CI runners render the debug build on a few shared cores, where a deep video takes minutes)
+        assert!(started.elapsed() < Duration::from_secs(600), "the video did not end");
         app.poll_video(&ctx);
         std::thread::sleep(Duration::from_millis(1));
     }

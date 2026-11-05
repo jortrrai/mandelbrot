@@ -19,7 +19,7 @@ More in the [gallery](docs/GALLERY.md).
  / _ \/ // / / // / _ \/ __/ __/     '-v-'    Claude Code, beep boop
 /_.__/\_, /  \___/\___/_/  \__/       /|_|\
      /___/
-                                 v0.6.1
+                                 v0.6.2
 ```
 
 ## Quick start
