@@ -26,7 +26,7 @@ jobs:
     # GitHub starts no macOS runner for this repository, so its job waited 15 minutes and was cancelled on every run; release.yml still builds for macOS
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # (A run takes about 10 minutes; without a limit a hung step holds the job for 6 hours)
+    # (A run takes about 10 minutes, once 30 with a slow apt-get; without a limit a hung step holds the job for 6 hours)
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -37,11 +37,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install ffmpeg (Linux)
-        timeout-minutes: 10
+        timeout-minutes: 30
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install ffmpeg (Windows)
-        timeout-minutes: 10
+        timeout-minutes: 30
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y --no-progress
       - run: cargo build --all-targets --verbose
