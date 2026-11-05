@@ -26,6 +26,8 @@ jobs:
     # tests of video files
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # (A run takes about 10 minutes; without a limit a hung step holds the job for 6 hours)
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -35,12 +37,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install ffmpeg (Linux)
+        timeout-minutes: 10
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install ffmpeg (macOS)
+        timeout-minutes: 10
         if: runner.os == 'macOS'
         run: brew install ffmpeg
       - name: Install ffmpeg (Windows)
+        timeout-minutes: 10
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y --no-progress
       - run: cargo build --all-targets --verbose
