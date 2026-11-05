@@ -22,8 +22,8 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
   test:
-    # Linux, Windows and macOS (issue #191; macOS on Apple Silicon runs the generic loops, Linux and Windows the AVX2 ones). ffmpeg is installed for the
-    # tests of video files
+    # Linux and Windows (both run the AVX2 loops). ffmpeg is installed for the tests of video files. macOS (issue #191) is left out: since 4 November
+    # GitHub starts no macOS runner for this repository, so its job waited 15 minutes and was cancelled on every run; release.yml still builds for macOS
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # (A run takes about 10 minutes; without a limit a hung step holds the job for 6 hours)
@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -40,10 +40,6 @@ jobs:
         timeout-minutes: 10
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - name: Install ffmpeg (macOS)
-        timeout-minutes: 10
-        if: runner.os == 'macOS'
-        run: brew install ffmpeg
       - name: Install ffmpeg (Windows)
         timeout-minutes: 10
         if: runner.os == 'Windows'
